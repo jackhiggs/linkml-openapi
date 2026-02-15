@@ -1,0 +1,333 @@
+openapi: 3.1.0
+info:
+  title: bookstore
+  description: A bookstore API demonstrating inheritance, relationships, and constraints.
+  version: 1.0.0
+servers:
+- url: http://localhost:8000
+paths:
+  /books:
+    get:
+      tags:
+      - Book
+      summary: List books
+      operationId: list_books
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+          description: Product title
+        name: title
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      responses:
+        '200':
+          description: List of Book objects
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Book'
+                type: array
+      deprecated: false
+    post:
+      tags:
+      - Book
+      summary: Create a Book
+      operationId: create_book
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Book'
+        required: true
+      responses:
+        '201':
+          description: Book created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '422':
+          description: Validation error
+      deprecated: false
+  /books/{id}:
+    get:
+      tags:
+      - Book
+      summary: Get a Book
+      operationId: get_book
+      responses:
+        '200':
+          description: Book details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          description: Not found
+      deprecated: false
+    put:
+      tags:
+      - Book
+      summary: Update a Book
+      operationId: update_book
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Book'
+        required: true
+      responses:
+        '200':
+          description: Book updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Book'
+        '404':
+          description: Not found
+        '422':
+          description: Validation error
+      deprecated: false
+    delete:
+      tags:
+      - Book
+      summary: Delete a Book
+      operationId: delete_book
+      responses:
+        '204':
+          description: Book deleted
+        '404':
+          description: Not found
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
+      allowEmptyValue: false
+      allowReserved: false
+  /authors:
+    get:
+      tags:
+      - Author
+      summary: List authors
+      operationId: list_authors
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+        name: name
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+          description: Short biography
+        name: biography
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      responses:
+        '200':
+          description: List of Author objects
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Author'
+                type: array
+      deprecated: false
+    post:
+      tags:
+      - Author
+      summary: Create a Author
+      operationId: create_author
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Author'
+        required: true
+      responses:
+        '201':
+          description: Author created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Author'
+        '422':
+          description: Validation error
+      deprecated: false
+  /authors/{id}:
+    get:
+      tags:
+      - Author
+      summary: Get a Author
+      operationId: get_author
+      responses:
+        '200':
+          description: Author details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Author'
+        '404':
+          description: Not found
+      deprecated: false
+    put:
+      tags:
+      - Author
+      summary: Update a Author
+      operationId: update_author
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Author'
+        required: true
+      responses:
+        '200':
+          description: Author updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Author'
+        '404':
+          description: Not found
+        '422':
+          description: Validation error
+      deprecated: false
+    delete:
+      tags:
+      - Author
+      summary: Delete a Author
+      operationId: delete_author
+      responses:
+        '204':
+          description: Author deleted
+        '404':
+          description: Not found
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
+      allowEmptyValue: false
+      allowReserved: false
+components:
+  schemas:
+    Product:
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+          description: Product title
+        price:
+          type: number
+          minimum: 0.0
+          format: float
+          description: Price in USD
+      type: object
+      required:
+      - id
+      - title
+      - price
+      description: An abstract product in the store
+    Book:
+      allOf:
+      - $ref: '#/components/schemas/Product'
+      - properties:
+          isbn:
+            type: string
+            pattern: ^\d{13}$
+            description: 13-digit ISBN
+          page_count:
+            type: integer
+            maximum: 10000.0
+            minimum: 1.0
+          authors:
+            items:
+              $ref: '#/components/schemas/Author'
+            type: array
+            description: Authors of the book
+          id:
+            type: string
+          title:
+            type: string
+            description: Product title
+          price:
+            type: number
+            minimum: 0.0
+            format: float
+            description: Price in USD
+        type: object
+        required:
+        - isbn
+        - id
+        - title
+        - price
+      description: A book for sale
+    Author:
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        biography:
+          type: string
+          description: Short biography
+      type: object
+      required:
+      - id
+      - name
+      description: A book author
+

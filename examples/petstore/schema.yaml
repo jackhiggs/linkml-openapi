@@ -1,0 +1,99 @@
+id: https://example.org/petstore
+name: petstore
+title: Petstore API
+description: A pet store API demonstrating custom paths, operation limiting, path variables, query params, and enums.
+
+prefixes:
+  linkml: https://w3id.org/linkml/
+
+default_range: string
+
+classes:
+  Pet:
+    description: A pet available in the store
+    annotations:
+      openapi.resource: "true"
+      openapi.path: pets
+      openapi.operations: "list,create,read,update,delete"
+    attributes:
+      id:
+        identifier: true
+        range: integer
+        required: true
+        description: Unique pet identifier
+      name:
+        range: string
+        required: true
+        description: Name of the pet
+      status:
+        range: PetStatus
+        description: Current availability status
+      species:
+        range: string
+        description: Species of the pet
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: "true"
+      name:
+        annotations:
+          openapi.query_param: "true"
+      status:
+        annotations:
+          openapi.query_param: "true"
+
+  Store:
+    description: A physical store location
+    annotations:
+      openapi.resource: "true"
+      openapi.path: stores
+      openapi.operations: "list,read"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      name:
+        range: string
+        required: true
+      city:
+        range: string
+
+  Owner:
+    description: A pet owner
+    annotations:
+      openapi.resource: "true"
+      openapi.path: owners
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      name:
+        range: string
+        required: true
+      email:
+        range: string
+        pattern: "^\\S+@\\S+\\.\\S+$"
+      pets:
+        range: Pet
+        multivalued: true
+        description: Pets owned by this person
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: "true"
+      name:
+        annotations:
+          openapi.query_param: "true"
+
+enums:
+  PetStatus:
+    description: Availability status of a pet
+    permissible_values:
+      AVAILABLE:
+        description: Available for adoption
+      PENDING:
+        description: Adoption pending
+      SOLD:
+        description: Already adopted

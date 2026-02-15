@@ -1,0 +1,165 @@
+openapi: 3.1.0
+info:
+  title: minimal
+  description: A minimal schema with no annotations to demonstrate zero-config defaults.
+  version: 1.0.0
+servers:
+- url: http://localhost:8000
+paths:
+  /items:
+    get:
+      tags:
+      - Item
+      summary: List items
+      operationId: list_items
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+        name: name
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+        name: description
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: boolean
+        name: active
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      responses:
+        '200':
+          description: List of Item objects
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Item'
+                type: array
+      deprecated: false
+    post:
+      tags:
+      - Item
+      summary: Create a Item
+      operationId: create_item
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Item'
+        required: true
+      responses:
+        '201':
+          description: Item created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Item'
+        '422':
+          description: Validation error
+      deprecated: false
+  /items/{id}:
+    get:
+      tags:
+      - Item
+      summary: Get a Item
+      operationId: get_item
+      responses:
+        '200':
+          description: Item details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Item'
+        '404':
+          description: Not found
+      deprecated: false
+    put:
+      tags:
+      - Item
+      summary: Update a Item
+      operationId: update_item
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Item'
+        required: true
+      responses:
+        '200':
+          description: Item updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Item'
+        '404':
+          description: Not found
+        '422':
+          description: Validation error
+      deprecated: false
+    delete:
+      tags:
+      - Item
+      summary: Delete a Item
+      operationId: delete_item
+      responses:
+        '204':
+          description: Item deleted
+        '404':
+          description: Not found
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
+      allowEmptyValue: false
+      allowReserved: false
+components:
+  schemas:
+    Item:
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        active:
+          type: boolean
+      type: object
+      required:
+      - id
+      - name
+      description: A simple item
+

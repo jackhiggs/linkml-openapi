@@ -1,0 +1,405 @@
+openapi: 3.1.0
+info:
+  title: petstore
+  description: A pet store API demonstrating custom paths, operation limiting, path
+    variables, query params, and enums.
+  version: 1.0.0
+servers:
+- url: http://localhost:8000
+paths:
+  /pets:
+    get:
+      tags:
+      - Pet
+      summary: List pets
+      operationId: list_pets
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+          description: Name of the pet
+        name: name
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          allOf:
+          - $ref: '#/components/schemas/PetStatus'
+          description: Current availability status
+        name: status
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      responses:
+        '200':
+          description: List of Pet objects
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Pet'
+                type: array
+      deprecated: false
+    post:
+      tags:
+      - Pet
+      summary: Create a Pet
+      operationId: create_pet
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+        required: true
+      responses:
+        '201':
+          description: Pet created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '422':
+          description: Validation error
+      deprecated: false
+  /pets/{id}:
+    get:
+      tags:
+      - Pet
+      summary: Get a Pet
+      operationId: get_pet
+      responses:
+        '200':
+          description: Pet details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '404':
+          description: Not found
+      deprecated: false
+    put:
+      tags:
+      - Pet
+      summary: Update a Pet
+      operationId: update_pet
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+        required: true
+      responses:
+        '200':
+          description: Pet updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '404':
+          description: Not found
+        '422':
+          description: Validation error
+      deprecated: false
+    delete:
+      tags:
+      - Pet
+      summary: Delete a Pet
+      operationId: delete_pet
+      responses:
+        '204':
+          description: Pet deleted
+        '404':
+          description: Not found
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: integer
+        description: Unique pet identifier
+      name: id
+      in: path
+      allowEmptyValue: false
+      allowReserved: false
+  /stores:
+    get:
+      tags:
+      - Store
+      summary: List stores
+      operationId: list_stores
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+        name: name
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+        name: city
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      responses:
+        '200':
+          description: List of Store objects
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Store'
+                type: array
+      deprecated: false
+  /stores/{id}:
+    get:
+      tags:
+      - Store
+      summary: Get a Store
+      operationId: get_store
+      responses:
+        '200':
+          description: Store details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Store'
+        '404':
+          description: Not found
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
+      allowEmptyValue: false
+      allowReserved: false
+  /owners:
+    get:
+      tags:
+      - Owner
+      summary: List owners
+      operationId: list_owners
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+        name: name
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      responses:
+        '200':
+          description: List of Owner objects
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Owner'
+                type: array
+      deprecated: false
+    post:
+      tags:
+      - Owner
+      summary: Create a Owner
+      operationId: create_owner
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Owner'
+        required: true
+      responses:
+        '201':
+          description: Owner created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Owner'
+        '422':
+          description: Validation error
+      deprecated: false
+  /owners/{id}:
+    get:
+      tags:
+      - Owner
+      summary: Get a Owner
+      operationId: get_owner
+      responses:
+        '200':
+          description: Owner details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Owner'
+        '404':
+          description: Not found
+      deprecated: false
+    put:
+      tags:
+      - Owner
+      summary: Update a Owner
+      operationId: update_owner
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Owner'
+        required: true
+      responses:
+        '200':
+          description: Owner updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Owner'
+        '404':
+          description: Not found
+        '422':
+          description: Validation error
+      deprecated: false
+    delete:
+      tags:
+      - Owner
+      summary: Delete a Owner
+      operationId: delete_owner
+      responses:
+        '204':
+          description: Owner deleted
+        '404':
+          description: Not found
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
+      allowEmptyValue: false
+      allowReserved: false
+components:
+  schemas:
+    Pet:
+      properties:
+        id:
+          type: integer
+          description: Unique pet identifier
+        name:
+          type: string
+          description: Name of the pet
+        status:
+          allOf:
+          - $ref: '#/components/schemas/PetStatus'
+          description: Current availability status
+        species:
+          type: string
+          description: Species of the pet
+      type: object
+      required:
+      - id
+      - name
+      description: A pet available in the store
+    Store:
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        city:
+          type: string
+      type: object
+      required:
+      - id
+      - name
+      description: A physical store location
+    Owner:
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        email:
+          type: string
+          pattern: ^\S+@\S+\.\S+$
+        pets:
+          items:
+            $ref: '#/components/schemas/Pet'
+          type: array
+          description: Pets owned by this person
+      type: object
+      required:
+      - id
+      - name
+      description: A pet owner
+    PetStatus:
+      type: string
+      enum:
+      - AVAILABLE
+      - PENDING
+      - SOLD
+      description: Availability status of a pet
+

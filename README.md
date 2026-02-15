@@ -333,6 +333,22 @@ This generates:
 - `Address` has only `list`, `read` due to `openapi.operations`.
 - Person's query params are annotation-driven (`name`, `age`). Address has no `openapi.query_param` annotations, so params are auto-inferred.
 
+## Examples
+
+The `examples/` directory contains end-to-end examples with LinkML input schemas and their generated OpenAPI output:
+
+| Example | Description |
+|---------|-------------|
+| [`petstore/`](examples/petstore/) | Classic API with custom paths, operation limiting, query params, and enums |
+| [`bookstore/`](examples/bookstore/) | Inheritance (`is_a`), multivalued references, and constraints (`pattern`, `minimum_value`) |
+| [`minimal/`](examples/minimal/) | Single class with zero annotations — shows auto-inferred endpoints and query params |
+
+Each directory contains a `schema.yaml` (LinkML input) and `openapi.yaml` (generated output). Regenerate all outputs with:
+
+```bash
+bash examples/generate.sh
+```
+
 ## Development
 
 ```bash

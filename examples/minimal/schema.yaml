@@ -1,0 +1,25 @@
+id: https://example.org/minimal
+name: minimal
+title: Minimal API
+description: A minimal schema with no annotations to demonstrate zero-config defaults.
+
+prefixes:
+  linkml: https://w3id.org/linkml/
+
+default_range: string
+
+classes:
+  Item:
+    description: A simple item
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      name:
+        range: string
+        required: true
+      description:
+        range: string
+      active:
+        range: boolean

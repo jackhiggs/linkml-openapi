@@ -1,0 +1,73 @@
+id: https://example.org/bookstore
+name: bookstore
+title: Bookstore API
+description: A bookstore API demonstrating inheritance, relationships, and constraints.
+
+prefixes:
+  linkml: https://w3id.org/linkml/
+
+default_range: string
+
+classes:
+  Product:
+    abstract: true
+    description: An abstract product in the store
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      title:
+        range: string
+        required: true
+        description: Product title
+      price:
+        range: float
+        required: true
+        minimum_value: 0
+        description: Price in USD
+
+  Book:
+    is_a: Product
+    description: A book for sale
+    annotations:
+      openapi.resource: "true"
+      openapi.path: books
+    attributes:
+      isbn:
+        range: string
+        required: true
+        pattern: "^\\d{13}$"
+        description: 13-digit ISBN
+      page_count:
+        range: integer
+        minimum_value: 1
+        maximum_value: 10000
+      authors:
+        range: Author
+        multivalued: true
+        description: Authors of the book
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: "true"
+      title:
+        annotations:
+          openapi.query_param: "true"
+
+  Author:
+    description: A book author
+    annotations:
+      openapi.resource: "true"
+      openapi.path: authors
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      name:
+        range: string
+        required: true
+      biography:
+        range: string
+        description: Short biography
