@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "linkml-openapi"
+version = "0.1.0"
+description = "Generate OpenAPI 3.1 specifications from LinkML schemas"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "linkml>=1.7.0",
+    "linkml-runtime>=1.7.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+gen-openapi = "linkml_openapi.cli:main"
+
+[project.entry-points."linkml.generators"]
+openapi = "linkml_openapi.generator:OpenAPIGenerator"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

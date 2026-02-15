@@ -1,0 +1,79 @@
+id: https://example.org/person-schema
+name: person_schema
+title: Person Schema
+description: A test schema for persons
+
+prefixes:
+  linkml: https://w3id.org/linkml/
+  ex: https://example.org/
+
+default_range: string
+
+classes:
+  NamedThing:
+    abstract: true
+    description: A generic named thing
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      name:
+        range: string
+        required: true
+      description:
+        range: string
+
+  Person:
+    is_a: NamedThing
+    description: A person
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      email:
+        range: string
+        pattern: "^\\S+@\\S+\\.\\S+$"
+      age:
+        range: integer
+        minimum_value: 0
+        maximum_value: 200
+      status:
+        range: PersonStatus
+      addresses:
+        range: Address
+        multivalued: true
+
+  Address:
+    description: A mailing address
+    annotations:
+      openapi.resource: "true"
+      openapi.path: addresses
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      street:
+        range: string
+      city:
+        range: string
+      postal_code:
+        range: string
+
+  Organization:
+    is_a: NamedThing
+    description: An organization
+    attributes:
+      founding_date:
+        range: date
+
+enums:
+  PersonStatus:
+    description: Status of a person
+    permissible_values:
+      ALIVE:
+        description: Living
+      DEAD:
+        description: Deceased
+      UNKNOWN:
+        description: Unknown
