@@ -1,5 +1,9 @@
 # linkml-openapi
 
+[![CI](https://github.com/jackhiggs/linkml-openapi/actions/workflows/ci.yml/badge.svg)](https://github.com/jackhiggs/linkml-openapi/actions/workflows/ci.yml)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
 Generate [OpenAPI 3.1](https://spec.openapis.org/oas/v3.1.0) specifications from [LinkML](https://linkml.io/) schemas.
 
 ## Features
@@ -357,3 +361,7 @@ pytest tests/ -v
 ruff check src/ tests/
 ruff format src/ tests/
 ```
+
+## License
+
+MIT

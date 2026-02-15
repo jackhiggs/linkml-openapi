@@ -64,6 +64,13 @@ def _to_snake_case(name: str) -> str:
     return s.lower()
 
 
+def _is_truthy(value: object) -> bool:
+    """Check if an annotation value represents a boolean true."""
+    if isinstance(value, bool):
+        return value
+    return str(value).lower() == "true"
+
+
 def _to_path_segment(name: str) -> str:
     """Convert class name to URL path segment: CamelCase → snake_case → plural."""
     return _pluralize(_to_snake_case(name))
@@ -276,7 +283,7 @@ class OpenAPIGenerator(Generator):
             annotations = (
                 {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
             )
-            if annotations.get("openapi.resource") in (True, "true", "True"):
+            if _is_truthy(annotations.get("openapi.resource", False)):
                 annotated.append(class_name)
 
         if annotated:
@@ -321,7 +328,7 @@ class OpenAPIGenerator(Generator):
         annotated = []
         for slot in sv.class_induced_slots(cls.name):
             val = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
-            if val and val.lower() == "true":
+            if val and _is_truthy(val):
                 annotated.append(slot)
         if annotated:
             return annotated
@@ -476,7 +483,7 @@ class OpenAPIGenerator(Generator):
         annotated_params = []
         for slot in sv.class_induced_slots(cls.name):
             val = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
-            if val and val.lower() == "true":
+            if val and _is_truthy(val):
                 annotated_params.append(
                     Parameter(
                         name=slot.name,

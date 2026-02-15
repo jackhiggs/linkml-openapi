@@ -27,7 +27,7 @@ def cli(yamlfile, resource_filter=(), **kwargs):
     """Generate OpenAPI 3.1 specification from a LinkML schema."""
     resource_filter = list(resource_filter) if resource_filter else None
     gen = OpenAPIGenerator(yamlfile, resource_filter=resource_filter, **kwargs)
-    click.echo(gen.serialize(**kwargs))
+    click.echo(gen.serialize())
 
 
 def main():
