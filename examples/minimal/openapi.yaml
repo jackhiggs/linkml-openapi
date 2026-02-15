@@ -143,8 +143,6 @@ paths:
         type: string
       name: id
       in: path
-      allowEmptyValue: false
-      allowReserved: false
 components:
   schemas:
     Item:

@@ -97,9 +97,32 @@ class OpenAPIGenerator(Generator):
         """Generate and serialize the OpenAPI spec."""
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
+        self._strip_invalid_parameter_fields(raw)
         if self.format == "json":
             return json.dumps(raw, indent=2) + "\n"
         return yaml.dump(raw, default_flow_style=False, sort_keys=False)
+
+    @staticmethod
+    def _strip_invalid_parameter_fields(spec: dict) -> None:
+        """Remove fields that openapi-pydantic defaults but are invalid per OpenAPI 3.1.
+
+        ``allowEmptyValue`` is only valid for query parameters.
+        ``allowReserved`` is only valid for query parameters with a schema.
+        """
+        for path_item in (spec.get("paths") or {}).values():
+            for param_list_key in ("parameters",):
+                for param in path_item.get(param_list_key) or []:
+                    if param.get("in") != "query":
+                        param.pop("allowEmptyValue", None)
+                        param.pop("allowReserved", None)
+            for method in ("get", "put", "post", "delete", "patch", "options", "head", "trace"):
+                op = path_item.get(method)
+                if not op:
+                    continue
+                for param in op.get("parameters") or []:
+                    if param.get("in") != "query":
+                        param.pop("allowEmptyValue", None)
+                        param.pop("allowReserved", None)
 
     def _build_openapi(self) -> OpenAPI:
         """Build the complete OpenAPI model."""

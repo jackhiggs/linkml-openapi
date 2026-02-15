@@ -140,8 +140,6 @@ paths:
         description: Unique pet identifier
       name: id
       in: path
-      allowEmptyValue: false
-      allowReserved: false
   /stores:
     get:
       tags:
@@ -216,8 +214,6 @@ paths:
         type: string
       name: id
       in: path
-      allowEmptyValue: false
-      allowReserved: false
   /owners:
     get:
       tags:
@@ -339,8 +335,6 @@ paths:
         type: string
       name: id
       in: path
-      allowEmptyValue: false
-      allowReserved: false
 components:
   schemas:
     Pet:

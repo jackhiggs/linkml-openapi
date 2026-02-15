@@ -128,8 +128,6 @@ paths:
         type: string
       name: id
       in: path
-      allowEmptyValue: false
-      allowReserved: false
   /authors:
     get:
       tags:
@@ -260,8 +258,6 @@ paths:
         type: string
       name: id
       in: path
-      allowEmptyValue: false
-      allowReserved: false
 components:
   schemas:
     Product:
