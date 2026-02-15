@@ -300,18 +300,14 @@ class OpenAPIGenerator(Generator):
 
     def _get_path_segment(self, cls: ClassDefinition) -> str:
         """Get the URL path segment for a class."""
-        annotations = (
-            {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-        )
+        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
         if "openapi.path" in annotations:
             return annotations["openapi.path"].lstrip("/")
         return _to_path_segment(cls.name)
 
     def _get_operations(self, cls: ClassDefinition) -> list[str]:
         """Get the list of CRUD operations for a class."""
-        annotations = (
-            {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-        )
+        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
         if "openapi.operations" in annotations:
             ops = annotations["openapi.operations"]
             if isinstance(ops, str):
@@ -360,9 +356,7 @@ class OpenAPIGenerator(Generator):
                     description=f"{class_name} created",
                     content={
                         "application/json": MediaType(
-                            media_type_schema=Reference(
-                                ref=f"#/components/schemas/{class_name}"
-                            )
+                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
                         )
                     },
                 ),
@@ -380,9 +374,7 @@ class OpenAPIGenerator(Generator):
                     description=f"{class_name} details",
                     content={
                         "application/json": MediaType(
-                            media_type_schema=Reference(
-                                ref=f"#/components/schemas/{class_name}"
-                            )
+                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
                         )
                     },
                 ),
@@ -408,9 +400,7 @@ class OpenAPIGenerator(Generator):
                     description=f"{class_name} updated",
                     content={
                         "application/json": MediaType(
-                            media_type_schema=Reference(
-                                ref=f"#/components/schemas/{class_name}"
-                            )
+                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
                         )
                     },
                 ),
