@@ -7,27 +7,45 @@ Converts LinkML schema definitions into OpenAPI 3.1 specifications with:
 """
 
 import json
+import os
 import re
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 import yaml
+from linkml.utils.generator import Generator
 from linkml_runtime.linkml_model import ClassDefinition, SlotDefinition
-from linkml_runtime.utils.schemaview import SchemaView
+from openapi_pydantic import (
+    Components,
+    DataType,
+    Info,
+    MediaType,
+    OpenAPI,
+    Operation,
+    Parameter,
+    ParameterLocation,
+    PathItem,
+    Reference,
+    RequestBody,
+    Response,
+    Schema,
+    Server,
+)
 
-# LinkML range → OpenAPI/JSON Schema type mapping
-RANGE_TYPE_MAP = {
-    "string": {"type": "string"},
-    "integer": {"type": "integer"},
-    "float": {"type": "number", "format": "float"},
-    "double": {"type": "number", "format": "double"},
-    "boolean": {"type": "boolean"},
-    "date": {"type": "string", "format": "date"},
-    "datetime": {"type": "string", "format": "date-time"},
-    "uri": {"type": "string", "format": "uri"},
-    "uriorcurie": {"type": "string", "format": "uri"},
-    "decimal": {"type": "number"},
-    "ncname": {"type": "string"},
-    "nodeidentifier": {"type": "string", "format": "uri"},
+# LinkML range → OpenAPI DataType mapping
+RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
+    "string": {"type": DataType.STRING},
+    "integer": {"type": DataType.INTEGER},
+    "float": {"type": DataType.NUMBER, "format": "float"},
+    "double": {"type": DataType.NUMBER, "format": "double"},
+    "boolean": {"type": DataType.BOOLEAN},
+    "date": {"type": DataType.STRING, "format": "date"},
+    "datetime": {"type": DataType.STRING, "format": "date-time"},
+    "uri": {"type": DataType.STRING, "format": "uri"},
+    "uriorcurie": {"type": DataType.STRING, "format": "uri"},
+    "decimal": {"type": DataType.NUMBER},
+    "ncname": {"type": DataType.STRING},
+    "nodeidentifier": {"type": DataType.STRING, "format": "uri"},
 }
 
 
@@ -51,222 +69,207 @@ def _to_path_segment(name: str) -> str:
     return _pluralize(_to_snake_case(name))
 
 
-class OpenAPIGenerator:
+@dataclass
+class OpenAPIGenerator(Generator):
     """Generate an OpenAPI 3.1 specification from a LinkML schema."""
 
-    def __init__(
-        self,
-        schema_view: SchemaView,
-        *,
-        title: str | None = None,
-        version: str = "1.0.0",
-        server_url: str = "http://localhost:8000",
-        resource_filter: list[str] | None = None,
-    ):
-        """Initialize the generator.
+    # ClassVar overrides
+    generatorname: ClassVar[str] = os.path.basename(__file__)
+    generatorversion: ClassVar[str] = "0.1.0"
+    valid_formats: ClassVar[list[str]] = ["yaml", "json"]
+    uses_schemaloader: ClassVar[bool] = False
+    file_extension: ClassVar[str] = "openapi.yaml"
 
-        Args:
-            schema_view: LinkML SchemaView instance
-            title: API title (defaults to schema name)
-            version: API version string
-            server_url: Base server URL
-            resource_filter: If provided, only generate endpoints for these class names.
-                             If None, generate for classes annotated with openapi.resource: true,
-                             or all non-mixin non-abstract classes if none are annotated.
-        """
-        self.sv = schema_view
-        self.schema = schema_view.schema
-        self.title = title or str(self.schema.name) or "API"
-        self.version = version
-        self.server_url = server_url
-        self.resource_filter = resource_filter
+    # Generator-specific options
+    api_title: str | None = None
+    api_version: str = "1.0.0"
+    server_url: str = "http://localhost:8000"
+    resource_filter: list[str] | None = None
 
-    def generate(self) -> dict[str, Any]:
-        """Generate the complete OpenAPI 3.1 specification."""
-        spec: dict[str, Any] = {
-            "openapi": "3.1.0",
-            "info": {
-                "title": self.title,
-                "version": self.version,
-            },
-            "servers": [{"url": self.server_url}],
-            "paths": {},
-            "components": {"schemas": {}},
-        }
+    def serialize(self, **kwargs) -> str:
+        """Generate and serialize the OpenAPI spec."""
+        spec = self._build_openapi()
+        raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
+        if self.format == "json":
+            return json.dumps(raw, indent=2) + "\n"
+        return yaml.dump(raw, default_flow_style=False, sort_keys=False)
 
-        if self.schema.description:
-            spec["info"]["description"] = self.schema.description
+    def _build_openapi(self) -> OpenAPI:
+        """Build the complete OpenAPI model."""
+        sv = self.schemaview
+        title = self.api_title or str(sv.schema.name) or "API"
 
-        # Generate component schemas for all classes
-        for class_name in self.sv.all_classes():
-            cls = self.sv.get_class(class_name)
-            schema_obj = self._class_to_schema(cls)
-            spec["components"]["schemas"][class_name] = schema_obj
+        info = Info(title=title, version=self.api_version)
+        if sv.schema.description:
+            info.description = sv.schema.description
 
-        # Generate paths for resource classes
-        resource_classes = self._get_resource_classes()
-        for class_name in resource_classes:
-            cls = self.sv.get_class(class_name)
+        schemas: dict[str, Schema | Reference] = {}
+
+        # Component schemas for all classes
+        for class_name in sv.all_classes():
+            cls = sv.get_class(class_name)
+            schemas[class_name] = self._class_to_schema(cls)
+
+        # Enum schemas
+        for enum_name in sv.all_enums():
+            enum_def = sv.get_enum(enum_name)
+            schemas[enum_name] = self._enum_to_schema(enum_def)
+
+        # Build paths for resource classes
+        paths: dict[str, PathItem] = {}
+        for class_name in self._get_resource_classes():
+            cls = sv.get_class(class_name)
             id_slot = self._get_identifier_slot(cls)
             path_segment = self._get_path_segment(cls)
             operations = self._get_operations(cls)
 
-            # Collection path: /resources
+            # Collection path
             collection_path = f"/{path_segment}"
-            spec["paths"][collection_path] = {}
-
+            collection_item = PathItem()
             if "list" in operations:
-                spec["paths"][collection_path]["get"] = self._make_list_operation(cls, class_name)
+                collection_item.get = self._make_list_operation(cls, class_name)
             if "create" in operations:
-                spec["paths"][collection_path]["post"] = self._make_create_operation(
-                    cls, class_name
-                )
+                collection_item.post = self._make_create_operation(cls, class_name)
+            paths[collection_path] = collection_item
 
-            # Item path: /resources/{id}
+            # Item path
             if id_slot:
-                id_param_name = id_slot.name
-                item_path = f"/{path_segment}/{{{id_param_name}}}"
-                spec["paths"][item_path] = {}
-                path_param = {
-                    "name": id_param_name,
-                    "in": "path",
-                    "required": True,
-                    "schema": self._slot_to_schema(id_slot),
-                }
-                spec["paths"][item_path]["parameters"] = [path_param]
-
+                id_name = id_slot.name
+                item_path = f"/{path_segment}/{{{id_name}}}"
+                path_param = Parameter(
+                    name=id_name,
+                    param_in=ParameterLocation.PATH,
+                    required=True,
+                    param_schema=self._slot_to_schema(id_slot),
+                )
+                item = PathItem(parameters=[path_param])
                 if "read" in operations:
-                    spec["paths"][item_path]["get"] = self._make_read_operation(cls, class_name)
+                    item.get = self._make_read_operation(cls, class_name)
                 if "update" in operations:
-                    spec["paths"][item_path]["put"] = self._make_update_operation(cls, class_name)
+                    item.put = self._make_update_operation(cls, class_name)
                 if "delete" in operations:
-                    spec["paths"][item_path]["delete"] = self._make_delete_operation(
-                        cls, class_name
-                    )
+                    item.delete = self._make_delete_operation(cls, class_name)
+                paths[item_path] = item
 
-        # Generate enum schemas
-        for enum_name in self.sv.all_enums():
-            enum_def = self.sv.get_enum(enum_name)
-            spec["components"]["schemas"][enum_name] = self._enum_to_schema(enum_def)
-
-        return spec
-
-    def serialize(self, format: str = "yaml") -> str:
-        """Generate and serialize the OpenAPI spec.
-
-        Args:
-            format: Output format — "yaml" or "json"
-        """
-        spec = self.generate()
-        # Round-trip through JSON to convert LinkML types to plain Python
-        spec = json.loads(json.dumps(spec, default=str))
-        if format == "json":
-            return json.dumps(spec, indent=2)
-        return yaml.dump(spec, default_flow_style=False, sort_keys=False)
+        return OpenAPI(
+            openapi="3.1.0",
+            info=info,
+            servers=[Server(url=self.server_url)],
+            paths=paths,
+            components=Components(schemas=schemas),
+        )
 
     # --- Schema generation ---
 
-    def _class_to_schema(self, cls: ClassDefinition) -> dict[str, Any]:
-        """Convert a LinkML class to a JSON Schema object for OpenAPI components."""
-        schema: dict[str, Any] = {"type": "object"}
+    def _class_to_schema(self, cls: ClassDefinition) -> Schema:
+        """Convert a LinkML class to a JSON Schema object."""
+        sv = self.schemaview
 
-        if cls.description:
-            schema["description"] = cls.description
+        properties: dict[str, Schema | Reference] = {}
+        required: list[str] = []
 
-        # Handle inheritance via allOf
-        if cls.is_a:
-            schema = {
-                "allOf": [
-                    {"$ref": f"#/components/schemas/{cls.is_a}"},
-                    {"type": "object"},
-                ]
-            }
-            if cls.description:
-                schema["description"] = cls.description
-            props_target = schema["allOf"][1]
-        else:
-            props_target = schema
-
-        properties = {}
-        required = []
-
-        for slot in self.sv.class_induced_slots(cls.name):
-            slot_schema = self._slot_to_schema(slot)
-            properties[slot.name] = slot_schema
-
+        for slot in sv.class_induced_slots(cls.name):
+            properties[slot.name] = self._slot_to_schema(slot)
             if slot.required:
                 required.append(slot.name)
 
+        if cls.is_a:
+            local_schema = Schema(type=DataType.OBJECT)
+            if properties:
+                local_schema.properties = properties
+            if required:
+                local_schema.required = required
+
+            schema = Schema(
+                allOf=[
+                    Reference(ref=f"#/components/schemas/{cls.is_a}"),
+                    local_schema,
+                ]
+            )
+            if cls.description:
+                schema.description = cls.description
+            return schema
+
+        schema = Schema(type=DataType.OBJECT)
+        if cls.description:
+            schema.description = cls.description
         if properties:
-            props_target["properties"] = properties
+            schema.properties = properties
         if required:
-            props_target["required"] = required
-
+            schema.required = required
         return schema
 
-    def _slot_to_schema(self, slot: SlotDefinition) -> dict[str, Any]:
+    def _slot_to_schema(self, slot: SlotDefinition) -> Schema | Reference:
         """Convert a LinkML slot to a JSON Schema property."""
+        sv = self.schemaview
         range_name = slot.range or "string"
-        schema: dict[str, Any] = {}
 
-        if slot.description:
-            schema["description"] = slot.description
-
-        # Check if range is a class or enum
-        if self.sv.get_class(range_name):
-            ref = {"$ref": f"#/components/schemas/{range_name}"}
+        # Determine the base schema/ref
+        if sv.get_class(range_name) or sv.get_enum(range_name):
+            ref = Reference(ref=f"#/components/schemas/{range_name}")
             if slot.multivalued:
-                schema.update({"type": "array", "items": ref})
+                base = Schema(type=DataType.ARRAY, items=ref)
             else:
-                schema.update(ref)
-        elif self.sv.get_enum(range_name):
-            ref = {"$ref": f"#/components/schemas/{range_name}"}
-            if slot.multivalued:
-                schema.update({"type": "array", "items": ref})
-            else:
-                schema.update(ref)
+                base = ref
         else:
-            # Primitive type
-            type_schema = RANGE_TYPE_MAP.get(range_name, {"type": "string"})
+            type_info = RANGE_TYPE_MAP.get(range_name, {"type": DataType.STRING})
+            inner = Schema(**type_info)
             if slot.multivalued:
-                schema.update({"type": "array", "items": type_schema})
+                base = Schema(type=DataType.ARRAY, items=inner)
             else:
-                schema.update(type_schema)
+                base = inner
 
-        if slot.pattern:
-            schema["pattern"] = slot.pattern
-        if slot.minimum_value is not None:
-            schema["minimum"] = slot.minimum_value
-        if slot.maximum_value is not None:
-            schema["maximum"] = slot.maximum_value
+        # Add constraints and description to a Schema wrapper if base is a Reference
+        has_extras = (
+            slot.description
+            or slot.pattern
+            or slot.minimum_value is not None
+            or slot.maximum_value is not None
+        )
+        if isinstance(base, Reference) and has_extras:
+            # Wrap in allOf to add constraints alongside a $ref
+            schema = Schema(allOf=[base])
+            if slot.description:
+                schema.description = slot.description
+            return schema
 
-        return schema
+        if isinstance(base, Schema):
+            if slot.description:
+                base.description = slot.description
+            if slot.pattern:
+                base.pattern = slot.pattern
+            if slot.minimum_value is not None:
+                base.exclusiveMinimum = None
+                base.minimum = slot.minimum_value
+            if slot.maximum_value is not None:
+                base.exclusiveMaximum = None
+                base.maximum = slot.maximum_value
 
-    def _enum_to_schema(self, enum_def) -> dict[str, Any]:
+        return base
+
+    def _enum_to_schema(self, enum_def) -> Schema:
         """Convert a LinkML enum to a JSON Schema enum."""
-        schema: dict[str, Any] = {"type": "string"}
+        schema = Schema(type=DataType.STRING)
         if enum_def.description:
-            schema["description"] = enum_def.description
+            schema.description = enum_def.description
 
-        values = []
-        for pv in enum_def.permissible_values.values():
-            values.append(pv.text)
+        values = [pv.text for pv in enum_def.permissible_values.values()]
         if values:
-            schema["enum"] = values
-
+            schema.enum = values
         return schema
 
     # --- Resource/path helpers ---
 
     def _get_resource_classes(self) -> list[str]:
         """Determine which classes should have REST endpoints."""
+        sv = self.schemaview
+
         if self.resource_filter:
             return self.resource_filter
 
-        # Check for openapi.resource annotation
         annotated = []
-        for class_name in self.sv.all_classes():
-            cls = self.sv.get_class(class_name)
+        for class_name in sv.all_classes():
+            cls = sv.get_class(class_name)
             annotations = (
                 {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
             )
@@ -276,36 +279,39 @@ class OpenAPIGenerator:
         if annotated:
             return annotated
 
-        # Default: all non-abstract, non-mixin classes with at least one attribute
         return [
             name
-            for name in self.sv.all_classes()
-            if not self.sv.get_class(name).abstract
-            and not self.sv.get_class(name).mixin
-            and list(self.sv.class_induced_slots(name))
+            for name in sv.all_classes()
+            if not sv.get_class(name).abstract
+            and not sv.get_class(name).mixin
+            and list(sv.class_induced_slots(name))
         ]
 
     def _get_identifier_slot(self, cls: ClassDefinition) -> SlotDefinition | None:
         """Find the identifier slot for a class."""
-        for slot in self.sv.class_induced_slots(cls.name):
+        sv = self.schemaview
+        for slot in sv.class_induced_slots(cls.name):
             if slot.identifier:
                 return slot
-        # Fallback: look for a slot named "id"
-        for slot in self.sv.class_induced_slots(cls.name):
+        for slot in sv.class_induced_slots(cls.name):
             if slot.name == "id":
                 return slot
         return None
 
     def _get_path_segment(self, cls: ClassDefinition) -> str:
         """Get the URL path segment for a class."""
-        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
+        annotations = (
+            {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
+        )
         if "openapi.path" in annotations:
             return annotations["openapi.path"].lstrip("/")
         return _to_path_segment(cls.name)
 
     def _get_operations(self, cls: ClassDefinition) -> list[str]:
         """Get the list of CRUD operations for a class."""
-        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
+        annotations = (
+            {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
+        )
         if "openapi.operations" in annotations:
             ops = annotations["openapi.operations"]
             if isinstance(ops, str):
@@ -315,124 +321,142 @@ class OpenAPIGenerator:
 
     # --- Operation builders ---
 
-    def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> dict:
-        return {
-            "summary": f"List {_to_path_segment(class_name).replace('_', ' ')}",
-            "operationId": f"list_{_to_path_segment(class_name)}",
-            "tags": [class_name],
-            "parameters": self._make_query_params(cls),
-            "responses": {
-                "200": {
-                    "description": f"List of {class_name} objects",
-                    "content": {
-                        "application/json": {
-                            "schema": {
-                                "type": "array",
-                                "items": {"$ref": f"#/components/schemas/{class_name}"},
-                            }
-                        }
+    def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        return Operation(
+            summary=f"List {_to_path_segment(class_name).replace('_', ' ')}",
+            operationId=f"list_{_to_path_segment(class_name)}",
+            tags=[class_name],
+            parameters=self._make_query_params(cls),
+            responses={
+                "200": Response(
+                    description=f"List of {class_name} objects",
+                    content={
+                        "application/json": MediaType(
+                            media_type_schema=Schema(
+                                type=DataType.ARRAY,
+                                items=Reference(ref=f"#/components/schemas/{class_name}"),
+                            )
+                        )
                     },
-                }
+                )
             },
-        }
+        )
 
-    def _make_create_operation(self, cls: ClassDefinition, class_name: str) -> dict:
-        return {
-            "summary": f"Create a {class_name}",
-            "operationId": f"create_{_to_snake_case(class_name)}",
-            "tags": [class_name],
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {"schema": {"$ref": f"#/components/schemas/{class_name}"}}
+    def _make_create_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        return Operation(
+            summary=f"Create a {class_name}",
+            operationId=f"create_{_to_snake_case(class_name)}",
+            tags=[class_name],
+            requestBody=RequestBody(
+                required=True,
+                content={
+                    "application/json": MediaType(
+                        media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
+                    )
                 },
-            },
-            "responses": {
-                "201": {
-                    "description": f"{class_name} created",
-                    "content": {
-                        "application/json": {
-                            "schema": {"$ref": f"#/components/schemas/{class_name}"}
-                        }
+            ),
+            responses={
+                "201": Response(
+                    description=f"{class_name} created",
+                    content={
+                        "application/json": MediaType(
+                            media_type_schema=Reference(
+                                ref=f"#/components/schemas/{class_name}"
+                            )
+                        )
                     },
-                },
-                "422": {"description": "Validation error"},
+                ),
+                "422": Response(description="Validation error"),
             },
-        }
+        )
 
-    def _make_read_operation(self, cls: ClassDefinition, class_name: str) -> dict:
-        return {
-            "summary": f"Get a {class_name}",
-            "operationId": f"get_{_to_snake_case(class_name)}",
-            "tags": [class_name],
-            "responses": {
-                "200": {
-                    "description": f"{class_name} details",
-                    "content": {
-                        "application/json": {
-                            "schema": {"$ref": f"#/components/schemas/{class_name}"}
-                        }
+    def _make_read_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        return Operation(
+            summary=f"Get a {class_name}",
+            operationId=f"get_{_to_snake_case(class_name)}",
+            tags=[class_name],
+            responses={
+                "200": Response(
+                    description=f"{class_name} details",
+                    content={
+                        "application/json": MediaType(
+                            media_type_schema=Reference(
+                                ref=f"#/components/schemas/{class_name}"
+                            )
+                        )
                     },
-                },
-                "404": {"description": "Not found"},
+                ),
+                "404": Response(description="Not found"),
             },
-        }
+        )
 
-    def _make_update_operation(self, cls: ClassDefinition, class_name: str) -> dict:
-        return {
-            "summary": f"Update a {class_name}",
-            "operationId": f"update_{_to_snake_case(class_name)}",
-            "tags": [class_name],
-            "requestBody": {
-                "required": True,
-                "content": {
-                    "application/json": {"schema": {"$ref": f"#/components/schemas/{class_name}"}}
+    def _make_update_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        return Operation(
+            summary=f"Update a {class_name}",
+            operationId=f"update_{_to_snake_case(class_name)}",
+            tags=[class_name],
+            requestBody=RequestBody(
+                required=True,
+                content={
+                    "application/json": MediaType(
+                        media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
+                    )
                 },
-            },
-            "responses": {
-                "200": {
-                    "description": f"{class_name} updated",
-                    "content": {
-                        "application/json": {
-                            "schema": {"$ref": f"#/components/schemas/{class_name}"}
-                        }
+            ),
+            responses={
+                "200": Response(
+                    description=f"{class_name} updated",
+                    content={
+                        "application/json": MediaType(
+                            media_type_schema=Reference(
+                                ref=f"#/components/schemas/{class_name}"
+                            )
+                        )
                     },
-                },
-                "404": {"description": "Not found"},
-                "422": {"description": "Validation error"},
+                ),
+                "404": Response(description="Not found"),
+                "422": Response(description="Validation error"),
             },
-        }
+        )
 
-    def _make_delete_operation(self, cls: ClassDefinition, class_name: str) -> dict:
-        return {
-            "summary": f"Delete a {class_name}",
-            "operationId": f"delete_{_to_snake_case(class_name)}",
-            "tags": [class_name],
-            "responses": {
-                "204": {"description": f"{class_name} deleted"},
-                "404": {"description": "Not found"},
+    def _make_delete_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        return Operation(
+            summary=f"Delete a {class_name}",
+            operationId=f"delete_{_to_snake_case(class_name)}",
+            tags=[class_name],
+            responses={
+                "204": Response(description=f"{class_name} deleted"),
+                "404": Response(description="Not found"),
             },
-        }
+        )
 
-    def _make_query_params(self, cls: ClassDefinition) -> list[dict]:
+    def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
         """Generate query parameters for list endpoint filtering."""
+        sv = self.schemaview
         params = [
-            {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 100}},
-            {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}},
+            Parameter(
+                name="limit",
+                param_in=ParameterLocation.QUERY,
+                param_schema=Schema(type=DataType.INTEGER, default=100),
+            ),
+            Parameter(
+                name="offset",
+                param_in=ParameterLocation.QUERY,
+                param_schema=Schema(type=DataType.INTEGER, default=0),
+            ),
         ]
 
-        # Add filterable fields (non-multivalued string/enum/integer slots)
-        for slot in self.sv.class_induced_slots(cls.name):
+        for slot in sv.class_induced_slots(cls.name):
             if not slot.multivalued and not slot.identifier:
                 range_name = slot.range or "string"
-                if range_name in ("string", "integer", "boolean") or self.sv.get_enum(range_name):
+                if range_name in ("string", "integer", "boolean") or sv.get_enum(range_name):
                     params.append(
-                        {
-                            "name": slot.name,
-                            "in": "query",
-                            "required": False,
-                            "schema": self._slot_to_schema(slot),
-                        }
+                        Parameter(
+                            name=slot.name,
+                            param_in=ParameterLocation.QUERY,
+                            required=False,
+                            param_schema=self._slot_to_schema(slot),
+                        )
                     )
 
         return params

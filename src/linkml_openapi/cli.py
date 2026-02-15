@@ -1,53 +1,37 @@
 """CLI for generating OpenAPI specs from LinkML schemas."""
 
-import argparse
-import sys
-
-from linkml_runtime.utils.schemaview import SchemaView
+import click
+from linkml.utils.generator import shared_arguments
 
 from linkml_openapi.generator import OpenAPIGenerator
 
 
+@shared_arguments(OpenAPIGenerator)
+@click.command(name="gen-openapi")
+@click.option("--api-title", help="API title (default: schema name)")
+@click.option("--api-version", default="1.0.0", show_default=True, help="API version")
+@click.option(
+    "--server-url",
+    default="http://localhost:8000",
+    show_default=True,
+    help="Server base URL",
+)
+@click.option(
+    "--classes",
+    "resource_filter",
+    multiple=True,
+    help="Only generate endpoints for these classes (repeatable)",
+)
+@click.version_option("0.1.0", "-V", "--version")
+def cli(yamlfile, resource_filter=(), **kwargs):
+    """Generate OpenAPI 3.1 specification from a LinkML schema."""
+    resource_filter = list(resource_filter) if resource_filter else None
+    gen = OpenAPIGenerator(yamlfile, resource_filter=resource_filter, **kwargs)
+    click.echo(gen.serialize(**kwargs))
+
+
 def main():
-    parser = argparse.ArgumentParser(
-        description="Generate OpenAPI 3.1 specification from a LinkML schema"
-    )
-    parser.add_argument("schema", help="Path to LinkML schema YAML file")
-    parser.add_argument("-o", "--output", help="Output file (default: stdout)", default=None)
-    parser.add_argument(
-        "-f",
-        "--format",
-        choices=["yaml", "json"],
-        default="yaml",
-        help="Output format (default: yaml)",
-    )
-    parser.add_argument("--title", help="API title (default: schema name)")
-    parser.add_argument("--version", default="1.0.0", help="API version")
-    parser.add_argument("--server-url", default="http://localhost:8000", help="Server base URL")
-    parser.add_argument(
-        "--classes",
-        nargs="*",
-        help="Only generate endpoints for these classes (default: auto-detect)",
-    )
-
-    args = parser.parse_args()
-
-    sv = SchemaView(args.schema)
-    generator = OpenAPIGenerator(
-        sv,
-        title=args.title,
-        version=args.version,
-        server_url=args.server_url,
-        resource_filter=args.classes,
-    )
-
-    output = generator.serialize(format=args.format)
-
-    if args.output:
-        with open(args.output, "w") as f:
-            f.write(output)
-    else:
-        sys.stdout.write(output)
+    cli()
 
 
 if __name__ == "__main__":

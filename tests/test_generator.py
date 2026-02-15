@@ -1,9 +1,9 @@
 """Tests for the OpenAPI generator."""
 
+import json
 from pathlib import Path
 
 import yaml
-from linkml_runtime.utils.schemaview import SchemaView
 
 from linkml_openapi.generator import (
     OpenAPIGenerator,
@@ -12,15 +12,19 @@ from linkml_openapi.generator import (
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
+SCHEMA_PATH = str(FIXTURES / "person.yaml")
 
 
 def _make_generator(**kwargs) -> OpenAPIGenerator:
-    sv = SchemaView(str(FIXTURES / "person.yaml"))
-    return OpenAPIGenerator(sv, **kwargs)
+    return OpenAPIGenerator(SCHEMA_PATH, **kwargs)
 
 
 def _generate(**kwargs) -> dict:
-    return _make_generator(**kwargs).generate()
+    gen = _make_generator(**kwargs)
+    raw = gen.serialize(format=kwargs.get("format", "yaml"))
+    if kwargs.get("format") == "json":
+        return json.loads(raw)
+    return yaml.safe_load(raw)
 
 
 # --- Utility function tests ---
@@ -47,7 +51,7 @@ class TestSpecStructure:
         assert spec["openapi"] == "3.1.0"
 
     def test_info(self):
-        spec = _generate(title="My API", version="2.0.0")
+        spec = _generate(api_title="My API", api_version="2.0.0")
         assert spec["info"]["title"] == "My API"
         assert spec["info"]["version"] == "2.0.0"
 
@@ -142,9 +146,7 @@ class TestPaths:
         """Person and Address are annotated with openapi.resource: true."""
         spec = _generate()
         paths = spec["paths"]
-        # Person should have paths
         assert any("person" in p for p in paths)
-        # Address should have paths
         assert any("address" in p for p in paths)
 
     def test_abstract_class_no_paths(self):
@@ -232,9 +234,16 @@ class TestSerialization:
         assert parsed["openapi"] == "3.1.0"
 
     def test_json_output(self):
-        import json
-
-        gen = _make_generator()
+        gen = _make_generator(format="json")
         output = gen.serialize(format="json")
         parsed = json.loads(output)
         assert parsed["openapi"] == "3.1.0"
+
+    def test_is_linkml_generator(self):
+        """Verify it extends the LinkML Generator base class."""
+        from linkml.utils.generator import Generator
+
+        gen = _make_generator()
+        assert isinstance(gen, Generator)
+        assert gen.uses_schemaloader is False
+        assert gen.schemaview is not None
