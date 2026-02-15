@@ -42,12 +42,23 @@ classes:
       addresses:
         range: Address
         multivalued: true
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: "true"
+      name:
+        annotations:
+          openapi.query_param: "true"
+      age:
+        annotations:
+          openapi.query_param: "true"
 
   Address:
     description: A mailing address
     annotations:
       openapi.resource: "true"
       openapi.path: addresses
+      openapi.operations: "list,read"
     attributes:
       id:
         identifier: true

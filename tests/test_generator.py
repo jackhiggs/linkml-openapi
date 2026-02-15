@@ -208,13 +208,29 @@ class TestPaths:
         assert "offset" in param_names
 
     def test_list_has_filter_params(self):
-        """Non-multivalued, non-identifier string/int slots become query params."""
+        """Annotated slots become query params (name, age)."""
         spec = _generate()
         list_op = spec["paths"]["/persons"]["get"]
         param_names = {p["name"] for p in list_op["parameters"]}
-        assert "email" in param_names
+        assert "name" in param_names
         assert "age" in param_names
-        assert "status" in param_names
+        # email is not annotated as query_param
+        assert "email" not in param_names
+
+    def test_collection_path_address_no_post(self):
+        """Address with openapi.operations: 'list,read' has no POST."""
+        spec = _generate()
+        collection = spec["paths"]["/addresses"]
+        assert "get" in collection
+        assert "post" not in collection
+
+    def test_item_path_address_no_put_delete(self):
+        """Address with openapi.operations: 'list,read' has no PUT/DELETE."""
+        spec = _generate()
+        item = spec["paths"]["/addresses/{id}"]
+        assert "get" in item
+        assert "put" not in item
+        assert "delete" not in item
 
     def test_resource_filter_limits_classes(self):
         spec = _generate(resource_filter=["Address"])
@@ -247,3 +263,51 @@ class TestSerialization:
         assert isinstance(gen, Generator)
         assert gen.uses_schemaloader is False
         assert gen.schemaview is not None
+
+
+# --- Slot annotation tests ---
+
+
+class TestSlotAnnotations:
+    def test_path_variable_from_annotation(self):
+        """Person.id is annotated as path variable."""
+        spec = _generate()
+        assert "/persons/{id}" in spec["paths"]
+        item = spec["paths"]["/persons/{id}"]
+        params = item.get("parameters", [])
+        assert any(p["name"] == "id" and p["in"] == "path" for p in params)
+
+    def test_query_param_from_annotation(self):
+        """Person has name and age annotated as query params."""
+        spec = _generate()
+        list_op = spec["paths"]["/persons"]["get"]
+        param_names = {p["name"] for p in list_op["parameters"]}
+        assert "name" in param_names
+        assert "age" in param_names
+        # email is NOT annotated as query_param, so should not appear
+        assert "email" not in param_names
+        # limit/offset always present
+        assert "limit" in param_names
+        assert "offset" in param_names
+
+    def test_no_slot_annotations_falls_back(self):
+        """Organization has no slot annotations, gets auto-inferred params."""
+        spec = _generate(resource_filter=["Organization"])
+        list_op = spec["paths"]["/organizations"]["get"]
+        param_names = {p["name"] for p in list_op["parameters"]}
+        assert "limit" in param_names
+        assert "offset" in param_names
+        # Organization inherits from NamedThing which has name, description
+
+    def test_operations_limits_methods(self):
+        """Address with openapi.operations: 'list,read' has no POST/PUT/DELETE."""
+        spec = _generate()
+        # Collection path should only have GET (list), no POST (create)
+        collection = spec["paths"]["/addresses"]
+        assert "get" in collection
+        assert "post" not in collection
+        # Item path should only have GET (read), no PUT/DELETE
+        item = spec["paths"]["/addresses/{id}"]
+        assert "get" in item
+        assert "put" not in item
+        assert "delete" not in item

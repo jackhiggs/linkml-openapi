@@ -65,6 +65,33 @@ classes:
 
 If no classes have `openapi.resource: true`, all non-abstract, non-mixin classes with attributes get endpoints.
 
+### Slot-level annotations
+
+Control path variables and query parameters with annotations on `slot_usage`:
+
+```yaml
+classes:
+  Person:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: people
+      openapi.operations: "list,read,create"
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: "true"    # Becomes {id} in /people/{id}
+      name:
+        annotations:
+          openapi.query_param: "true"      # Becomes ?name= on GET /people
+      age:
+        annotations:
+          openapi.query_param: "true"      # Becomes ?age= on GET /people
+```
+
+- **`openapi.path_variable: "true"`** — slot becomes a path parameter. Multiple path variables are joined: `/people/{id}/{version}`. Falls back to the identifier slot if none annotated.
+- **`openapi.query_param: "true"`** — slot becomes a query parameter on the list endpoint. If no slots are annotated, all non-multivalued string/integer/boolean/enum slots are auto-inferred (backwards compatible).
+- `limit` and `offset` pagination parameters are always included on list endpoints.
+
 ## Type Mapping
 
 | LinkML Range | OpenAPI Type |

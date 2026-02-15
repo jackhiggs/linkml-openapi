@@ -119,7 +119,7 @@ class OpenAPIGenerator(Generator):
         paths: dict[str, PathItem] = {}
         for class_name in self._get_resource_classes():
             cls = sv.get_class(class_name)
-            id_slot = self._get_identifier_slot(cls)
+            path_vars = self._get_path_variables(cls)
             path_segment = self._get_path_segment(cls)
             operations = self._get_operations(cls)
 
@@ -133,16 +133,19 @@ class OpenAPIGenerator(Generator):
             paths[collection_path] = collection_item
 
             # Item path
-            if id_slot:
-                id_name = id_slot.name
-                item_path = f"/{path_segment}/{{{id_name}}}"
-                path_param = Parameter(
-                    name=id_name,
-                    param_in=ParameterLocation.PATH,
-                    required=True,
-                    param_schema=self._slot_to_schema(id_slot),
-                )
-                item = PathItem(parameters=[path_param])
+            if path_vars:
+                item_suffix = "/".join(f"{{{s.name}}}" for s in path_vars)
+                item_path = f"/{path_segment}/{item_suffix}"
+                path_params = [
+                    Parameter(
+                        name=s.name,
+                        param_in=ParameterLocation.PATH,
+                        required=True,
+                        param_schema=self._slot_to_schema(s),
+                    )
+                    for s in path_vars
+                ]
+                item = PathItem(parameters=path_params)
                 if "read" in operations:
                     item.get = self._make_read_operation(cls, class_name)
                 if "update" in operations:
@@ -287,16 +290,49 @@ class OpenAPIGenerator(Generator):
             and list(sv.class_induced_slots(name))
         ]
 
-    def _get_identifier_slot(self, cls: ClassDefinition) -> SlotDefinition | None:
-        """Find the identifier slot for a class."""
+    def _get_slot_annotation(self, cls: ClassDefinition, slot_name: str, tag: str) -> str | None:
+        """Read a slot annotation, checking class slot_usage first, then the slot itself."""
+        # Check slot_usage on the class
+        if cls.slot_usage:
+            for su in (
+                cls.slot_usage.values() if isinstance(cls.slot_usage, dict) else cls.slot_usage
+            ):
+                su_obj = su if not isinstance(su, str) else None
+                if su_obj and getattr(su_obj, "name", None) == slot_name:
+                    annotations = getattr(su_obj, "annotations", None)
+                    if annotations:
+                        for ann in (
+                            annotations.values() if isinstance(annotations, dict) else [annotations]
+                        ):
+                            if hasattr(ann, "tag") and ann.tag == tag:
+                                return str(ann.value)
+        # Check slot's own annotations via schemaview
         sv = self.schemaview
+        slot_def = sv.get_slot(slot_name)
+        if slot_def and slot_def.annotations:
+            for ann in slot_def.annotations.values():
+                if ann.tag == tag:
+                    return str(ann.value)
+        return None
+
+    def _get_path_variables(self, cls: ClassDefinition) -> list[SlotDefinition]:
+        """Get path variable slots from annotations, or fall back to identifier."""
+        sv = self.schemaview
+        annotated = []
+        for slot in sv.class_induced_slots(cls.name):
+            val = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
+            if val and val.lower() == "true":
+                annotated.append(slot)
+        if annotated:
+            return annotated
+        # Fall back to identifier slot
         for slot in sv.class_induced_slots(cls.name):
             if slot.identifier:
-                return slot
+                return [slot]
         for slot in sv.class_induced_slots(cls.name):
             if slot.name == "id":
-                return slot
-        return None
+                return [slot]
+        return []
 
     def _get_path_segment(self, cls: ClassDefinition) -> str:
         """Get the URL path segment for a class."""
@@ -436,6 +472,25 @@ class OpenAPIGenerator(Generator):
             ),
         ]
 
+        # Check if any slot has openapi.query_param annotation
+        annotated_params = []
+        for slot in sv.class_induced_slots(cls.name):
+            val = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
+            if val and val.lower() == "true":
+                annotated_params.append(
+                    Parameter(
+                        name=slot.name,
+                        param_in=ParameterLocation.QUERY,
+                        required=False,
+                        param_schema=self._slot_to_schema(slot),
+                    )
+                )
+
+        if annotated_params:
+            params.extend(annotated_params)
+            return params
+
+        # Fall back to auto-inference
         for slot in sv.class_induced_slots(cls.name):
             if not slot.multivalued and not slot.identifier:
                 range_name = slot.range or "string"
