@@ -98,6 +98,7 @@ class OpenAPIGenerator(Generator):
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
         self._strip_invalid_parameter_fields(raw)
+        self._coerce_numeric_constraints(raw)
         if self.format == "json":
             return json.dumps(raw, indent=2) + "\n"
         return yaml.dump(raw, default_flow_style=False, sort_keys=False)
@@ -123,6 +124,23 @@ class OpenAPIGenerator(Generator):
                     if param.get("in") != "query":
                         param.pop("allowEmptyValue", None)
                         param.pop("allowReserved", None)
+
+    @staticmethod
+    def _coerce_numeric_constraints(obj: Any) -> None:
+        """Convert float-valued constraints to int where the value is whole.
+
+        openapi-pydantic types minimum/maximum as float, but JSON Schema and
+        gen-json-schema emit integers when the value has no fractional part.
+        """
+        if isinstance(obj, dict):
+            for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "default"):
+                if key in obj and isinstance(obj[key], float) and obj[key] == int(obj[key]):
+                    obj[key] = int(obj[key])
+            for value in obj.values():
+                OpenAPIGenerator._coerce_numeric_constraints(value)
+        elif isinstance(obj, list):
+            for item in obj:
+                OpenAPIGenerator._coerce_numeric_constraints(item)
 
     def _build_openapi(self) -> OpenAPI:
         """Build the complete OpenAPI model."""
@@ -198,6 +216,34 @@ class OpenAPIGenerator(Generator):
         """Convert a LinkML class to a JSON Schema object."""
         sv = self.schemaview
 
+        if cls.is_a:
+            # Only include slots defined directly on this class, not inherited ones
+            parent_slot_names = {s.name for s in sv.class_induced_slots(cls.is_a)}
+            local_properties: dict[str, Schema | Reference] = {}
+            local_required: list[str] = []
+            for slot in sv.class_induced_slots(cls.name):
+                if slot.name not in parent_slot_names:
+                    local_properties[slot.name] = self._slot_to_schema(slot)
+                    if slot.required:
+                        local_required.append(slot.name)
+
+            local_schema = Schema(type=DataType.OBJECT, additionalProperties=False)
+            if local_properties:
+                local_schema.properties = local_properties
+            if local_required:
+                local_schema.required = local_required
+
+            schema = Schema(
+                allOf=[
+                    Reference(ref=f"#/components/schemas/{cls.is_a}"),
+                    local_schema,
+                ]
+            )
+            schema.title = cls.name
+            if cls.description:
+                schema.description = cls.description
+            return schema
+
         properties: dict[str, Schema | Reference] = {}
         required: list[str] = []
 
@@ -206,24 +252,8 @@ class OpenAPIGenerator(Generator):
             if slot.required:
                 required.append(slot.name)
 
-        if cls.is_a:
-            local_schema = Schema(type=DataType.OBJECT)
-            if properties:
-                local_schema.properties = properties
-            if required:
-                local_schema.required = required
-
-            schema = Schema(
-                allOf=[
-                    Reference(ref=f"#/components/schemas/{cls.is_a}"),
-                    local_schema,
-                ]
-            )
-            if cls.description:
-                schema.description = cls.description
-            return schema
-
-        schema = Schema(type=DataType.OBJECT)
+        schema = Schema(type=DataType.OBJECT, additionalProperties=False)
+        schema.title = cls.name
         if cls.description:
             schema.description = cls.description
         if properties:
@@ -283,6 +313,7 @@ class OpenAPIGenerator(Generator):
     def _enum_to_schema(self, enum_def) -> Schema:
         """Convert a LinkML enum to a JSON Schema enum."""
         schema = Schema(type=DataType.STRING)
+        schema.title = enum_def.name
         if enum_def.description:
             schema.description = enum_def.description
 

@@ -155,9 +155,11 @@ components:
           type: string
         active:
           type: boolean
+      additionalProperties: false
       type: object
       required:
       - id
       - name
+      title: Item
       description: A simple item
 

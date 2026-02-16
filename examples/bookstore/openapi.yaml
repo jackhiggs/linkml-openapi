@@ -269,14 +269,16 @@ components:
           description: Product title
         price:
           type: number
-          minimum: 0.0
+          minimum: 0
           format: float
           description: Price in USD
+      additionalProperties: false
       type: object
       required:
       - id
       - title
       - price
+      title: Product
       description: An abstract product in the store
     Book:
       allOf:
@@ -288,29 +290,18 @@ components:
             description: 13-digit ISBN
           page_count:
             type: integer
-            maximum: 10000.0
-            minimum: 1.0
+            maximum: 10000
+            minimum: 1
           authors:
             items:
               $ref: '#/components/schemas/Author'
             type: array
             description: Authors of the book
-          id:
-            type: string
-          title:
-            type: string
-            description: Product title
-          price:
-            type: number
-            minimum: 0.0
-            format: float
-            description: Price in USD
+        additionalProperties: false
         type: object
         required:
         - isbn
-        - id
-        - title
-        - price
+      title: Book
       description: A book for sale
     Author:
       properties:
@@ -321,9 +312,11 @@ components:
         biography:
           type: string
           description: Short biography
+      additionalProperties: false
       type: object
       required:
       - id
       - name
+      title: Author
       description: A book author
 

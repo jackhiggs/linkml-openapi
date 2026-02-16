@@ -352,10 +352,12 @@ components:
         species:
           type: string
           description: Species of the pet
+      additionalProperties: false
       type: object
       required:
       - id
       - name
+      title: Pet
       description: A pet available in the store
     Store:
       properties:
@@ -365,10 +367,12 @@ components:
           type: string
         city:
           type: string
+      additionalProperties: false
       type: object
       required:
       - id
       - name
+      title: Store
       description: A physical store location
     Owner:
       properties:
@@ -384,10 +388,12 @@ components:
             $ref: '#/components/schemas/Pet'
           type: array
           description: Pets owned by this person
+      additionalProperties: false
       type: object
       required:
       - id
       - name
+      title: Owner
       description: A pet owner
     PetStatus:
       type: string
@@ -395,5 +401,6 @@ components:
       - AVAILABLE
       - PENDING
       - SOLD
+      title: PetStatus
       description: Availability status of a pet
 
