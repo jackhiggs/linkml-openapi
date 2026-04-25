@@ -41,6 +41,33 @@ class TestUtils:
         assert _to_path_segment("Address") == "addresses"
         assert _to_path_segment("Category") == "categories"
 
+    def test_to_path_segment_handles_ch_sh(self):
+        assert _to_path_segment("Branch") == "branches"
+        assert _to_path_segment("Wish") == "wishes"
+
+    def test_to_path_segment_invariant_plural(self):
+        """`series` and `species` are unchanged in plural form."""
+        assert _to_path_segment("DatasetSeries") == "dataset_series"
+        assert _to_path_segment("Series") == "series"
+        assert _to_path_segment("Species") == "species"
+
+    def test_to_path_segment_warns_on_irregular(self):
+        """Class names with irregular English plurals warn so the user sets openapi.path."""
+        import warnings
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        gen = OpenAPIGenerator(SCHEMA_PATH)
+
+        class FakeCls:
+            name = "Child"
+            annotations = None
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gen._get_path_segment(FakeCls())
+        assert any("irregular English plural" in str(w.message) for w in caught)
+
 
 # --- Spec structure tests ---
 

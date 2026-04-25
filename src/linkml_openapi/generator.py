@@ -49,13 +49,59 @@ RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
 }
 
 
+# Class-name suffixes that are already plural (or unchanged in plural form)
+# and should be returned as-is from `_pluralize`.
+_INVARIANT_PLURAL_SUFFIXES = ("series", "species", "genus")
+
+# Class-name suffixes that become irregular in plural form. We don't try
+# to inflect these — we just emit a heads-up so the user can set
+# `openapi.path` explicitly. Listed lower-case for case-insensitive match.
+_IRREGULAR_HINT_SUFFIXES = (
+    "child",
+    "datum",
+    "criterion",
+    "phenomenon",
+    "analysis",
+    "thesis",
+    "axis",
+    "crisis",
+)
+
+
 def _pluralize(name: str) -> str:
-    """Simple English pluralization for URL paths."""
-    if name.endswith("s") or name.endswith("x") or name.endswith("z"):
+    """Pluralize an English noun for URL paths.
+
+    Handles the common regular-pluralization patterns (`-s/-x/-z/-ch/-sh`,
+    consonant-`y`, default `+s`) and the most common already-plural Latin
+    forms used in domain modeling (`series`, `species`, `genus`). For
+    irregular nouns (`child`, `person`, `index`, …) the function falls
+    back to `+s` and the caller is expected to set `openapi.path`
+    explicitly when correctness matters; `_warn_on_irregular_plural`
+    surfaces a warning at generation time.
+    """
+    if not name:
+        return name
+
+    lower = name.lower()
+    for inv in _INVARIANT_PLURAL_SUFFIXES:
+        if lower.endswith(inv):
+            return name
+
+    if name.endswith(("ch", "sh")):
+        return name + "es"
+    if name.endswith(("s", "x", "z")):
         return name + "es"
     if name.endswith("y") and name[-2:] not in ("ay", "ey", "oy", "uy"):
         return name[:-1] + "ies"
     return name + "s"
+
+
+def _is_irregular_plural_hint(name: str) -> bool:
+    """True when `name` looks like it would be misled by the default rules."""
+    if not name:
+        return False
+    lower = name.lower()
+    return any(lower.endswith(suf) for suf in _IRREGULAR_HINT_SUFFIXES)
 
 
 def _to_snake_case(name: str) -> str:
@@ -499,6 +545,15 @@ class OpenAPIGenerator(Generator):
         annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
         if "openapi.path" in annotations:
             return annotations["openapi.path"].lstrip("/")
+        if _is_irregular_plural_hint(cls.name):
+            import warnings
+
+            warnings.warn(
+                f"Class {cls.name!r} has an irregular English plural that the "
+                "default pluralizer cannot handle correctly. Set "
+                "`openapi.path:` on the class to fix the URL.",
+                stacklevel=2,
+            )
         return _to_path_segment(cls.name)
 
     def _get_operations(self, cls: ClassDefinition) -> list[str]:
