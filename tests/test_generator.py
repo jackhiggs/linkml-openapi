@@ -313,6 +313,44 @@ class TestSlotAnnotations:
         assert "delete" not in item
 
 
+class TestRdfExtensions:
+    def test_class_uri_emitted_as_x_rdf_class(self):
+        """Person.class_uri = schema:Person becomes x-rdf-class on the schema."""
+        spec = _generate()
+        person = spec["components"]["schemas"]["Person"]
+        assert person.get("x-rdf-class") == "http://schema.org/Person"
+
+    def test_slot_uri_emitted_as_x_rdf_property(self):
+        """Person.email has slot_uri schema:email — x-rdf-property next to the property."""
+        spec = _generate()
+        person = spec["components"]["schemas"]["Person"]
+        # Person uses inheritance, so properties live under allOf[1].properties
+        local_props = person["allOf"][1]["properties"]
+        assert local_props["email"].get("x-rdf-property") == "http://schema.org/email"
+        assert local_props["age"].get("x-rdf-property") == "http://xmlns.com/foaf/0.1/age"
+
+    def test_class_with_no_uri_has_no_extension(self):
+        """Address has no class_uri — no x-rdf-class is emitted."""
+        spec = _generate()
+        address = spec["components"]["schemas"]["Address"]
+        assert "x-rdf-class" not in address
+
+    def test_unknown_prefix_passed_through(self):
+        """A CURIE whose prefix is not in `prefixes` is left unchanged."""
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        gen = OpenAPIGenerator(SCHEMA_PATH)
+        gen._x_rdf_class = {}
+        gen._x_rdf_property = {}
+        # No mapping for `unknown` — returns the input untouched.
+        assert gen._expand_curie("unknown:Foo") == "unknown:Foo"
+        # Absolute IRI passes through verbatim.
+        assert gen._expand_curie("http://example.org/Foo") == "http://example.org/Foo"
+        # None / empty string handled.
+        assert gen._expand_curie(None) is None
+        assert gen._expand_curie("") is None
+
+
 class TestMediaTypes:
     def test_default_media_type_is_json(self):
         """Address has no openapi.media_types — only application/json content."""

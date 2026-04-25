@@ -166,6 +166,43 @@ blocks by hand.
       openapi.media_types: "application/json,application/ld+json,text/turtle,application/rdf+xml"
 ```
 
+#### `x-rdf-class` / `x-rdf-property` extensions
+
+The generator propagates LinkML's `class_uri` and `slot_uri` into the OpenAPI
+output as `x-` extensions. CURIEs are expanded against the schema's `prefixes`
+map; absolute IRIs are passed through verbatim. No annotation is needed —
+this is automatic for any schema that already declares URIs.
+
+```yaml
+prefixes:
+  schema: http://schema.org/
+
+classes:
+  Person:
+    class_uri: schema:Person
+    attributes:
+      email:
+        slot_uri: schema:email
+```
+
+produces:
+
+```yaml
+components:
+  schemas:
+    Person:
+      type: object
+      x-rdf-class: http://schema.org/Person
+      properties:
+        email:
+          type: string
+          x-rdf-property: http://schema.org/email
+```
+
+This lets RDF-aware downstream tools (SHACL generators, JSON-LD context
+builders, Jena/RDF4J mappers) consume the OpenAPI spec directly without
+needing the original LinkML source.
+
 ### Slot-level annotations
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.

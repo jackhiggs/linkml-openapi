@@ -95,10 +95,14 @@ class OpenAPIGenerator(Generator):
 
     def serialize(self, **kwargs) -> str:
         """Generate and serialize the OpenAPI spec."""
+        # Reset the x-rdf-* maps; _build_openapi populates them as it walks the schema.
+        self._x_rdf_class: dict[str, str] = {}
+        self._x_rdf_property: dict[tuple[str, str], str] = {}
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
         self._strip_invalid_parameter_fields(raw)
         self._coerce_numeric_constraints(raw)
+        self._inject_rdf_extensions(raw)
         if self.format == "json":
             return json.dumps(raw, indent=2) + "\n"
         return yaml.dump(raw, default_flow_style=False, sort_keys=False)
@@ -156,6 +160,7 @@ class OpenAPIGenerator(Generator):
         # Component schemas for all classes
         for class_name in sv.all_classes():
             cls = sv.get_class(class_name)
+            self._record_rdf_uris(cls)
             schemas[class_name] = self._class_to_schema(cls)
 
         # Enum schemas
@@ -412,7 +417,66 @@ class OpenAPIGenerator(Generator):
             return list(ops)
         return ["list", "create", "read", "update", "delete"]
 
-    # --- Operation builders ---
+    # --- RDF extension propagation -----------------------------------------
+
+    def _expand_curie(self, curie: str | None) -> str | None:
+        """Expand a CURIE to a full IRI using the schema's `prefixes` map.
+
+        Absolute IRIs and CURIEs whose prefix is unknown are returned unchanged
+        (the unknown-prefix case is silent on purpose — downstream tooling can
+        warn if it cares).
+        """
+        if not curie:
+            return None
+        s = str(curie)
+        if s.startswith(("http://", "https://", "urn:")):
+            return s
+        if ":" not in s:
+            return s
+        prefix, local = s.split(":", 1)
+        prefixes = self.schemaview.schema.prefixes or {}
+        if prefix in prefixes:
+            return str(prefixes[prefix].prefix_reference) + local
+        return s
+
+    def _record_rdf_uris(self, cls: ClassDefinition) -> None:
+        """Stash CURIE-expanded class_uri and slot_uri values for later injection.
+
+        Walking the schema is cheap; we just remember the mapping by class name
+        and (class name, slot name) so `_inject_rdf_extensions` can drop them
+        into the final dict next to the right schema/property.
+        """
+        sv = self.schemaview
+        class_uri = self._expand_curie(cls.class_uri)
+        if class_uri:
+            self._x_rdf_class[cls.name] = class_uri
+        for slot in sv.class_induced_slots(cls.name):
+            slot_uri = self._expand_curie(slot.slot_uri)
+            if slot_uri:
+                self._x_rdf_property[(cls.name, slot.name)] = slot_uri
+
+    def _inject_rdf_extensions(self, raw: dict) -> None:
+        """Walk the dumped spec and decorate schemas with x-rdf-* extensions."""
+        schemas = (raw.get("components") or {}).get("schemas") or {}
+        for class_name, schema in schemas.items():
+            class_uri = self._x_rdf_class.get(class_name)
+            if class_uri:
+                schema["x-rdf-class"] = class_uri
+            # Properties may live at top level or inside the inline schema half
+            # of an `allOf` (used for inheritance).
+            holders: list[dict] = []
+            if isinstance(schema.get("properties"), dict):
+                holders.append(schema["properties"])
+            for sub in schema.get("allOf") or []:
+                if isinstance(sub, dict) and isinstance(sub.get("properties"), dict):
+                    holders.append(sub["properties"])
+            for props in holders:
+                for slot_name, slot_schema in props.items():
+                    slot_uri = self._x_rdf_property.get((class_name, slot_name))
+                    if slot_uri and isinstance(slot_schema, dict):
+                        slot_schema["x-rdf-property"] = slot_uri
+
+    # --- Operation builders ------------------------------------------------
 
     def _content_for(self, schema: Schema | Reference, media_types: list[str]) -> dict[str, MediaType]:
         """Build a `content` dict that advertises the same schema under every media type."""
