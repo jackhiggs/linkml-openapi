@@ -1,0 +1,47 @@
+version: 2
+updates:
+  # Python runtime + dev dependencies declared in pyproject.toml
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - python
+    commit-message:
+      prefix: deps
+      include: scope
+    groups:
+      # Bundle linkml + linkml-runtime — they release in lockstep and
+      # nearly always need to upgrade together to stay compatible.
+      linkml:
+        patterns:
+          - linkml
+          - linkml-runtime
+      # Group dev-tooling churn so it doesn't dominate the PR queue.
+      dev-tooling:
+        dependency-type: development
+        patterns:
+          - pytest*
+          - ruff
+          - openapi-spec-validator
+
+  # Pinned action SHAs in .github/workflows/*.yml
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: Europe/London
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+      include: scope
