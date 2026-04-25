@@ -32,6 +32,8 @@ from openapi_pydantic import (
     Server,
 )
 
+from linkml_openapi import __version__
+
 # LinkML range → OpenAPI DataType mapping
 RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
     "string": {"type": DataType.STRING},
@@ -128,7 +130,7 @@ class OpenAPIGenerator(Generator):
 
     # ClassVar overrides
     generatorname: ClassVar[str] = os.path.basename(__file__)
-    generatorversion: ClassVar[str] = "0.1.0"
+    generatorversion: ClassVar[str] = __version__
     valid_formats: ClassVar[list[str]] = ["yaml", "json"]
     uses_schemaloader: ClassVar[bool] = False
     file_extension: ClassVar[str] = "openapi.yaml"

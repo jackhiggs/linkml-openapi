@@ -3,6 +3,7 @@
 import click
 from linkml.utils.generator import shared_arguments
 
+from linkml_openapi import __version__
 from linkml_openapi.generator import OpenAPIGenerator
 
 
@@ -35,7 +36,7 @@ from linkml_openapi.generator import OpenAPIGenerator
     default=False,
     help="Inline parent properties into subclass schemas instead of using allOf.",
 )
-@click.version_option("0.1.0", "-V", "--version")
+@click.version_option(__version__, "-V", "--version")
 def cli(yamlfile, resource_filter=(), **kwargs):
     """Generate an OpenAPI specification from a LinkML schema."""
     resource_filter = list(resource_filter) if resource_filter else None
