@@ -383,7 +383,11 @@ class OpenAPIGenerator(Generator):
         format_override = self._slot_format_override(slot)
         if format_override:
             target = base
-            if isinstance(base, Schema) and base.type == DataType.ARRAY and isinstance(base.items, Schema):
+            if (
+                isinstance(base, Schema)
+                and base.type == DataType.ARRAY
+                and isinstance(base.items, Schema)
+            ):
                 target = base.items
             if isinstance(target, Schema):
                 target.schema_format = format_override
@@ -627,8 +631,10 @@ class OpenAPIGenerator(Generator):
 
     # --- Operation builders ------------------------------------------------
 
-    def _content_for(self, schema: Schema | Reference, media_types: list[str]) -> dict[str, MediaType]:
-        """Build a `content` dict that advertises the same schema under every media type."""
+    def _content_for(
+        self, schema: Schema | Reference, media_types: list[str]
+    ) -> dict[str, MediaType]:
+        """Build a `content` dict advertising the same schema under every media type."""
         return {mt: MediaType(media_type_schema=schema) for mt in media_types}
 
     def _get_media_types(self, cls: ClassDefinition) -> list[str]:
