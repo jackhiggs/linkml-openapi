@@ -331,7 +331,38 @@ class OpenAPIGenerator(Generator):
                 base.exclusiveMaximum = None
                 base.maximum = slot.maximum_value
 
+        # `openapi.format` overrides whatever format the range heuristics
+        # picked. For multivalued slots the format applies to the array
+        # `items`, not the array itself (which has no format).
+        format_override = self._slot_format_override(slot)
+        if format_override:
+            target = base
+            if isinstance(base, Schema) and base.type == DataType.ARRAY and isinstance(base.items, Schema):
+                target = base.items
+            if isinstance(target, Schema):
+                target.schema_format = format_override
+
         return base
+
+    @staticmethod
+    def _slot_format_override(slot: SlotDefinition) -> str | None:
+        """Read openapi.format from a slot's own annotations."""
+        annotations = getattr(slot, "annotations", None)
+        if not annotations:
+            return None
+        # `annotations` is usually a dict but may arrive as a jsonasobj2
+        # JsonObj for inline `attributes:`-style slots. Iterate defensively.
+        try:
+            ann_values = list(annotations.values())
+        except AttributeError:
+            try:
+                ann_values = [annotations[k] for k in annotations]
+            except Exception:
+                return None
+        for ann in ann_values:
+            if getattr(ann, "tag", None) == "openapi.format":
+                return str(ann.value)
+        return None
 
     def _enum_to_schema(self, enum_def) -> Schema:
         """Convert a LinkML enum to a JSON Schema enum."""

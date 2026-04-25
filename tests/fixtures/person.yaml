@@ -76,6 +76,19 @@ classes:
         range: string
       postal_code:
         range: string
+      byte_size:
+        range: integer
+        annotations:
+          openapi.format: int64
+      avatar_blob:
+        range: string
+        annotations:
+          openapi.format: binary
+      tags:
+        range: string
+        multivalued: true
+        annotations:
+          openapi.format: byte
 
   Organization:
     is_a: NamedThing

@@ -319,6 +319,28 @@ class TestSlotAnnotations:
         assert "delete" not in item
 
 
+class TestFormatAnnotation:
+    def test_int64_overrides_default_integer(self):
+        spec = _generate()
+        props = spec["components"]["schemas"]["Address"]["properties"]
+        assert props["byte_size"]["type"] == "integer"
+        assert props["byte_size"]["format"] == "int64"
+
+    def test_binary_string(self):
+        spec = _generate()
+        props = spec["components"]["schemas"]["Address"]["properties"]
+        assert props["avatar_blob"]["type"] == "string"
+        assert props["avatar_blob"]["format"] == "binary"
+
+    def test_format_applied_to_array_items(self):
+        """Multivalued slot — the format goes on items, not the array."""
+        spec = _generate()
+        props = spec["components"]["schemas"]["Address"]["properties"]
+        assert props["tags"]["type"] == "array"
+        assert "format" not in props["tags"]
+        assert props["tags"]["items"]["format"] == "byte"
+
+
 class TestFlattenInheritance:
     def test_default_uses_allof(self):
         """Without flatten_inheritance, subclass schemas use allOf + $ref."""

@@ -221,6 +221,43 @@ needing the original LinkML source.
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.
 
+#### `openapi.format`
+
+Override the OpenAPI `format` string for a slot's emitted schema. Useful
+when the LinkML range alone doesn't carry enough information — for example
+to mark an `integer` slot as `int64` (large byte sizes, epoch milliseconds,
+high-cardinality IDs that overflow `Integer`) or to mark a `string` slot
+as `binary` / `byte` / `password`.
+
+| Slot range | Without annotation | With `openapi.format: int64` |
+|------------|---------------------|------------------------------|
+| `integer`  | `type: integer`     | `type: integer, format: int64` |
+| `string`   | `type: string`      | `type: string, format: <value>` |
+
+```yaml
+slots:
+  byte_size:
+    range: integer
+    annotations:
+      openapi.format: int64       # avoids 32-bit overflow downstream
+
+  avatar:
+    range: string
+    annotations:
+      openapi.format: binary       # raw bytes, not text
+
+  api_key:
+    range: string
+    annotations:
+      openapi.format: password     # Swagger UI redacts
+```
+
+For multivalued slots, the format is applied to the array's `items`
+schema, not the array itself (which has no `format` in OpenAPI).
+
+The annotation accepts any string; no allow-list is enforced, so vendor
+formats pass through unchanged.
+
 #### `openapi.path_variable`
 
 Marks a slot as a path variable in the item endpoint URL.
@@ -284,6 +321,7 @@ When no slots are annotated with `openapi.query_param`, the generator auto-infer
 | `openapi.media_types` | class | comma-separated list | `application/json` |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` | Auto-inferred from slot type |
+| `openapi.format` | slot | format string | derived from slot range |
 
 ## Type Mapping
 
