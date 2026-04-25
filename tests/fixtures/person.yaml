@@ -6,6 +6,8 @@ description: A test schema for persons
 prefixes:
   linkml: https://w3id.org/linkml/
   ex: https://example.org/
+  schema: http://schema.org/
+  foaf: http://xmlns.com/foaf/0.1/
 
 default_range: string
 
@@ -26,14 +28,18 @@ classes:
 
   Person:
     is_a: NamedThing
+    class_uri: schema:Person
     description: A person
     annotations:
       openapi.resource: "true"
+      openapi.media_types: "application/json,application/ld+json,text/turtle"
     attributes:
       email:
+        slot_uri: schema:email
         range: string
         pattern: "^\\S+@\\S+\\.\\S+$"
       age:
+        slot_uri: foaf:age
         range: integer
         minimum_value: 0
         maximum_value: 200
@@ -70,6 +76,19 @@ classes:
         range: string
       postal_code:
         range: string
+      byte_size:
+        range: integer
+        annotations:
+          openapi.format: int64
+      avatar_blob:
+        range: string
+        annotations:
+          openapi.format: binary
+      tags:
+        range: string
+        multivalued: true
+        annotations:
+          openapi.format: byte
 
   Organization:
     is_a: NamedThing
@@ -77,6 +96,22 @@ classes:
     attributes:
       founding_date:
         range: date
+
+  Catalog:
+    description: A catalog whose URL uses a slug rather than the full IRI
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+      openapi.operations: "list,read"
+    attributes:
+      id:
+        identifier: true
+        range: uri
+        required: true
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: slug
 
 enums:
   PersonStatus:

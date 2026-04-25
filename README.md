@@ -59,6 +59,20 @@ json_str = gen.serialize(format="json")
 | `server_url` | `str` | `"http://localhost:8000"` | `servers[0].url` in the spec |
 | `resource_filter` | `list[str]` | `None` | Only generate endpoints for these classes |
 | `format` | `str` | `"yaml"` | Output format: `"yaml"` or `"json"` |
+| `openapi_version` | `str` | `"3.0.3"` | OpenAPI dialect to emit (`"3.0.3"` or `"3.1.0"`) |
+| `flatten_inheritance` | `bool` | `False` | Inline parent properties instead of using `allOf` |
+
+> **Why default to 3.0.3?** Several popular codegens — notably
+> `openapi-generator`'s Spring server library — still mishandle `allOf`-based
+> inheritance under OpenAPI 3.1.0, silently producing duplicate `Foo_1`
+> schemas. 3.0.3 round-trips the same schemas cleanly. Pass
+> `--openapi-version 3.1.0` to opt into the newer dialect once your
+> downstream tooling is ready.
+
+> **`--flatten-inheritance`** inlines every inherited property directly into
+> the subclass schema, so each component is self-contained and there is no
+> `allOf` at all. Use it for codegens that still trip on inline-schema-inside
+> -allOf, or whenever you prefer denormalized schemas.
 
 ## Annotations
 
@@ -141,9 +155,108 @@ Default when omitted: all five operations (`list,create,read,update,delete`).
       openapi.operations: "list"        # Collection-only, no item endpoint
 ```
 
+#### `openapi.media_types`
+
+Comma-separated list of media types each operation generated for the class
+should advertise on its responses and request bodies.
+
+| Value | Example result |
+|-------|----------------|
+| `"application/json"` | JSON only (default when omitted) |
+| `"application/json,application/ld+json,text/turtle,application/rdf+xml"` | Every listed type appears under `responses[*].content` and `requestBody.content` |
+
+The first listed type stays the default. Each operation's response (and the
+request body, on `POST` / `PUT`) gets one `content` entry per media type, all
+referencing the same component schema. Use this for RDF-shaped APIs (JSON-LD,
+Turtle, RDF/XML) or any other content negotiation surface (CSV, NDJSON,
+XML, …) — it removes the need for a postprocessor that fans out the content
+blocks by hand.
+
+```yaml
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+      openapi.media_types: "application/json,application/ld+json,text/turtle,application/rdf+xml"
+```
+
+#### `x-rdf-class` / `x-rdf-property` extensions
+
+The generator propagates LinkML's `class_uri` and `slot_uri` into the OpenAPI
+output as `x-` extensions. CURIEs are expanded against the schema's `prefixes`
+map; absolute IRIs are passed through verbatim. No annotation is needed —
+this is automatic for any schema that already declares URIs.
+
+```yaml
+prefixes:
+  schema: http://schema.org/
+
+classes:
+  Person:
+    class_uri: schema:Person
+    attributes:
+      email:
+        slot_uri: schema:email
+```
+
+produces:
+
+```yaml
+components:
+  schemas:
+    Person:
+      type: object
+      x-rdf-class: http://schema.org/Person
+      properties:
+        email:
+          type: string
+          x-rdf-property: http://schema.org/email
+```
+
+This lets RDF-aware downstream tools (SHACL generators, JSON-LD context
+builders, Jena/RDF4J mappers) consume the OpenAPI spec directly without
+needing the original LinkML source.
+
 ### Slot-level annotations
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.
+
+#### `openapi.format`
+
+Override the OpenAPI `format` string for a slot's emitted schema. Useful
+when the LinkML range alone doesn't carry enough information — for example
+to mark an `integer` slot as `int64` (large byte sizes, epoch milliseconds,
+high-cardinality IDs that overflow `Integer`) or to mark a `string` slot
+as `binary` / `byte` / `password`.
+
+| Slot range | Without annotation | With `openapi.format: int64` |
+|------------|---------------------|------------------------------|
+| `integer`  | `type: integer`     | `type: integer, format: int64` |
+| `string`   | `type: string`      | `type: string, format: <value>` |
+
+```yaml
+slots:
+  byte_size:
+    range: integer
+    annotations:
+      openapi.format: int64       # avoids 32-bit overflow downstream
+
+  avatar:
+    range: string
+    annotations:
+      openapi.format: binary       # raw bytes, not text
+
+  api_key:
+    range: string
+    annotations:
+      openapi.format: password     # Swagger UI redacts
+```
+
+For multivalued slots, the format is applied to the array's `items`
+schema, not the array itself (which has no `format` in OpenAPI).
+
+The annotation accepts any string; no allow-list is enforced, so vendor
+formats pass through unchanged.
 
 #### `openapi.path_variable`
 
@@ -151,12 +264,20 @@ Marks a slot as a path variable in the item endpoint URL.
 
 | Value | Behaviour |
 |-------|-----------|
-| `"true"` | Slot appears as `{slot_name}` in the item path |
+| `"true"` | Slot appears as `{slot_name}` in the item path; the parameter schema mirrors the slot's range (alias for `"iri"`) |
+| `"iri"` | Same as `"true"` — preserves any `format: uri` typing from a uri-range slot |
+| `"slug"` | Slot appears as `{slot_name}` but the parameter schema is plain `string`, regardless of the slot's range |
 | omitted | Slot is not a path variable |
+
+Use `"slug"` when the URL segment is a short identifier (`main`,
+`uk-population-2026`) derived from the resource's IRI rather than the IRI
+itself — the body still carries the absolute IRI in the same field. Use
+`"iri"` (or `"true"`) when the URL segment is the full IRI (e.g. behind a
+URL-encoding gateway).
 
 When one or more slots are annotated as path variables, they replace the default identifier-based placeholder. Multiple path variables are joined in order: `/people/{id}/{version}`.
 
-When no slots are annotated as path variables, the generator falls back to the class's identifier slot (or a slot named `id`).
+When no slots are annotated as path variables, the generator falls back to the class's identifier slot (or a slot named `id`) in `iri` mode.
 
 ```yaml
   Person:
@@ -166,7 +287,20 @@ When no slots are annotated as path variables, the generator falls back to the c
     slot_usage:
       id:
         annotations:
-          openapi.path_variable: "true"   # GET /people/{id}
+          openapi.path_variable: "true"   # GET /people/{id}, schema mirrors slot range
+
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id:
+        identifier: true
+        range: uri
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: slug     # GET /catalogs/{id}, schema is plain string
 ```
 
 #### `openapi.query_param`
@@ -205,8 +339,10 @@ When no slots are annotated with `openapi.query_param`, the generator auto-infer
 | `openapi.resource` | class | `"true"` / `"false"` | All non-abstract, non-mixin classes |
 | `openapi.path` | class | path segment string | Auto-pluralized snake_case of class name |
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
+| `openapi.media_types` | class | comma-separated list | `application/json` |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` | Auto-inferred from slot type |
+| `openapi.format` | slot | format string | derived from slot range |
 
 ## Type Mapping
 

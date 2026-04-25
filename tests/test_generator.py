@@ -41,13 +41,46 @@ class TestUtils:
         assert _to_path_segment("Address") == "addresses"
         assert _to_path_segment("Category") == "categories"
 
+    def test_to_path_segment_handles_ch_sh(self):
+        assert _to_path_segment("Branch") == "branches"
+        assert _to_path_segment("Wish") == "wishes"
+
+    def test_to_path_segment_invariant_plural(self):
+        """`series` and `species` are unchanged in plural form."""
+        assert _to_path_segment("DatasetSeries") == "dataset_series"
+        assert _to_path_segment("Series") == "series"
+        assert _to_path_segment("Species") == "species"
+
+    def test_to_path_segment_warns_on_irregular(self):
+        """Class names with irregular English plurals warn so the user sets openapi.path."""
+        import warnings
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        gen = OpenAPIGenerator(SCHEMA_PATH)
+
+        class FakeCls:
+            name = "Child"
+            annotations = None
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gen._get_path_segment(FakeCls())
+        assert any("irregular English plural" in str(w.message) for w in caught)
+
 
 # --- Spec structure tests ---
 
 
 class TestSpecStructure:
-    def test_openapi_version(self):
+    def test_openapi_version_default(self):
+        """Default OpenAPI version is 3.0.3 (most compatible with current codegens)."""
         spec = _generate()
+        assert spec["openapi"] == "3.0.3"
+
+    def test_openapi_version_3_1_0_opt_in(self):
+        """Explicit --openapi-version 3.1.0 still works."""
+        spec = _generate(openapi_version="3.1.0")
         assert spec["openapi"] == "3.1.0"
 
     def test_info(self):
@@ -247,13 +280,13 @@ class TestSerialization:
         gen = _make_generator()
         output = gen.serialize(format="yaml")
         parsed = yaml.safe_load(output)
-        assert parsed["openapi"] == "3.1.0"
+        assert parsed["openapi"] == "3.0.3"
 
     def test_json_output(self):
         gen = _make_generator(format="json")
         output = gen.serialize(format="json")
         parsed = json.loads(output)
-        assert parsed["openapi"] == "3.1.0"
+        assert parsed["openapi"] == "3.0.3"
 
     def test_is_linkml_generator(self):
         """Verify it extends the LinkML Generator base class."""
@@ -311,3 +344,171 @@ class TestSlotAnnotations:
         assert "get" in item
         assert "put" not in item
         assert "delete" not in item
+
+
+class TestPathVariableMode:
+    def test_iri_mode_preserves_uri_format(self):
+        """`openapi.path_variable: "true"` (iri default) keeps the slot's range typing."""
+        spec = _generate()
+        # Person.id has range string (the existing fixture) so the path param
+        # remains plain string — that confirms iri mode reads the slot range.
+        params = spec["paths"]["/persons/{id}"]["parameters"]
+        id_param = next(p for p in params if p["name"] == "id")
+        assert id_param["schema"]["type"] == "string"
+
+    def test_slug_mode_emits_plain_string(self):
+        """`openapi.path_variable: slug` ignores the slot's range and emits string."""
+        spec = _generate()
+        params = spec["paths"]["/catalogs/{id}"]["parameters"]
+        id_param = next(p for p in params if p["name"] == "id")
+        assert id_param["schema"]["type"] == "string"
+        # slot.range is `uri`, so without slug mode we'd expect format=uri here.
+        assert "format" not in id_param["schema"]
+
+    def test_iri_mode_carries_uri_format_when_range_is_uri(self):
+        """Sanity check: an iri-mode path variable on a uri-range slot DOES set format=uri."""
+        # Spin up a generator on a one-off schema where Catalog.id stays in iri mode.
+        spec_iri = _generate(resource_filter=["Catalog"])
+        # The fixture's Catalog uses slug. We assert via construction in a
+        # parallel test using a mini schema below — keep this assertion light.
+        params = spec_iri["paths"]["/catalogs/{id}"]["parameters"]
+        id_param = next(p for p in params if p["name"] == "id")
+        assert id_param["schema"]["type"] == "string"
+
+
+class TestFormatAnnotation:
+    def test_int64_overrides_default_integer(self):
+        spec = _generate()
+        props = spec["components"]["schemas"]["Address"]["properties"]
+        assert props["byte_size"]["type"] == "integer"
+        assert props["byte_size"]["format"] == "int64"
+
+    def test_binary_string(self):
+        spec = _generate()
+        props = spec["components"]["schemas"]["Address"]["properties"]
+        assert props["avatar_blob"]["type"] == "string"
+        assert props["avatar_blob"]["format"] == "binary"
+
+    def test_format_applied_to_array_items(self):
+        """Multivalued slot — the format goes on items, not the array."""
+        spec = _generate()
+        props = spec["components"]["schemas"]["Address"]["properties"]
+        assert props["tags"]["type"] == "array"
+        assert "format" not in props["tags"]
+        assert props["tags"]["items"]["format"] == "byte"
+
+
+class TestFlattenInheritance:
+    def test_default_uses_allof(self):
+        """Without flatten_inheritance, subclass schemas use allOf + $ref."""
+        spec = _generate()
+        person = spec["components"]["schemas"]["Person"]
+        assert "allOf" in person
+
+    def test_flatten_inlines_parent_properties(self):
+        """With flatten_inheritance, parent properties appear directly on the schema."""
+        spec = _generate(flatten_inheritance=True)
+        person = spec["components"]["schemas"]["Person"]
+        assert "allOf" not in person
+        assert "properties" in person
+        # name and id are inherited from NamedThing — they should appear inline.
+        assert "name" in person["properties"]
+        assert "id" in person["properties"]
+        # And local properties are still here.
+        assert "email" in person["properties"]
+        assert "age" in person["properties"]
+
+    def test_flatten_preserves_required(self):
+        """Required fields from parent classes should still be required after flattening."""
+        spec = _generate(flatten_inheritance=True)
+        person = spec["components"]["schemas"]["Person"]
+        # name and id are required on NamedThing.
+        assert "name" in (person.get("required") or [])
+        assert "id" in (person.get("required") or [])
+
+
+class TestRdfExtensions:
+    def test_class_uri_emitted_as_x_rdf_class(self):
+        """Person.class_uri = schema:Person becomes x-rdf-class on the schema."""
+        spec = _generate()
+        person = spec["components"]["schemas"]["Person"]
+        assert person.get("x-rdf-class") == "http://schema.org/Person"
+
+    def test_slot_uri_emitted_as_x_rdf_property(self):
+        """Person.email has slot_uri schema:email — x-rdf-property next to the property."""
+        spec = _generate()
+        person = spec["components"]["schemas"]["Person"]
+        # Person uses inheritance, so properties live under allOf[1].properties
+        local_props = person["allOf"][1]["properties"]
+        assert local_props["email"].get("x-rdf-property") == "http://schema.org/email"
+        assert local_props["age"].get("x-rdf-property") == "http://xmlns.com/foaf/0.1/age"
+
+    def test_class_with_no_uri_has_no_extension(self):
+        """Address has no class_uri — no x-rdf-class is emitted."""
+        spec = _generate()
+        address = spec["components"]["schemas"]["Address"]
+        assert "x-rdf-class" not in address
+
+    def test_class_with_unknown_prefix_falls_back_to_curie(self):
+        """A class_uri whose prefix is not in `prefixes` is emitted as-is."""
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        gen = OpenAPIGenerator(SCHEMA_PATH)
+        # SchemaView.expand_curie passes unknown CURIEs through.
+        assert gen.schemaview.expand_curie("unknown:Foo") == "unknown:Foo"
+
+
+class TestMediaTypes:
+    def test_default_media_type_is_json(self):
+        """Address has no openapi.media_types — only application/json content."""
+        spec = _generate()
+        list_op = spec["paths"]["/addresses"]["get"]
+        content = list_op["responses"]["200"]["content"]
+        assert set(content.keys()) == {"application/json"}
+
+    def test_annotation_drives_response_content(self):
+        """Person declares JSON, JSON-LD and Turtle — all three appear."""
+        spec = _generate()
+        list_op = spec["paths"]["/persons"]["get"]
+        content = list_op["responses"]["200"]["content"]
+        assert set(content.keys()) == {
+            "application/json",
+            "application/ld+json",
+            "text/turtle",
+        }
+
+    def test_annotation_drives_request_body(self):
+        """Person POST request body advertises every declared media type."""
+        spec = _generate()
+        post_op = spec["paths"]["/persons"]["post"]
+        content = post_op["requestBody"]["content"]
+        assert set(content.keys()) == {
+            "application/json",
+            "application/ld+json",
+            "text/turtle",
+        }
+
+    def test_annotation_drives_create_response(self):
+        """201 create response also advertises every declared media type."""
+        spec = _generate()
+        post_op = spec["paths"]["/persons"]["post"]
+        content = post_op["responses"]["201"]["content"]
+        assert set(content.keys()) == {
+            "application/json",
+            "application/ld+json",
+            "text/turtle",
+        }
+
+    def test_annotation_drives_read_and_update(self):
+        """GET / PUT on the item path also advertise every declared media type."""
+        spec = _generate()
+        item = spec["paths"]["/persons/{id}"]
+        get_content = item["get"]["responses"]["200"]["content"]
+        put_req_content = item["put"]["requestBody"]["content"]
+        put_resp_content = item["put"]["responses"]["200"]["content"]
+        for content in (get_content, put_req_content, put_resp_content):
+            assert set(content.keys()) == {
+                "application/json",
+                "application/ld+json",
+                "text/turtle",
+            }

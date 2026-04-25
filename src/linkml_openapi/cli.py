@@ -22,9 +22,22 @@ from linkml_openapi.generator import OpenAPIGenerator
     multiple=True,
     help="Only generate endpoints for these classes (repeatable)",
 )
+@click.option(
+    "--openapi-version",
+    type=click.Choice(["3.0.3", "3.1.0"]),
+    default="3.0.3",
+    show_default=True,
+    help="OpenAPI dialect to emit. 3.0.3 is the default for downstream codegen compatibility.",
+)
+@click.option(
+    "--flatten-inheritance",
+    is_flag=True,
+    default=False,
+    help="Inline parent properties into subclass schemas instead of using allOf.",
+)
 @click.version_option("0.1.0", "-V", "--version")
 def cli(yamlfile, resource_filter=(), **kwargs):
-    """Generate OpenAPI 3.1 specification from a LinkML schema."""
+    """Generate an OpenAPI specification from a LinkML schema."""
     resource_filter = list(resource_filter) if resource_filter else None
     gen = OpenAPIGenerator(yamlfile, resource_filter=resource_filter, **kwargs)
     click.echo(gen.serialize())

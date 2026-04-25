@@ -49,13 +49,59 @@ RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
 }
 
 
+# Class-name suffixes that are already plural (or unchanged in plural form)
+# and should be returned as-is from `_pluralize`.
+_INVARIANT_PLURAL_SUFFIXES = ("series", "species", "genus")
+
+# Class-name suffixes that become irregular in plural form. We don't try
+# to inflect these — we just emit a heads-up so the user can set
+# `openapi.path` explicitly. Listed lower-case for case-insensitive match.
+_IRREGULAR_HINT_SUFFIXES = (
+    "child",
+    "datum",
+    "criterion",
+    "phenomenon",
+    "analysis",
+    "thesis",
+    "axis",
+    "crisis",
+)
+
+
 def _pluralize(name: str) -> str:
-    """Simple English pluralization for URL paths."""
-    if name.endswith("s") or name.endswith("x") or name.endswith("z"):
+    """Pluralize an English noun for URL paths.
+
+    Handles the common regular-pluralization patterns (`-s/-x/-z/-ch/-sh`,
+    consonant-`y`, default `+s`) and the most common already-plural Latin
+    forms used in domain modeling (`series`, `species`, `genus`). For
+    irregular nouns (`child`, `person`, `index`, …) the function falls
+    back to `+s` and the caller is expected to set `openapi.path`
+    explicitly when correctness matters; `_warn_on_irregular_plural`
+    surfaces a warning at generation time.
+    """
+    if not name:
+        return name
+
+    lower = name.lower()
+    for inv in _INVARIANT_PLURAL_SUFFIXES:
+        if lower.endswith(inv):
+            return name
+
+    if name.endswith(("ch", "sh")):
+        return name + "es"
+    if name.endswith(("s", "x", "z")):
         return name + "es"
     if name.endswith("y") and name[-2:] not in ("ay", "ey", "oy", "uy"):
         return name[:-1] + "ies"
     return name + "s"
+
+
+def _is_irregular_plural_hint(name: str) -> bool:
+    """True when `name` looks like it would be misled by the default rules."""
+    if not name:
+        return False
+    lower = name.lower()
+    return any(lower.endswith(suf) for suf in _IRREGULAR_HINT_SUFFIXES)
 
 
 def _to_snake_case(name: str) -> str:
@@ -92,13 +138,28 @@ class OpenAPIGenerator(Generator):
     api_version: str = "1.0.0"
     server_url: str = "http://localhost:8000"
     resource_filter: list[str] | None = None
+    # OpenAPI dialect to emit. 3.0.3 is the default because some popular
+    # codegens (notably openapi-generator's Spring server library) still
+    # mishandle 3.1 + allOf-based inheritance, silently producing duplicate
+    # `Foo_1` schemas. Pass "3.1.0" to opt into the newer dialect once
+    # downstream tools catch up.
+    openapi_version: str = "3.0.3"
+    # Inline parent properties directly into subclass schemas instead of
+    # using `allOf` + `$ref` for inheritance. Off by default; enable for
+    # codegens that still trip on inline-schema-inside-allOf.
+    flatten_inheritance: bool = False
 
     def serialize(self, **kwargs) -> str:
         """Generate and serialize the OpenAPI spec."""
+        # Reset the x-rdf-* maps; _build_openapi populates them as it walks the schema.
+        self._x_rdf_class: dict[str, str] = {}
+        self._x_rdf_property: dict[tuple[str, str], str] = {}
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
+        raw["openapi"] = self.openapi_version
         self._strip_invalid_parameter_fields(raw)
         self._coerce_numeric_constraints(raw)
+        self._inject_rdf_extensions(raw)
         if self.format == "json":
             return json.dumps(raw, indent=2) + "\n"
         return yaml.dump(raw, default_flow_style=False, sort_keys=False)
@@ -153,9 +214,12 @@ class OpenAPIGenerator(Generator):
 
         schemas: dict[str, Schema | Reference] = {}
 
-        # Component schemas for all classes
+        # Component schemas for all classes. Slot-walking happens once per
+        # class inside `_class_to_schema`; the same walk also records any
+        # slot_uri values for `_inject_rdf_extensions` to consume.
         for class_name in sv.all_classes():
             cls = sv.get_class(class_name)
+            self._record_rdf_class_uri(cls)
             schemas[class_name] = self._class_to_schema(cls)
 
         # Enum schemas
@@ -182,16 +246,16 @@ class OpenAPIGenerator(Generator):
 
             # Item path
             if path_vars:
-                item_suffix = "/".join(f"{{{s.name}}}" for s in path_vars)
+                item_suffix = "/".join(f"{{{s.name}}}" for s, _mode in path_vars)
                 item_path = f"/{path_segment}/{item_suffix}"
                 path_params = [
                     Parameter(
                         name=s.name,
                         param_in=ParameterLocation.PATH,
                         required=True,
-                        param_schema=self._slot_to_schema(s),
+                        param_schema=self._path_variable_schema(s, mode),
                     )
-                    for s in path_vars
+                    for s, mode in path_vars
                 ]
                 item = PathItem(parameters=path_params)
                 if "read" in operations:
@@ -202,6 +266,10 @@ class OpenAPIGenerator(Generator):
                     item.delete = self._make_delete_operation(cls, class_name)
                 paths[item_path] = item
 
+        # openapi-pydantic restricts the `openapi` field to 3.1.x literals;
+        # we build the model with 3.1.0 and then rewrite the version string
+        # to self.openapi_version in serialize(). The 3.0.3 / 3.1.0 spec
+        # bodies this generator emits are otherwise structurally identical.
         return OpenAPI(
             openapi="3.1.0",
             info=info,
@@ -216,12 +284,12 @@ class OpenAPIGenerator(Generator):
         """Convert a LinkML class to a JSON Schema object."""
         sv = self.schemaview
 
-        if cls.is_a:
-            # Only include slots defined directly on this class, not inherited ones
+        if cls.is_a and not self.flatten_inheritance:
             parent_slot_names = {s.name for s in sv.class_induced_slots(cls.is_a)}
             local_properties: dict[str, Schema | Reference] = {}
             local_required: list[str] = []
             for slot in sv.class_induced_slots(cls.name):
+                self._record_rdf_slot_uri(cls.name, slot)
                 if slot.name not in parent_slot_names:
                     local_properties[slot.name] = self._slot_to_schema(slot)
                     if slot.required:
@@ -244,10 +312,14 @@ class OpenAPIGenerator(Generator):
                 schema.description = cls.description
             return schema
 
+        # Flat schema: every induced slot (inherited and local) as a
+        # top-level property. Used for non-inheriting classes and when
+        # `flatten_inheritance` is on.
         properties: dict[str, Schema | Reference] = {}
         required: list[str] = []
 
         for slot in sv.class_induced_slots(cls.name):
+            self._record_rdf_slot_uri(cls.name, slot)
             properties[slot.name] = self._slot_to_schema(slot)
             if slot.required:
                 required.append(slot.name)
@@ -308,7 +380,56 @@ class OpenAPIGenerator(Generator):
                 base.exclusiveMaximum = None
                 base.maximum = slot.maximum_value
 
+        # `openapi.format` overrides whatever format the range heuristics
+        # picked. For multivalued slots the format applies to the array
+        # `items`, not the array itself (which has no format).
+        format_override = self._slot_format_override(slot)
+        if format_override:
+            target = base
+            if (
+                isinstance(base, Schema)
+                and base.type == DataType.ARRAY
+                and isinstance(base.items, Schema)
+            ):
+                target = base.items
+            if isinstance(target, Schema):
+                target.schema_format = format_override
+
         return base
+
+    @staticmethod
+    def _slot_format_override(slot: SlotDefinition) -> str | None:
+        """Read openapi.format from a slot's own annotations."""
+        annotations = getattr(slot, "annotations", None)
+        if not annotations:
+            return None
+        # For inline `attributes:`-style slots `annotations` arrives as a
+        # jsonasobj2 JsonObj rather than a dict — it has no .values() but
+        # is still keyed-iterable.
+        if isinstance(annotations, dict):
+            ann_values: list = list(annotations.values())
+        else:
+            ann_values = [annotations[k] for k in annotations]
+        for ann in ann_values:
+            if getattr(ann, "tag", None) == "openapi.format":
+                return str(ann.value)
+        return None
+
+    def _path_variable_schema(self, slot: SlotDefinition, mode: str) -> Schema | Reference:
+        """Pick the parameter schema for a path variable, honouring the mode.
+
+        In "slug" mode the parameter is a plain string regardless of the
+        slot's range — this matches the URL-segment-as-slug convention,
+        where the body still carries the full IRI in the same field.
+        In "iri" mode the slot's full schema is used, preserving any
+        `format: uri` typing.
+        """
+        if mode == "slug":
+            schema = Schema(type=DataType.STRING)
+            if slot.description:
+                schema.description = slot.description
+            return schema
+        return self._slot_to_schema(slot)
 
     def _enum_to_schema(self, enum_def) -> Schema:
         """Convert a LinkML enum to a JSON Schema enum."""
@@ -324,6 +445,16 @@ class OpenAPIGenerator(Generator):
 
     # --- Resource/path helpers ---
 
+    @staticmethod
+    def _class_annotation(cls: ClassDefinition, tag: str) -> str | None:
+        """Read a single class-level annotation value, or None if absent."""
+        if not cls.annotations:
+            return None
+        for ann in cls.annotations.values():
+            if ann.tag == tag:
+                return str(ann.value)
+        return None
+
     def _get_resource_classes(self) -> list[str]:
         """Determine which classes should have REST endpoints."""
         sv = self.schemaview
@@ -331,15 +462,11 @@ class OpenAPIGenerator(Generator):
         if self.resource_filter:
             return self.resource_filter
 
-        annotated = []
-        for class_name in sv.all_classes():
-            cls = sv.get_class(class_name)
-            annotations = (
-                {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-            )
-            if _is_truthy(annotations.get("openapi.resource", False)):
-                annotated.append(class_name)
-
+        annotated = [
+            name
+            for name in sv.all_classes()
+            if _is_truthy(self._class_annotation(sv.get_class(name), "openapi.resource") or False)
+        ]
         if annotated:
             return annotated
 
@@ -376,45 +503,137 @@ class OpenAPIGenerator(Generator):
                     return str(ann.value)
         return None
 
-    def _get_path_variables(self, cls: ClassDefinition) -> list[SlotDefinition]:
-        """Get path variable slots from annotations, or fall back to identifier."""
-        sv = self.schemaview
-        annotated = []
-        for slot in sv.class_induced_slots(cls.name):
-            val = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
-            if val and _is_truthy(val):
-                annotated.append(slot)
+    @staticmethod
+    def _path_variable_mode(value: str | None) -> str | None:
+        """Normalize openapi.path_variable values.
+
+        Accepted forms:
+            "true" / "iri" — preserve the slot's range typing on the path parameter
+                             (e.g. `string format=uri` for `range: uri`)
+            "slug"          — emit `string` regardless of slot range; useful when the
+                             URL segment is a slug derived from the resource's IRI,
+                             not the IRI itself
+            anything else   — not a path variable
+
+        Returns "iri" or "slug" when the slot is a path variable, else None.
+        """
+        if value is None:
+            return None
+        v = str(value).strip().lower()
+        if v in ("true", "iri"):
+            return "iri"
+        if v == "slug":
+            return "slug"
+        return None
+
+    def _get_path_variables(self, cls: ClassDefinition) -> list[tuple[SlotDefinition, str]]:
+        """Get path variable slots and their mode from annotations.
+
+        Returns a list of (slot, mode) where mode is "slug" or "iri".
+        Falls back to the identifier slot (or one literally named "id")
+        in "iri" mode when no slots are explicitly annotated.
+        """
+        annotated: list[tuple[SlotDefinition, str]] = []
+        identifier_slot: SlotDefinition | None = None
+        id_named_slot: SlotDefinition | None = None
+        for slot in self.schemaview.class_induced_slots(cls.name):
+            mode = self._path_variable_mode(
+                self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
+            )
+            if mode:
+                annotated.append((slot, mode))
+            if identifier_slot is None and slot.identifier:
+                identifier_slot = slot
+            if id_named_slot is None and slot.name == "id":
+                id_named_slot = slot
         if annotated:
             return annotated
-        # Fall back to identifier slot
-        for slot in sv.class_induced_slots(cls.name):
-            if slot.identifier:
-                return [slot]
-        for slot in sv.class_induced_slots(cls.name):
-            if slot.name == "id":
-                return [slot]
-        return []
+        fallback = identifier_slot or id_named_slot
+        return [(fallback, "iri")] if fallback else []
 
     def _get_path_segment(self, cls: ClassDefinition) -> str:
         """Get the URL path segment for a class."""
-        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-        if "openapi.path" in annotations:
-            return annotations["openapi.path"].lstrip("/")
+        explicit = self._class_annotation(cls, "openapi.path")
+        if explicit is not None:
+            return explicit.lstrip("/")
+        if _is_irregular_plural_hint(cls.name):
+            import warnings
+
+            warnings.warn(
+                f"Class {cls.name!r} has an irregular English plural that the "
+                "default pluralizer cannot handle correctly. Set "
+                "`openapi.path:` on the class to fix the URL.",
+                stacklevel=2,
+            )
         return _to_path_segment(cls.name)
 
     def _get_operations(self, cls: ClassDefinition) -> list[str]:
         """Get the list of CRUD operations for a class."""
-        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-        if "openapi.operations" in annotations:
-            ops = annotations["openapi.operations"]
-            if isinstance(ops, str):
-                return [o.strip() for o in ops.split(",")]
-            return list(ops)
-        return ["list", "create", "read", "update", "delete"]
+        ops = self._class_annotation(cls, "openapi.operations")
+        if ops is None:
+            return ["list", "create", "read", "update", "delete"]
+        return [o.strip() for o in ops.split(",")]
 
-    # --- Operation builders ---
+    # --- RDF extension propagation -----------------------------------------
+
+    def _record_rdf_class_uri(self, cls: ClassDefinition) -> None:
+        """Remember the class's expanded class_uri for later injection.
+
+        Slot-level URIs are recorded in the same pass as schema generation
+        in `_class_to_schema`, so we don't need a parallel slot walk here.
+        """
+        if cls.class_uri:
+            self._x_rdf_class[cls.name] = self.schemaview.expand_curie(cls.class_uri)
+
+    def _record_rdf_slot_uri(self, class_name: str, slot: SlotDefinition) -> None:
+        """Remember a slot's expanded slot_uri keyed by (class, slot)."""
+        if slot.slot_uri:
+            self._x_rdf_property[(class_name, slot.name)] = self.schemaview.expand_curie(
+                slot.slot_uri
+            )
+
+    def _inject_rdf_extensions(self, raw: dict) -> None:
+        """Walk the dumped spec and decorate schemas with x-rdf-* extensions."""
+        schemas = (raw.get("components") or {}).get("schemas") or {}
+        for class_name, schema in schemas.items():
+            class_uri = self._x_rdf_class.get(class_name)
+            if class_uri:
+                schema["x-rdf-class"] = class_uri
+            # Properties may live at top level or inside the inline schema half
+            # of an `allOf` (used for inheritance).
+            holders: list[dict] = []
+            if isinstance(schema.get("properties"), dict):
+                holders.append(schema["properties"])
+            for sub in schema.get("allOf") or []:
+                if isinstance(sub, dict) and isinstance(sub.get("properties"), dict):
+                    holders.append(sub["properties"])
+            for props in holders:
+                for slot_name, slot_schema in props.items():
+                    slot_uri = self._x_rdf_property.get((class_name, slot_name))
+                    if slot_uri and isinstance(slot_schema, dict):
+                        slot_schema["x-rdf-property"] = slot_uri
+
+    # --- Operation builders ------------------------------------------------
+
+    def _content_for(
+        self, schema: Schema | Reference, media_types: list[str]
+    ) -> dict[str, MediaType]:
+        """Build a `content` dict advertising the same schema under every media type."""
+        return {mt: MediaType(media_type_schema=schema) for mt in media_types}
+
+    def _get_media_types(self, cls: ClassDefinition) -> list[str]:
+        """Read the openapi.media_types class annotation, defaulting to JSON only."""
+        raw = self._class_annotation(cls, "openapi.media_types")
+        if not raw:
+            return ["application/json"]
+        return [m.strip() for m in raw.split(",") if m.strip()]
 
     def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        array_schema = Schema(
+            type=DataType.ARRAY,
+            items=Reference(ref=f"#/components/schemas/{class_name}"),
+        )
         return Operation(
             summary=f"List {_to_path_segment(class_name).replace('_', ' ')}",
             operationId=f"list_{_to_path_segment(class_name)}",
@@ -423,45 +642,34 @@ class OpenAPIGenerator(Generator):
             responses={
                 "200": Response(
                     description=f"List of {class_name} objects",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Schema(
-                                type=DataType.ARRAY,
-                                items=Reference(ref=f"#/components/schemas/{class_name}"),
-                            )
-                        )
-                    },
+                    content=self._content_for(array_schema, media_types),
                 )
             },
         )
 
     def _make_create_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        ref = Reference(ref=f"#/components/schemas/{class_name}")
         return Operation(
             summary=f"Create a {class_name}",
             operationId=f"create_{_to_snake_case(class_name)}",
             tags=[class_name],
             requestBody=RequestBody(
                 required=True,
-                content={
-                    "application/json": MediaType(
-                        media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                    )
-                },
+                content=self._content_for(ref, media_types),
             ),
             responses={
                 "201": Response(
                     description=f"{class_name} created",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                        )
-                    },
+                    content=self._content_for(ref, media_types),
                 ),
                 "422": Response(description="Validation error"),
             },
         )
 
     def _make_read_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        ref = Reference(ref=f"#/components/schemas/{class_name}")
         return Operation(
             summary=f"Get a {class_name}",
             operationId=f"get_{_to_snake_case(class_name)}",
@@ -469,37 +677,27 @@ class OpenAPIGenerator(Generator):
             responses={
                 "200": Response(
                     description=f"{class_name} details",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                        )
-                    },
+                    content=self._content_for(ref, media_types),
                 ),
                 "404": Response(description="Not found"),
             },
         )
 
     def _make_update_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        ref = Reference(ref=f"#/components/schemas/{class_name}")
         return Operation(
             summary=f"Update a {class_name}",
             operationId=f"update_{_to_snake_case(class_name)}",
             tags=[class_name],
             requestBody=RequestBody(
                 required=True,
-                content={
-                    "application/json": MediaType(
-                        media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                    )
-                },
+                content=self._content_for(ref, media_types),
             ),
             responses={
                 "200": Response(
                     description=f"{class_name} updated",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                        )
-                    },
+                    content=self._content_for(ref, media_types),
                 ),
                 "404": Response(description="Not found"),
                 "422": Response(description="Validation error"),
