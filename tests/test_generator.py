@@ -46,8 +46,14 @@ class TestUtils:
 
 
 class TestSpecStructure:
-    def test_openapi_version(self):
+    def test_openapi_version_default(self):
+        """Default OpenAPI version is 3.0.3 (most compatible with current codegens)."""
         spec = _generate()
+        assert spec["openapi"] == "3.0.3"
+
+    def test_openapi_version_3_1_0_opt_in(self):
+        """Explicit --openapi-version 3.1.0 still works."""
+        spec = _generate(openapi_version="3.1.0")
         assert spec["openapi"] == "3.1.0"
 
     def test_info(self):
@@ -247,13 +253,13 @@ class TestSerialization:
         gen = _make_generator()
         output = gen.serialize(format="yaml")
         parsed = yaml.safe_load(output)
-        assert parsed["openapi"] == "3.1.0"
+        assert parsed["openapi"] == "3.0.3"
 
     def test_json_output(self):
         gen = _make_generator(format="json")
         output = gen.serialize(format="json")
         parsed = json.loads(output)
-        assert parsed["openapi"] == "3.1.0"
+        assert parsed["openapi"] == "3.0.3"
 
     def test_is_linkml_generator(self):
         """Verify it extends the LinkML Generator base class."""
@@ -311,6 +317,35 @@ class TestSlotAnnotations:
         assert "get" in item
         assert "put" not in item
         assert "delete" not in item
+
+
+class TestFlattenInheritance:
+    def test_default_uses_allof(self):
+        """Without flatten_inheritance, subclass schemas use allOf + $ref."""
+        spec = _generate()
+        person = spec["components"]["schemas"]["Person"]
+        assert "allOf" in person
+
+    def test_flatten_inlines_parent_properties(self):
+        """With flatten_inheritance, parent properties appear directly on the schema."""
+        spec = _generate(flatten_inheritance=True)
+        person = spec["components"]["schemas"]["Person"]
+        assert "allOf" not in person
+        assert "properties" in person
+        # name and id are inherited from NamedThing — they should appear inline.
+        assert "name" in person["properties"]
+        assert "id" in person["properties"]
+        # And local properties are still here.
+        assert "email" in person["properties"]
+        assert "age" in person["properties"]
+
+    def test_flatten_preserves_required(self):
+        """Required fields from parent classes should still be required after flattening."""
+        spec = _generate(flatten_inheritance=True)
+        person = spec["components"]["schemas"]["Person"]
+        # name and id are required on NamedThing.
+        assert "name" in (person.get("required") or [])
+        assert "id" in (person.get("required") or [])
 
 
 class TestRdfExtensions:

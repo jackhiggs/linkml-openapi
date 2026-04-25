@@ -92,6 +92,16 @@ class OpenAPIGenerator(Generator):
     api_version: str = "1.0.0"
     server_url: str = "http://localhost:8000"
     resource_filter: list[str] | None = None
+    # OpenAPI dialect to emit. 3.0.3 is the default because some popular
+    # codegens (notably openapi-generator's Spring server library) still
+    # mishandle 3.1 + allOf-based inheritance, silently producing duplicate
+    # `Foo_1` schemas. Pass "3.1.0" to opt into the newer dialect once
+    # downstream tools catch up.
+    openapi_version: str = "3.0.3"
+    # Inline parent properties directly into subclass schemas instead of
+    # using `allOf` + `$ref` for inheritance. Off by default; enable for
+    # codegens that still trip on inline-schema-inside-allOf.
+    flatten_inheritance: bool = False
 
     def serialize(self, **kwargs) -> str:
         """Generate and serialize the OpenAPI spec."""
@@ -100,6 +110,7 @@ class OpenAPIGenerator(Generator):
         self._x_rdf_property: dict[tuple[str, str], str] = {}
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
+        raw["openapi"] = self.openapi_version
         self._strip_invalid_parameter_fields(raw)
         self._coerce_numeric_constraints(raw)
         self._inject_rdf_extensions(raw)
@@ -207,6 +218,10 @@ class OpenAPIGenerator(Generator):
                     item.delete = self._make_delete_operation(cls, class_name)
                 paths[item_path] = item
 
+        # openapi-pydantic restricts the `openapi` field to 3.1.x literals;
+        # we build the model with 3.1.0 and then rewrite the version string
+        # to self.openapi_version in serialize(). The 3.0.3 / 3.1.0 spec
+        # bodies this generator emits are otherwise structurally identical.
         return OpenAPI(
             openapi="3.1.0",
             info=info,
@@ -221,7 +236,7 @@ class OpenAPIGenerator(Generator):
         """Convert a LinkML class to a JSON Schema object."""
         sv = self.schemaview
 
-        if cls.is_a:
+        if cls.is_a and not self.flatten_inheritance:
             # Only include slots defined directly on this class, not inherited ones
             parent_slot_names = {s.name for s in sv.class_induced_slots(cls.is_a)}
             local_properties: dict[str, Schema | Reference] = {}
@@ -249,6 +264,9 @@ class OpenAPIGenerator(Generator):
                 schema.description = cls.description
             return schema
 
+        # Flat schema: include every induced slot (inherited and local) as
+        # a top-level property. Use this when downstream codegen mishandles
+        # allOf inheritance or when consumers prefer self-contained schemas.
         properties: dict[str, Schema | Reference] = {}
         required: list[str] = []
 

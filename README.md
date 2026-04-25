@@ -59,6 +59,20 @@ json_str = gen.serialize(format="json")
 | `server_url` | `str` | `"http://localhost:8000"` | `servers[0].url` in the spec |
 | `resource_filter` | `list[str]` | `None` | Only generate endpoints for these classes |
 | `format` | `str` | `"yaml"` | Output format: `"yaml"` or `"json"` |
+| `openapi_version` | `str` | `"3.0.3"` | OpenAPI dialect to emit (`"3.0.3"` or `"3.1.0"`) |
+| `flatten_inheritance` | `bool` | `False` | Inline parent properties instead of using `allOf` |
+
+> **Why default to 3.0.3?** Several popular codegens — notably
+> `openapi-generator`'s Spring server library — still mishandle `allOf`-based
+> inheritance under OpenAPI 3.1.0, silently producing duplicate `Foo_1`
+> schemas. 3.0.3 round-trips the same schemas cleanly. Pass
+> `--openapi-version 3.1.0` to opt into the newer dialect once your
+> downstream tooling is ready.
+
+> **`--flatten-inheritance`** inlines every inherited property directly into
+> the subclass schema, so each component is self-contained and there is no
+> `allOf` at all. Use it for codegens that still trip on inline-schema-inside
+> -allOf, or whenever you prefer denormalized schemas.
 
 ## Annotations
 
