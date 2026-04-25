@@ -264,12 +264,20 @@ Marks a slot as a path variable in the item endpoint URL.
 
 | Value | Behaviour |
 |-------|-----------|
-| `"true"` | Slot appears as `{slot_name}` in the item path |
+| `"true"` | Slot appears as `{slot_name}` in the item path; the parameter schema mirrors the slot's range (alias for `"iri"`) |
+| `"iri"` | Same as `"true"` — preserves any `format: uri` typing from a uri-range slot |
+| `"slug"` | Slot appears as `{slot_name}` but the parameter schema is plain `string`, regardless of the slot's range |
 | omitted | Slot is not a path variable |
+
+Use `"slug"` when the URL segment is a short identifier (`main`,
+`uk-population-2026`) derived from the resource's IRI rather than the IRI
+itself — the body still carries the absolute IRI in the same field. Use
+`"iri"` (or `"true"`) when the URL segment is the full IRI (e.g. behind a
+URL-encoding gateway).
 
 When one or more slots are annotated as path variables, they replace the default identifier-based placeholder. Multiple path variables are joined in order: `/people/{id}/{version}`.
 
-When no slots are annotated as path variables, the generator falls back to the class's identifier slot (or a slot named `id`).
+When no slots are annotated as path variables, the generator falls back to the class's identifier slot (or a slot named `id`) in `iri` mode.
 
 ```yaml
   Person:
@@ -279,7 +287,20 @@ When no slots are annotated as path variables, the generator falls back to the c
     slot_usage:
       id:
         annotations:
-          openapi.path_variable: "true"   # GET /people/{id}
+          openapi.path_variable: "true"   # GET /people/{id}, schema mirrors slot range
+
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id:
+        identifier: true
+        range: uri
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: slug     # GET /catalogs/{id}, schema is plain string
 ```
 
 #### `openapi.query_param`

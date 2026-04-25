@@ -198,16 +198,16 @@ class OpenAPIGenerator(Generator):
 
             # Item path
             if path_vars:
-                item_suffix = "/".join(f"{{{s.name}}}" for s in path_vars)
+                item_suffix = "/".join(f"{{{s.name}}}" for s, _mode in path_vars)
                 item_path = f"/{path_segment}/{item_suffix}"
                 path_params = [
                     Parameter(
                         name=s.name,
                         param_in=ParameterLocation.PATH,
                         required=True,
-                        param_schema=self._slot_to_schema(s),
+                        param_schema=self._path_variable_schema(s, mode),
                     )
-                    for s in path_vars
+                    for s, mode in path_vars
                 ]
                 item = PathItem(parameters=path_params)
                 if "read" in operations:
@@ -364,6 +364,22 @@ class OpenAPIGenerator(Generator):
                 return str(ann.value)
         return None
 
+    def _path_variable_schema(self, slot: SlotDefinition, mode: str) -> Schema | Reference:
+        """Pick the parameter schema for a path variable, honouring the mode.
+
+        In "slug" mode the parameter is a plain string regardless of the
+        slot's range — this matches the URL-segment-as-slug convention,
+        where the body still carries the full IRI in the same field.
+        In "iri" mode (the historical default) the slot's full schema is
+        used, preserving any `format: uri` typing.
+        """
+        if mode == "slug":
+            schema = Schema(type=DataType.STRING)
+            if slot.description:
+                schema.description = slot.description
+            return schema
+        return self._slot_to_schema(slot)
+
     def _enum_to_schema(self, enum_def) -> Schema:
         """Convert a LinkML enum to a JSON Schema enum."""
         schema = Schema(type=DataType.STRING)
@@ -430,23 +446,52 @@ class OpenAPIGenerator(Generator):
                     return str(ann.value)
         return None
 
-    def _get_path_variables(self, cls: ClassDefinition) -> list[SlotDefinition]:
-        """Get path variable slots from annotations, or fall back to identifier."""
+    @staticmethod
+    def _path_variable_mode(value: str | None) -> str | None:
+        """Normalize openapi.path_variable values.
+
+        Accepted forms:
+            "true" / "iri" — preserve the slot's range typing on the path parameter
+                             (today's default; e.g. `string format=uri` for `range: uri`)
+            "slug"          — emit `string` regardless of slot range; useful when the
+                             URL segment is a slug derived from the resource's IRI,
+                             not the IRI itself
+            anything else   — not a path variable
+
+        Returns "iri" or "slug" when the slot is a path variable, else None.
+        """
+        if value is None:
+            return None
+        v = str(value).strip().lower()
+        if v in ("true", "iri"):
+            return "iri"
+        if v == "slug":
+            return "slug"
+        return None
+
+    def _get_path_variables(self, cls: ClassDefinition) -> list[tuple[SlotDefinition, str]]:
+        """Get path variable slots and their mode from annotations.
+
+        Returns a list of (slot, mode) where mode is "slug" or "iri".
+        Falls back to the identifier slot in "iri" mode when no slots are
+        explicitly annotated.
+        """
         sv = self.schemaview
-        annotated = []
+        annotated: list[tuple[SlotDefinition, str]] = []
         for slot in sv.class_induced_slots(cls.name):
             val = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
-            if val and _is_truthy(val):
-                annotated.append(slot)
+            mode = self._path_variable_mode(val)
+            if mode:
+                annotated.append((slot, mode))
         if annotated:
             return annotated
-        # Fall back to identifier slot
+        # Fall back to identifier slot — preserve range typing (iri mode).
         for slot in sv.class_induced_slots(cls.name):
             if slot.identifier:
-                return [slot]
+                return [(slot, "iri")]
         for slot in sv.class_induced_slots(cls.name):
             if slot.name == "id":
-                return [slot]
+                return [(slot, "iri")]
         return []
 
     def _get_path_segment(self, cls: ClassDefinition) -> str:

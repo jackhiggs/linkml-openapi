@@ -97,6 +97,22 @@ classes:
       founding_date:
         range: date
 
+  Catalog:
+    description: A catalog whose URL uses a slug rather than the full IRI
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+      openapi.operations: "list,read"
+    attributes:
+      id:
+        identifier: true
+        range: uri
+        required: true
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: slug
+
 enums:
   PersonStatus:
     description: Status of a person
