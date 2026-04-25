@@ -311,3 +311,59 @@ class TestSlotAnnotations:
         assert "get" in item
         assert "put" not in item
         assert "delete" not in item
+
+
+class TestMediaTypes:
+    def test_default_media_type_is_json(self):
+        """Address has no openapi.media_types — only application/json content."""
+        spec = _generate()
+        list_op = spec["paths"]["/addresses"]["get"]
+        content = list_op["responses"]["200"]["content"]
+        assert set(content.keys()) == {"application/json"}
+
+    def test_annotation_drives_response_content(self):
+        """Person declares JSON, JSON-LD and Turtle — all three appear."""
+        spec = _generate()
+        list_op = spec["paths"]["/persons"]["get"]
+        content = list_op["responses"]["200"]["content"]
+        assert set(content.keys()) == {
+            "application/json",
+            "application/ld+json",
+            "text/turtle",
+        }
+
+    def test_annotation_drives_request_body(self):
+        """Person POST request body advertises every declared media type."""
+        spec = _generate()
+        post_op = spec["paths"]["/persons"]["post"]
+        content = post_op["requestBody"]["content"]
+        assert set(content.keys()) == {
+            "application/json",
+            "application/ld+json",
+            "text/turtle",
+        }
+
+    def test_annotation_drives_create_response(self):
+        """201 create response also advertises every declared media type."""
+        spec = _generate()
+        post_op = spec["paths"]["/persons"]["post"]
+        content = post_op["responses"]["201"]["content"]
+        assert set(content.keys()) == {
+            "application/json",
+            "application/ld+json",
+            "text/turtle",
+        }
+
+    def test_annotation_drives_read_and_update(self):
+        """GET / PUT on the item path also advertise every declared media type."""
+        spec = _generate()
+        item = spec["paths"]["/persons/{id}"]
+        get_content = item["get"]["responses"]["200"]["content"]
+        put_req_content = item["put"]["requestBody"]["content"]
+        put_resp_content = item["put"]["responses"]["200"]["content"]
+        for content in (get_content, put_req_content, put_resp_content):
+            assert set(content.keys()) == {
+                "application/json",
+                "application/ld+json",
+                "text/turtle",
+            }

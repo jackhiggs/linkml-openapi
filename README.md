@@ -141,6 +141,31 @@ Default when omitted: all five operations (`list,create,read,update,delete`).
       openapi.operations: "list"        # Collection-only, no item endpoint
 ```
 
+#### `openapi.media_types`
+
+Comma-separated list of media types each operation generated for the class
+should advertise on its responses and request bodies.
+
+| Value | Example result |
+|-------|----------------|
+| `"application/json"` | JSON only (default when omitted) |
+| `"application/json,application/ld+json,text/turtle,application/rdf+xml"` | Every listed type appears under `responses[*].content` and `requestBody.content` |
+
+The first listed type stays the default. Each operation's response (and the
+request body, on `POST` / `PUT`) gets one `content` entry per media type, all
+referencing the same component schema. Use this for RDF-shaped APIs (JSON-LD,
+Turtle, RDF/XML) or any other content negotiation surface (CSV, NDJSON,
+XML, …) — it removes the need for a postprocessor that fans out the content
+blocks by hand.
+
+```yaml
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+      openapi.media_types: "application/json,application/ld+json,text/turtle,application/rdf+xml"
+```
+
 ### Slot-level annotations
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.
@@ -205,6 +230,7 @@ When no slots are annotated with `openapi.query_param`, the generator auto-infer
 | `openapi.resource` | class | `"true"` / `"false"` | All non-abstract, non-mixin classes |
 | `openapi.path` | class | path segment string | Auto-pluralized snake_case of class name |
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
+| `openapi.media_types` | class | comma-separated list | `application/json` |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` | Auto-inferred from slot type |
 

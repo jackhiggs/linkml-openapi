@@ -29,6 +29,7 @@ classes:
     description: A person
     annotations:
       openapi.resource: "true"
+      openapi.media_types: "application/json,application/ld+json,text/turtle"
     attributes:
       email:
         range: string

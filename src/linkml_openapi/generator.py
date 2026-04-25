@@ -414,7 +414,24 @@ class OpenAPIGenerator(Generator):
 
     # --- Operation builders ---
 
+    def _content_for(self, schema: Schema | Reference, media_types: list[str]) -> dict[str, MediaType]:
+        """Build a `content` dict that advertises the same schema under every media type."""
+        return {mt: MediaType(media_type_schema=schema) for mt in media_types}
+
+    def _get_media_types(self, cls: ClassDefinition) -> list[str]:
+        """Read the openapi.media_types class annotation, defaulting to JSON only."""
+        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
+        raw = annotations.get("openapi.media_types")
+        if not raw:
+            return ["application/json"]
+        return [m.strip() for m in str(raw).split(",") if m.strip()]
+
     def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        array_schema = Schema(
+            type=DataType.ARRAY,
+            items=Reference(ref=f"#/components/schemas/{class_name}"),
+        )
         return Operation(
             summary=f"List {_to_path_segment(class_name).replace('_', ' ')}",
             operationId=f"list_{_to_path_segment(class_name)}",
@@ -423,45 +440,34 @@ class OpenAPIGenerator(Generator):
             responses={
                 "200": Response(
                     description=f"List of {class_name} objects",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Schema(
-                                type=DataType.ARRAY,
-                                items=Reference(ref=f"#/components/schemas/{class_name}"),
-                            )
-                        )
-                    },
+                    content=self._content_for(array_schema, media_types),
                 )
             },
         )
 
     def _make_create_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        ref = Reference(ref=f"#/components/schemas/{class_name}")
         return Operation(
             summary=f"Create a {class_name}",
             operationId=f"create_{_to_snake_case(class_name)}",
             tags=[class_name],
             requestBody=RequestBody(
                 required=True,
-                content={
-                    "application/json": MediaType(
-                        media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                    )
-                },
+                content=self._content_for(ref, media_types),
             ),
             responses={
                 "201": Response(
                     description=f"{class_name} created",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                        )
-                    },
+                    content=self._content_for(ref, media_types),
                 ),
                 "422": Response(description="Validation error"),
             },
         )
 
     def _make_read_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        ref = Reference(ref=f"#/components/schemas/{class_name}")
         return Operation(
             summary=f"Get a {class_name}",
             operationId=f"get_{_to_snake_case(class_name)}",
@@ -469,37 +475,27 @@ class OpenAPIGenerator(Generator):
             responses={
                 "200": Response(
                     description=f"{class_name} details",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                        )
-                    },
+                    content=self._content_for(ref, media_types),
                 ),
                 "404": Response(description="Not found"),
             },
         )
 
     def _make_update_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        ref = Reference(ref=f"#/components/schemas/{class_name}")
         return Operation(
             summary=f"Update a {class_name}",
             operationId=f"update_{_to_snake_case(class_name)}",
             tags=[class_name],
             requestBody=RequestBody(
                 required=True,
-                content={
-                    "application/json": MediaType(
-                        media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                    )
-                },
+                content=self._content_for(ref, media_types),
             ),
             responses={
                 "200": Response(
                     description=f"{class_name} updated",
-                    content={
-                        "application/json": MediaType(
-                            media_type_schema=Reference(ref=f"#/components/schemas/{class_name}")
-                        )
-                    },
+                    content=self._content_for(ref, media_types),
                 ),
                 "404": Response(description="Not found"),
                 "422": Response(description="Validation error"),
