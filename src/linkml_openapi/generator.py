@@ -214,10 +214,12 @@ class OpenAPIGenerator(Generator):
 
         schemas: dict[str, Schema | Reference] = {}
 
-        # Component schemas for all classes
+        # Component schemas for all classes. Slot-walking happens once per
+        # class inside `_class_to_schema`; the same walk also records any
+        # slot_uri values for `_inject_rdf_extensions` to consume.
         for class_name in sv.all_classes():
             cls = sv.get_class(class_name)
-            self._record_rdf_uris(cls)
+            self._record_rdf_class_uri(cls)
             schemas[class_name] = self._class_to_schema(cls)
 
         # Enum schemas
@@ -283,11 +285,11 @@ class OpenAPIGenerator(Generator):
         sv = self.schemaview
 
         if cls.is_a and not self.flatten_inheritance:
-            # Only include slots defined directly on this class, not inherited ones
             parent_slot_names = {s.name for s in sv.class_induced_slots(cls.is_a)}
             local_properties: dict[str, Schema | Reference] = {}
             local_required: list[str] = []
             for slot in sv.class_induced_slots(cls.name):
+                self._record_rdf_slot_uri(cls.name, slot)
                 if slot.name not in parent_slot_names:
                     local_properties[slot.name] = self._slot_to_schema(slot)
                     if slot.required:
@@ -310,13 +312,14 @@ class OpenAPIGenerator(Generator):
                 schema.description = cls.description
             return schema
 
-        # Flat schema: include every induced slot (inherited and local) as
-        # a top-level property. Use this when downstream codegen mishandles
-        # allOf inheritance or when consumers prefer self-contained schemas.
+        # Flat schema: every induced slot (inherited and local) as a
+        # top-level property. Used for non-inheriting classes and when
+        # `flatten_inheritance` is on.
         properties: dict[str, Schema | Reference] = {}
         required: list[str] = []
 
         for slot in sv.class_induced_slots(cls.name):
+            self._record_rdf_slot_uri(cls.name, slot)
             properties[slot.name] = self._slot_to_schema(slot)
             if slot.required:
                 required.append(slot.name)
@@ -400,15 +403,13 @@ class OpenAPIGenerator(Generator):
         annotations = getattr(slot, "annotations", None)
         if not annotations:
             return None
-        # `annotations` is usually a dict but may arrive as a jsonasobj2
-        # JsonObj for inline `attributes:`-style slots. Iterate defensively.
-        try:
-            ann_values = list(annotations.values())
-        except AttributeError:
-            try:
-                ann_values = [annotations[k] for k in annotations]
-            except Exception:
-                return None
+        # For inline `attributes:`-style slots `annotations` arrives as a
+        # jsonasobj2 JsonObj rather than a dict — it has no .values() but
+        # is still keyed-iterable.
+        if isinstance(annotations, dict):
+            ann_values: list = list(annotations.values())
+        else:
+            ann_values = [annotations[k] for k in annotations]
         for ann in ann_values:
             if getattr(ann, "tag", None) == "openapi.format":
                 return str(ann.value)
@@ -420,8 +421,8 @@ class OpenAPIGenerator(Generator):
         In "slug" mode the parameter is a plain string regardless of the
         slot's range — this matches the URL-segment-as-slug convention,
         where the body still carries the full IRI in the same field.
-        In "iri" mode (the historical default) the slot's full schema is
-        used, preserving any `format: uri` typing.
+        In "iri" mode the slot's full schema is used, preserving any
+        `format: uri` typing.
         """
         if mode == "slug":
             schema = Schema(type=DataType.STRING)
@@ -444,6 +445,16 @@ class OpenAPIGenerator(Generator):
 
     # --- Resource/path helpers ---
 
+    @staticmethod
+    def _class_annotation(cls: ClassDefinition, tag: str) -> str | None:
+        """Read a single class-level annotation value, or None if absent."""
+        if not cls.annotations:
+            return None
+        for ann in cls.annotations.values():
+            if ann.tag == tag:
+                return str(ann.value)
+        return None
+
     def _get_resource_classes(self) -> list[str]:
         """Determine which classes should have REST endpoints."""
         sv = self.schemaview
@@ -451,15 +462,11 @@ class OpenAPIGenerator(Generator):
         if self.resource_filter:
             return self.resource_filter
 
-        annotated = []
-        for class_name in sv.all_classes():
-            cls = sv.get_class(class_name)
-            annotations = (
-                {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-            )
-            if _is_truthy(annotations.get("openapi.resource", False)):
-                annotated.append(class_name)
-
+        annotated = [
+            name
+            for name in sv.all_classes()
+            if _is_truthy(self._class_annotation(sv.get_class(name), "openapi.resource") or False)
+        ]
         if annotated:
             return annotated
 
@@ -502,7 +509,7 @@ class OpenAPIGenerator(Generator):
 
         Accepted forms:
             "true" / "iri" — preserve the slot's range typing on the path parameter
-                             (today's default; e.g. `string format=uri` for `range: uri`)
+                             (e.g. `string format=uri` for `range: uri`)
             "slug"          — emit `string` regardless of slot range; useful when the
                              URL segment is a slug derived from the resource's IRI,
                              not the IRI itself
@@ -523,32 +530,32 @@ class OpenAPIGenerator(Generator):
         """Get path variable slots and their mode from annotations.
 
         Returns a list of (slot, mode) where mode is "slug" or "iri".
-        Falls back to the identifier slot in "iri" mode when no slots are
-        explicitly annotated.
+        Falls back to the identifier slot (or one literally named "id")
+        in "iri" mode when no slots are explicitly annotated.
         """
-        sv = self.schemaview
         annotated: list[tuple[SlotDefinition, str]] = []
-        for slot in sv.class_induced_slots(cls.name):
-            val = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
-            mode = self._path_variable_mode(val)
+        identifier_slot: SlotDefinition | None = None
+        id_named_slot: SlotDefinition | None = None
+        for slot in self.schemaview.class_induced_slots(cls.name):
+            mode = self._path_variable_mode(
+                self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
+            )
             if mode:
                 annotated.append((slot, mode))
+            if identifier_slot is None and slot.identifier:
+                identifier_slot = slot
+            if id_named_slot is None and slot.name == "id":
+                id_named_slot = slot
         if annotated:
             return annotated
-        # Fall back to identifier slot — preserve range typing (iri mode).
-        for slot in sv.class_induced_slots(cls.name):
-            if slot.identifier:
-                return [(slot, "iri")]
-        for slot in sv.class_induced_slots(cls.name):
-            if slot.name == "id":
-                return [(slot, "iri")]
-        return []
+        fallback = identifier_slot or id_named_slot
+        return [(fallback, "iri")] if fallback else []
 
     def _get_path_segment(self, cls: ClassDefinition) -> str:
         """Get the URL path segment for a class."""
-        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-        if "openapi.path" in annotations:
-            return annotations["openapi.path"].lstrip("/")
+        explicit = self._class_annotation(cls, "openapi.path")
+        if explicit is not None:
+            return explicit.lstrip("/")
         if _is_irregular_plural_hint(cls.name):
             import warnings
 
@@ -562,51 +569,28 @@ class OpenAPIGenerator(Generator):
 
     def _get_operations(self, cls: ClassDefinition) -> list[str]:
         """Get the list of CRUD operations for a class."""
-        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-        if "openapi.operations" in annotations:
-            ops = annotations["openapi.operations"]
-            if isinstance(ops, str):
-                return [o.strip() for o in ops.split(",")]
-            return list(ops)
-        return ["list", "create", "read", "update", "delete"]
+        ops = self._class_annotation(cls, "openapi.operations")
+        if ops is None:
+            return ["list", "create", "read", "update", "delete"]
+        return [o.strip() for o in ops.split(",")]
 
     # --- RDF extension propagation -----------------------------------------
 
-    def _expand_curie(self, curie: str | None) -> str | None:
-        """Expand a CURIE to a full IRI using the schema's `prefixes` map.
+    def _record_rdf_class_uri(self, cls: ClassDefinition) -> None:
+        """Remember the class's expanded class_uri for later injection.
 
-        Absolute IRIs and CURIEs whose prefix is unknown are returned unchanged
-        (the unknown-prefix case is silent on purpose — downstream tooling can
-        warn if it cares).
+        Slot-level URIs are recorded in the same pass as schema generation
+        in `_class_to_schema`, so we don't need a parallel slot walk here.
         """
-        if not curie:
-            return None
-        s = str(curie)
-        if s.startswith(("http://", "https://", "urn:")):
-            return s
-        if ":" not in s:
-            return s
-        prefix, local = s.split(":", 1)
-        prefixes = self.schemaview.schema.prefixes or {}
-        if prefix in prefixes:
-            return str(prefixes[prefix].prefix_reference) + local
-        return s
+        if cls.class_uri:
+            self._x_rdf_class[cls.name] = self.schemaview.expand_curie(cls.class_uri)
 
-    def _record_rdf_uris(self, cls: ClassDefinition) -> None:
-        """Stash CURIE-expanded class_uri and slot_uri values for later injection.
-
-        Walking the schema is cheap; we just remember the mapping by class name
-        and (class name, slot name) so `_inject_rdf_extensions` can drop them
-        into the final dict next to the right schema/property.
-        """
-        sv = self.schemaview
-        class_uri = self._expand_curie(cls.class_uri)
-        if class_uri:
-            self._x_rdf_class[cls.name] = class_uri
-        for slot in sv.class_induced_slots(cls.name):
-            slot_uri = self._expand_curie(slot.slot_uri)
-            if slot_uri:
-                self._x_rdf_property[(cls.name, slot.name)] = slot_uri
+    def _record_rdf_slot_uri(self, class_name: str, slot: SlotDefinition) -> None:
+        """Remember a slot's expanded slot_uri keyed by (class, slot)."""
+        if slot.slot_uri:
+            self._x_rdf_property[(class_name, slot.name)] = self.schemaview.expand_curie(
+                slot.slot_uri
+            )
 
     def _inject_rdf_extensions(self, raw: dict) -> None:
         """Walk the dumped spec and decorate schemas with x-rdf-* extensions."""
@@ -639,11 +623,10 @@ class OpenAPIGenerator(Generator):
 
     def _get_media_types(self, cls: ClassDefinition) -> list[str]:
         """Read the openapi.media_types class annotation, defaulting to JSON only."""
-        annotations = {a.tag: a.value for a in cls.annotations.values()} if cls.annotations else {}
-        raw = annotations.get("openapi.media_types")
+        raw = self._class_annotation(cls, "openapi.media_types")
         if not raw:
             return ["application/json"]
-        return [m.strip() for m in str(raw).split(",") if m.strip()]
+        return [m.strip() for m in raw.split(",") if m.strip()]
 
     def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)

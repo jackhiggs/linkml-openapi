@@ -449,20 +449,13 @@ class TestRdfExtensions:
         address = spec["components"]["schemas"]["Address"]
         assert "x-rdf-class" not in address
 
-    def test_unknown_prefix_passed_through(self):
-        """A CURIE whose prefix is not in `prefixes` is left unchanged."""
+    def test_class_with_unknown_prefix_falls_back_to_curie(self):
+        """A class_uri whose prefix is not in `prefixes` is emitted as-is."""
         from linkml_openapi.generator import OpenAPIGenerator
 
         gen = OpenAPIGenerator(SCHEMA_PATH)
-        gen._x_rdf_class = {}
-        gen._x_rdf_property = {}
-        # No mapping for `unknown` — returns the input untouched.
-        assert gen._expand_curie("unknown:Foo") == "unknown:Foo"
-        # Absolute IRI passes through verbatim.
-        assert gen._expand_curie("http://example.org/Foo") == "http://example.org/Foo"
-        # None / empty string handled.
-        assert gen._expand_curie(None) is None
-        assert gen._expand_curie("") is None
+        # SchemaView.expand_curie passes unknown CURIEs through.
+        assert gen.schemaview.expand_curie("unknown:Foo") == "unknown:Foo"
 
 
 class TestMediaTypes:
