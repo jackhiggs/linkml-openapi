@@ -36,6 +36,17 @@ from linkml_openapi.generator import OpenAPIGenerator
     default=False,
     help="Inline parent properties into subclass schemas instead of using allOf.",
 )
+@click.option(
+    "--error-schema/--no-error-schema",
+    "error_schema",
+    default=True,
+    show_default=True,
+    help=(
+        "Emit an RFC 7807 Problem schema and reference it from non-2xx "
+        "response bodies. Override the schema with the openapi.error_class "
+        "schema annotation."
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
 def cli(yamlfile, resource_filter=(), **kwargs):
     """Generate an OpenAPI specification from a LinkML schema."""

@@ -427,6 +427,151 @@ class TestFlattenInheritance:
         assert "id" in (person.get("required") or [])
 
 
+class TestErrorModel:
+    def test_problem_schema_emitted_by_default(self):
+        """A Problem component schema is added when error_schema is on (the default)."""
+        spec = _generate()
+        problem = spec["components"]["schemas"].get("Problem")
+        assert problem is not None
+        assert problem["type"] == "object"
+        assert problem["additionalProperties"] is True
+        for field in ("type", "title", "status", "detail", "instance"):
+            assert field in problem["properties"]
+        assert problem["properties"]["type"]["default"] == "about:blank"
+        assert problem["properties"]["status"]["format"] == "int32"
+
+    def test_404_references_problem(self):
+        """Read endpoint's 404 has both application/json and application/problem+json content."""
+        spec = _generate()
+        not_found = spec["paths"]["/persons/{id}"]["get"]["responses"]["404"]
+        assert "content" in not_found
+        for media in ("application/json", "application/problem+json"):
+            assert not_found["content"][media]["schema"] == {"$ref": "#/components/schemas/Problem"}
+
+    def test_422_references_problem(self):
+        """Create endpoint's 422 (validation error) references Problem."""
+        spec = _generate()
+        validation = spec["paths"]["/persons"]["post"]["responses"]["422"]
+        assert validation["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/Problem"
+        }
+
+    def test_204_delete_has_no_body(self):
+        """204 deletion response stays body-less (no content block)."""
+        spec = _generate()
+        # Person has the default CRUD set, so /persons/{id} has DELETE.
+        deleted = spec["paths"]["/persons/{id}"]["delete"]["responses"]["204"]
+        assert "content" not in deleted
+
+    def test_no_error_schema_keeps_bodyless_responses(self):
+        """error_schema=False reverts to today's description-only error responses."""
+        spec = _generate(error_schema=False)
+        assert "Problem" not in spec["components"]["schemas"]
+        not_found = spec["paths"]["/persons/{id}"]["get"]["responses"]["404"]
+        assert "content" not in not_found
+
+    def test_user_class_named_problem_is_not_overwritten(self):
+        """If the schema defines its own `Problem` class, the synthesised one is suppressed."""
+        # Build a tiny schema where Problem is a real LinkML class.
+        import tempfile
+
+        schema_yaml = """
+id: https://example.org/with-problem
+name: with_problem
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Problem:
+    description: Domain-specific Problem type that happens to share the name.
+    attributes:
+      reason: { range: string, required: true }
+  Widget:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+            # User's Problem wins — has `reason`, not the RFC 7807 fields.
+            assert "reason" in spec["components"]["schemas"]["Problem"]["properties"]
+            assert "instance" not in spec["components"]["schemas"]["Problem"]["properties"]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_custom_error_class_via_schema_annotation(self):
+        """openapi.error_class on the schema picks a user-declared error class."""
+        import tempfile
+
+        schema_yaml = """
+id: https://example.org/custom-error
+name: custom_error
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.error_class: ApiError
+classes:
+  ApiError:
+    attributes:
+      code:    { range: string, required: true }
+      message: { range: string, required: true }
+  Widget:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+            # No synthesised Problem.
+            assert "Problem" not in spec["components"]["schemas"]
+            # 404 references ApiError instead.
+            not_found = spec["paths"]["/widgets/{id}"]["get"]["responses"]["404"]
+            assert not_found["content"]["application/json"]["schema"] == {
+                "$ref": "#/components/schemas/ApiError"
+            }
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_undefined_error_class_raises(self):
+        """openapi.error_class pointing at a missing class fails at generation time."""
+        import tempfile
+
+        import pytest
+
+        schema_yaml = """
+id: https://example.org/bad-error-class
+name: bad_error_class
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.error_class: NonExistent
+classes:
+  Widget:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="NonExistent"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestRdfExtensions:
     def test_class_uri_emitted_as_x_rdf_class(self):
         """Person.class_uri = schema:Person becomes x-rdf-class on the schema."""

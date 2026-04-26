@@ -61,6 +61,7 @@ json_str = gen.serialize(format="json")
 | `format` | `str` | `"yaml"` | Output format: `"yaml"` or `"json"` |
 | `openapi_version` | `str` | `"3.0.3"` | OpenAPI dialect to emit (`"3.0.3"` or `"3.1.0"`) |
 | `flatten_inheritance` | `bool` | `False` | Inline parent properties instead of using `allOf` |
+| `error_schema` | `bool` | `True` | Synthesize an RFC 7807 `Problem` schema and reference it from non-2xx responses |
 
 > **Why default to 3.0.3?** Several popular codegens — notably
 > `openapi-generator`'s Spring server library — still mishandle `allOf`-based
@@ -77,6 +78,39 @@ json_str = gen.serialize(format="json")
 ## Annotations
 
 All `openapi.*` annotations use LinkML's built-in `annotations` mechanism and do not require changes to the LinkML metamodel. Annotation values are strings. Boolean-like annotations use `"true"` / `"false"`.
+
+### Schema-level annotations
+
+Placed at the top of the schema, in the same `annotations:` block that LinkML
+uses for schema-wide metadata.
+
+#### `openapi.error_class`
+
+Names a class in the schema to use as the body of every non-2xx response,
+**replacing the synthesized RFC 7807 `Problem`**. Used when an organisation
+already has a standardised error envelope it wants every API to emit.
+
+```yaml
+annotations:
+  openapi.error_class: ApiError
+
+classes:
+  ApiError:
+    attributes:
+      code:    { range: string, required: true }
+      message: { range: string, required: true }
+      trace_id: string
+```
+
+When omitted (the default), the generator synthesizes a `Problem` schema
+matching [RFC 7807 — Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc7807)
+and references it from every 404 / 422 response.
+
+The named class must exist in the schema; otherwise generation fails with
+a clear error.
+
+To opt out entirely (today's body-less responses), pass
+`--no-error-schema` on the CLI or `error_schema=False` to the Python API.
 
 ### Class-level annotations
 
