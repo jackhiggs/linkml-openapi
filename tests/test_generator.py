@@ -301,6 +301,126 @@ class TestSerialization:
 # --- Slot annotation tests ---
 
 
+class TestQueryOperators:
+    """Coverage for issue #15 — sort and comparison operators."""
+
+    def test_equality_param_emitted_when_sortable(self):
+        """`sortable` implies equality — bare `?name=` still works."""
+        spec = _generate()
+        params = spec["paths"]["/persons"]["get"]["parameters"]
+        names = {p["name"] for p in params}
+        assert "name" in names
+
+    def test_comparison_operators_emitted_for_comparable_slot(self):
+        """`comparable` adds __gte / __lte / __gt / __lt for ordered ranges."""
+        spec = _generate()
+        names = {p["name"] for p in spec["paths"]["/persons"]["get"]["parameters"]}
+        assert "age__gte" in names
+        assert "age__lte" in names
+        assert "age__gt" in names
+        assert "age__lt" in names
+
+    def test_no_comparison_operators_on_non_comparable(self):
+        """Slots without `comparable` don't get __gte etc."""
+        spec = _generate()
+        names = {p["name"] for p in spec["paths"]["/persons"]["get"]["parameters"]}
+        # name is sortable but not comparable.
+        assert "name__gte" not in names
+
+    def test_sort_param_emitted_with_enum(self):
+        """A single `?sort=` array param lists every sortable slot + its negation."""
+        spec = _generate()
+        params = spec["paths"]["/persons"]["get"]["parameters"]
+        sort_param = next((p for p in params if p["name"] == "sort"), None)
+        assert sort_param is not None
+        assert sort_param["schema"]["type"] == "array"
+        enum = set(sort_param["schema"]["items"]["enum"])
+        assert {"name", "-name", "age", "-age"} == enum
+
+    def test_sort_param_uses_form_explode_false(self):
+        """For `?sort=name,-age` to round-trip, the array uses `style: form, explode: false`."""
+        spec = _generate()
+        params = spec["paths"]["/persons"]["get"]["parameters"]
+        sort_param = next(p for p in params if p["name"] == "sort")
+        assert sort_param.get("style") == "form"
+        assert sort_param.get("explode") is False
+
+    def test_no_sort_param_without_sortable_slots(self):
+        """A class with only equality query params gets no `?sort=`."""
+        # Address has only auto-inferred equality params; no slot is `sortable`.
+        spec = _generate()
+        list_params = spec["paths"]["/addresses"]["get"]["parameters"]
+        assert not any(p["name"] == "sort" for p in list_params)
+
+    def test_comparable_on_string_warns(self):
+        """`comparable` on a string range warns; lex comparison is rarely the intent."""
+        import tempfile
+        import warnings
+
+        schema_yaml = """
+id: https://example.org/lexcompare
+name: lexcompare
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Item:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      label:
+        range: string
+    slot_usage:
+      label:
+        annotations:
+          openapi.query_param: comparable
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                gen.serialize(format="yaml")
+            assert any("not a numeric or temporal" in str(w.message) for w in caught)
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_sortable_on_multivalued_raises(self):
+        """`sortable` on a multivalued slot is a generation-time error."""
+        import tempfile
+
+        import pytest
+
+        schema_yaml = """
+id: https://example.org/multisort
+name: multisort
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Item:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      tags:
+        range: string
+        multivalued: true
+    slot_usage:
+      tags:
+        annotations:
+          openapi.query_param: sortable
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="multivalued"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestSlotAnnotations:
     def test_path_variable_from_annotation(self):
         """Person.id is annotated as path variable."""

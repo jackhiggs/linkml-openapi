@@ -58,10 +58,10 @@ classes:
           openapi.path_variable: "true"
       name:
         annotations:
-          openapi.query_param: "true"
+          openapi.query_param: sortable
       age:
         annotations:
-          openapi.query_param: "true"
+          openapi.query_param: comparable,sortable
       knows:
         annotations:
           openapi.nested: "false"

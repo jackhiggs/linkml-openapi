@@ -1470,10 +1470,42 @@ class OpenAPIGenerator(Generator):
         )
         paths[item_path] = item
 
+    # Slot ranges over which `comparable` operators (>=, <=, >, <) are
+    # well-defined. String ranges are technically lex-comparable but the
+    # intent is almost always "numeric / temporal range" — warn if asked.
+    _COMPARABLE_RANGES = frozenset({"integer", "float", "double", "decimal", "date", "datetime"})
+
+    def _query_param_capabilities(self, cls: ClassDefinition, slot_name: str) -> set[str] | None:
+        """Parse the slot's `openapi.query_param` annotation into a capability set.
+
+        Accepted tokens (comma-separated):
+
+          ``"true"`` / ``"equality"``  — exact-match query param (today's behaviour)
+          ``"comparable"``             — equality + ``__gte`` / ``__lte`` / ``__gt`` / ``__lt``
+          ``"sortable"``               — equality + token in ``?sort=`` array
+
+        ``comparable`` and ``sortable`` imply ``equality`` (most APIs that filter
+        by range also filter by exact match). Returns ``None`` when the
+        annotation is absent or explicitly false.
+        """
+        raw = self._get_slot_annotation(cls, slot_name, "openapi.query_param")
+        if raw is None:
+            return None
+        tokens = {t.strip().lower() for t in str(raw).split(",") if t.strip()}
+        if not tokens or tokens == {"false"}:
+            return None
+        if "true" in tokens:
+            tokens.add("equality")
+            tokens.discard("true")
+        if "comparable" in tokens or "sortable" in tokens:
+            tokens.add("equality")
+        valid = tokens & {"equality", "comparable", "sortable"}
+        return valid or None
+
     def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
-        """Generate query parameters for list endpoint filtering."""
+        """Generate query parameters for list endpoint filtering, sorting, paginating."""
         sv = self.schemaview
-        params = [
+        params: list[Parameter] = [
             Parameter(
                 name="limit",
                 param_in=ParameterLocation.QUERY,
@@ -1486,25 +1518,81 @@ class OpenAPIGenerator(Generator):
             ),
         ]
 
-        # Check if any slot has openapi.query_param annotation
-        annotated_params = []
+        annotated_params: list[Parameter] = []
+        sort_tokens: list[str] = []
+        any_annotated = False
+
         for slot in sv.class_induced_slots(cls.name):
-            val = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
-            if val and _is_truthy(val):
+            caps = self._query_param_capabilities(cls, slot.name)
+            if caps is None:
+                continue
+            any_annotated = True
+            slot_schema = self._slot_to_schema(slot)
+            range_name = slot.range or "string"
+
+            if "equality" in caps:
                 annotated_params.append(
                     Parameter(
                         name=slot.name,
                         param_in=ParameterLocation.QUERY,
                         required=False,
-                        param_schema=self._slot_to_schema(slot),
+                        param_schema=slot_schema,
                     )
                 )
 
-        if annotated_params:
+            if "comparable" in caps:
+                if range_name not in self._COMPARABLE_RANGES:
+                    import warnings
+
+                    warnings.warn(
+                        f"Slot {cls.name}.{slot.name!r} marked `comparable` but "
+                        f"range {range_name!r} is not a numeric or temporal type; "
+                        "comparison operators may behave unexpectedly.",
+                        stacklevel=2,
+                    )
+                for op in ("gte", "lte", "gt", "lt"):
+                    annotated_params.append(
+                        Parameter(
+                            name=f"{slot.name}__{op}",
+                            param_in=ParameterLocation.QUERY,
+                            required=False,
+                            param_schema=self._slot_to_schema(slot),
+                        )
+                    )
+
+            if "sortable" in caps:
+                if slot.multivalued:
+                    raise ValueError(
+                        f"Slot {cls.name}.{slot.name!r} is multivalued; sort "
+                        "order over a set is not well-defined. Remove `sortable` "
+                        "or change the slot to single-valued."
+                    )
+                sort_tokens.extend([slot.name, f"-{slot.name}"])
+
+        if sort_tokens:
+            annotated_params.append(
+                Parameter(
+                    name="sort",
+                    param_in=ParameterLocation.QUERY,
+                    required=False,
+                    description=(
+                        "Comma-separated list of slot names to sort by. "
+                        "Prefix a name with `-` for descending."
+                    ),
+                    style="form",
+                    explode=False,
+                    param_schema=Schema(
+                        type=DataType.ARRAY,
+                        items=Schema(type=DataType.STRING, enum=sort_tokens),
+                    ),
+                )
+            )
+
+        if any_annotated:
             params.extend(annotated_params)
             return params
 
-        # Fall back to auto-inference
+        # Fall back to auto-inference (unchanged from the legacy default).
         for slot in sv.class_induced_slots(cls.name):
             if not slot.multivalued and not slot.identifier:
                 range_name = slot.range or "string"

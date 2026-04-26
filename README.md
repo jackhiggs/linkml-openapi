@@ -593,32 +593,59 @@ When no slots are annotated as path variables, the generator falls back to the c
 
 #### `openapi.query_param`
 
-Marks a slot as a query parameter on the `list` operation.
+Marks a slot as a query parameter on the `list` operation. Accepts a
+comma-separated set of capability tokens:
 
-| Value | Behaviour |
-|-------|-----------|
-| `"true"` | Slot appears as an optional query parameter on the collection `GET` |
+| Token | Effect |
+|-------|--------|
+| `"true"` / `"equality"` | `?slot=value` exact-match filter (today's behaviour) |
+| `"comparable"` | adds `?slot__gte=` / `?slot__lte=` / `?slot__gt=` / `?slot__lt=`. Implies equality. |
+| `"sortable"` | slot becomes a valid token in a single `?sort=` array parameter. Implies equality. |
 | omitted | Slot is not a query parameter |
 
-All annotated query parameters are generated as optional (`required: false`). The parameter schema type is derived from the slot's `range`.
-
-When no slots are annotated with `openapi.query_param`, the generator auto-infers query parameters from all non-multivalued, non-identifier slots with `string`, `integer`, `boolean`, or enum ranges (backwards compatible).
-
-`limit` and `offset` pagination parameters are always included on list endpoints regardless of annotations.
+`comparable` and `sortable` imply `equality` — most APIs that filter by
+range or sort by a field also accept exact-match.
 
 ```yaml
   Person:
     annotations:
       openapi.resource: "true"
-      openapi.path: people
     slot_usage:
       name:
         annotations:
-          openapi.query_param: "true"     # GET /people?name=Alice
-      age_in_years:
+          openapi.query_param: sortable               # ?name=Alice and ?sort=name,-name
+      age:
         annotations:
-          openapi.query_param: "true"     # GET /people?age_in_years=30
+          openapi.query_param: comparable,sortable    # ?age=, ?age__gte=, ?age__lte=, sort
 ```
+
+emits these query params on `GET /persons` (in addition to `limit` / `offset`):
+
+```
+?name=                ?age=
+?age__gte=            ?age__lte=            ?age__gt=            ?age__lt=
+?sort=  (array, comma-separated, enum: [name, -name, age, -age])
+```
+
+The `?sort=` parameter uses `style: form, explode: false`, so multiple
+sort tokens round-trip as `?sort=name,-age`.
+
+**Validation:**
+
+- `comparable` is only well-defined for ordered ranges (`integer`,
+  `float`, `double`, `decimal`, `date`, `datetime`). Setting it on a
+  string slot warns at generation time — lex comparison is rarely the
+  intent.
+- `sortable` on a multivalued slot is a generation error — sort order
+  over a set isn't well-defined.
+
+When no slots are annotated with `openapi.query_param`, the generator
+auto-infers equality-only query parameters from all non-multivalued,
+non-identifier slots with `string`, `integer`, `boolean`, or enum
+ranges (backwards compatible).
+
+`limit` and `offset` pagination parameters are always included on list
+endpoints regardless of annotations.
 
 ### Annotation summary
 
