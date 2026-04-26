@@ -576,6 +576,78 @@ classes:
             Path(tmp).unlink(missing_ok=True)
 
 
+class TestPatchOperations:
+    """Coverage for issue #16 — PATCH operations via JSON Merge Patch."""
+
+    def test_patch_method_emitted_when_in_operations(self):
+        """`openapi.operations: ...patch...` adds PATCH to the item path."""
+        spec = _generate()
+        item = spec["paths"]["/persons/{id}"]
+        assert "patch" in item
+
+    def test_patch_request_body_uses_merge_patch_json(self):
+        """The request body media type is application/merge-patch+json (RFC 7396)."""
+        spec = _generate()
+        body = spec["paths"]["/persons/{id}"]["patch"]["requestBody"]
+        assert "application/merge-patch+json" in body["content"]
+        # Patch is JSON-specific — class media types like text/turtle don't apply
+        # to the request side.
+        assert "text/turtle" not in body["content"]
+
+    def test_patch_request_body_references_patch_schema(self):
+        spec = _generate()
+        body = spec["paths"]["/persons/{id}"]["patch"]["requestBody"]
+        ref = body["content"]["application/merge-patch+json"]["schema"]
+        assert ref == {"$ref": "#/components/schemas/PersonPatch"}
+
+    def test_patch_response_uses_full_class_and_class_media_types(self):
+        """200 response uses the full class schema and honours openapi.media_types."""
+        spec = _generate()
+        ok = spec["paths"]["/persons/{id}"]["patch"]["responses"]["200"]
+        for mt in ("application/json", "application/ld+json", "text/turtle"):
+            assert ok["content"][mt]["schema"] == {"$ref": "#/components/schemas/Person"}
+
+    def test_patch_component_schema_emitted(self):
+        """`<Class>Patch` lands in components.schemas with all slots optional."""
+        spec = _generate()
+        patch = spec["components"]["schemas"].get("PersonPatch")
+        assert patch is not None
+        assert patch["additionalProperties"] is False
+        assert "required" not in patch  # everything optional
+
+    def test_patch_schema_excludes_identifier(self):
+        """The path already names the resource — id has no place in the patch body."""
+        spec = _generate()
+        patch_props = spec["components"]["schemas"]["PersonPatch"]["properties"]
+        assert "id" not in patch_props
+
+    def test_patch_schema_includes_inherited_slots(self):
+        """Person inherits `name` and `description` from NamedThing — both appear."""
+        spec = _generate()
+        patch_props = spec["components"]["schemas"]["PersonPatch"]["properties"]
+        assert "name" in patch_props
+        assert "description" in patch_props
+        # And local slots, of course.
+        assert "email" in patch_props
+        assert "age" in patch_props
+
+    def test_patch_schema_preserves_x_rdf_extensions(self):
+        """Patch properties carry the same x-rdf-property as the canonical Person."""
+        spec = _generate()
+        patch = spec["components"]["schemas"]["PersonPatch"]
+        assert patch.get("x-rdf-class") == "http://schema.org/Person"
+        assert patch["properties"]["email"].get("x-rdf-property") == "http://schema.org/email"
+        assert patch["properties"]["age"].get("x-rdf-property") == "http://xmlns.com/foaf/0.1/age"
+
+    def test_patch_not_emitted_when_not_in_operations(self):
+        """A class without `patch` in openapi.operations gets no PATCH and no Patch schema."""
+        spec = _generate()
+        # Address has openapi.operations: "list,read" — no PATCH.
+        item = spec["paths"]["/addresses/{id}"]
+        assert "patch" not in item
+        assert "AddressPatch" not in spec["components"]["schemas"]
+
+
 class TestErrorModel:
     def test_problem_schema_emitted_by_default(self):
         """A Problem component schema is added when error_schema is on (the default)."""

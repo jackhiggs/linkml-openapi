@@ -32,6 +32,7 @@ classes:
     description: A person
     annotations:
       openapi.resource: "true"
+      openapi.operations: "list,create,read,update,patch,delete"
       openapi.media_types: "application/json,application/ld+json,text/turtle"
     attributes:
       email:

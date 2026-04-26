@@ -171,9 +171,19 @@ Comma-separated list of CRUD operations to generate. Controls which HTTP methods
 | `create` | `POST` | `/{path}` | Create a new instance |
 | `read` | `GET` | `/{path}/{vars}` | Get a single instance by ID |
 | `update` | `PUT` | `/{path}/{vars}` | Replace an instance |
+| `patch` | `PATCH` | `/{path}/{vars}` | Partial update via JSON Merge Patch (RFC 7396) |
 | `delete` | `DELETE` | `/{path}/{vars}` | Delete an instance |
 
-Default when omitted: all five operations (`list,create,read,update,delete`).
+Default when omitted: all CRUD operations except `patch` (`list,create,read,update,delete`). PATCH is opt-in.
+
+When `patch` is included, the generator also emits a `<Class>Patch` schema in
+`components.schemas`: a flat schema with every induced slot present and
+optional, identifier excluded, `additionalProperties: false`, and
+`x-rdf-class` / `x-rdf-property` extensions preserved. The PATCH request
+body media type is fixed at `application/merge-patch+json` (RFC 7396 is
+JSON-specific); the 200 response uses the class's `openapi.media_types` as
+usual. Multivalued slots replace wholesale per RFC 7396 — that is the
+spec's behaviour, not a generator quirk.
 
 ```yaml
   Person:
