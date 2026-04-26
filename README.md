@@ -251,6 +251,115 @@ This lets RDF-aware downstream tools (SHACL generators, JSON-LD context
 builders, Jena/RDF4J mappers) consume the OpenAPI spec directly without
 needing the original LinkML source.
 
+#### Nested paths from class-ranged slots
+
+Multivalued slots whose `range` is another class get nested path
+operations automatically — no annotation needed. The shape depends
+entirely on what LinkML already says about the slot:
+
+| LinkML signal | Semantics | Nested operations |
+|---------------|-----------|-------------------|
+| `inlined: true` (or target has no identifier) | **Composition** — child has no independent identity, lifecycle goes through the parent | full CRUD on `/{parent}/{id}/{slot}` and `/{slot}/{target_id}` |
+| `inlined: false` (default when target has identifier) | **Reference** — child has its own lifecycle, the slot links to it | attach (`POST` with `ResourceLink`) on `/{parent}/{id}/{slot}`, detach (`DELETE`) on `/{slot}/{target_id}` |
+
+Composition example — `Order.line_items` is inline:
+
+```yaml
+classes:
+  Order:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      line_items:
+        range: LineItem
+        multivalued: true
+        inlined: true
+  LineItem:
+    attributes:
+      line_id: { identifier: true, range: string, required: true }
+      sku:     { range: string }
+```
+
+emits
+
+```
+POST   /orders/{id}/line_items                 body: full LineItem
+GET    /orders/{id}/line_items                 list
+GET    /orders/{id}/line_items/{line_item_id}  read
+PUT    /orders/{id}/line_items/{line_item_id}  replace
+DELETE /orders/{id}/line_items/{line_item_id}  delete
+```
+
+Reference example — `Person.addresses` links to existing `Address` resources:
+
+```yaml
+classes:
+  Person:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id:        { identifier: true, range: string, required: true }
+      addresses: { range: Address, multivalued: true }
+  Address:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+```
+
+emits
+
+```
+GET    /persons/{id}/addresses                  list attached
+POST   /persons/{id}/addresses                  attach (body: ResourceLink or array)
+DELETE /persons/{id}/addresses/{address_id}     detach (Address entity stays)
+```
+
+The shared `ResourceLink` component is added to `components.schemas`
+only when at least one reference relationship is present. Attach body:
+
+```json
+{ "id": "https://example.org/addresses/42" }
+```
+
+or as a batch:
+
+```json
+[
+  { "id": "https://example.org/addresses/42" },
+  { "id": "https://example.org/addresses/43" }
+]
+```
+
+The `Address` resource is mutated via `/addresses/{id}` — the nested
+path manages the *link*, not the linked entity. Composition is the
+opposite: the nested path *is* how the child is mutated, since it has
+no independent flat path.
+
+**Opt-out per slot.** Some multivalued class-ranged slots aren't
+browseable collections — back-references, lookups, relationships
+already exposed elsewhere. Suppress nested-path generation for an
+individual slot with `openapi.nested: "false"`:
+
+```yaml
+Person:
+  attributes:
+    addresses: { range: Address, multivalued: true }   # default — nested paths emitted
+    knows:     { range: Person,  multivalued: true }
+  slot_usage:
+    knows:
+      annotations:
+        openapi.nested: "false"                        # ← /persons/{id}/knows is NOT emitted
+```
+
+The slot still appears in the parent's component schema (so it
+serializes / deserializes normally); only the nested-path operations
+are skipped. The default remains on — `multivalued: true, range: Class`
+already says "this is a collection," and the API exposes it unless you
+say otherwise.
+
+**Loud failure** — a class with `openapi.resource: "true"` and item-path
+operations (`read`/`update`/`delete`) but no identifier slot raises at
+generation time with an exact remediation message.
+
 ### Slot-level annotations
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.

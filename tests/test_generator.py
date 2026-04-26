@@ -427,6 +427,155 @@ class TestFlattenInheritance:
         assert "id" in (person.get("required") or [])
 
 
+class TestNestedRelationships:
+    def test_reference_collection_path_emitted(self):
+        """Person.addresses (multivalued, target Address has identifier) → reference."""
+        spec = _generate()
+        assert "/persons/{id}/addresses" in spec["paths"]
+
+    def test_reference_item_path_uses_namespaced_var(self):
+        """Reference item path uses {target_id} not {id} to avoid collision."""
+        spec = _generate()
+        assert "/persons/{id}/addresses/{address_id}" in spec["paths"]
+
+    def test_reference_collection_has_get_and_post(self):
+        spec = _generate()
+        path = spec["paths"]["/persons/{id}/addresses"]
+        assert "get" in path
+        assert "post" in path
+        # Reference attach has no PUT — to mutate a target, go to /addresses/{id}.
+        assert "put" not in path
+
+    def test_reference_attach_body_is_resourcelink(self):
+        spec = _generate()
+        attach = spec["paths"]["/persons/{id}/addresses"]["post"]
+        body = attach["requestBody"]["content"]["application/json"]["schema"]
+        # Body is oneOf [single ResourceLink, array<ResourceLink>] for batch attach.
+        assert "oneOf" in body
+        refs = [s.get("$ref") for s in body["oneOf"] if "$ref" in s]
+        assert "#/components/schemas/ResourceLink" in refs
+        # ...and an array of links for bulk attach.
+        arrays = [s for s in body["oneOf"] if s.get("type") == "array"]
+        assert len(arrays) == 1
+        assert arrays[0]["items"]["$ref"] == "#/components/schemas/ResourceLink"
+
+    def test_reference_item_path_has_only_delete(self):
+        """Detach via DELETE on the per-target item path."""
+        spec = _generate()
+        item = spec["paths"]["/persons/{id}/addresses/{address_id}"]
+        assert "delete" in item
+        assert "get" not in item
+        assert "put" not in item
+
+    def test_resourcelink_component_emitted(self):
+        spec = _generate()
+        link = spec["components"]["schemas"].get("ResourceLink")
+        assert link is not None
+        assert link["required"] == ["id"]
+        assert link["properties"]["id"]["format"] == "uri"
+
+    def test_composition_collection_path_emitted(self):
+        """Order.line_items (multivalued, inlined: true) → composition."""
+        spec = _generate()
+        assert "/orders/{id}/line_items" in spec["paths"]
+
+    def test_composition_item_path_uses_target_identifier(self):
+        spec = _generate()
+        assert "/orders/{id}/line_items/{line_item_id}" in spec["paths"]
+
+    def test_composition_collection_has_full_post_body(self):
+        """Composition POST takes the full LineItem schema, not a ResourceLink."""
+        spec = _generate()
+        post = spec["paths"]["/orders/{id}/line_items"]["post"]
+        body = post["requestBody"]["content"]["application/json"]["schema"]
+        assert body == {"$ref": "#/components/schemas/LineItem"}
+
+    def test_composition_item_path_has_full_crud(self):
+        """Composition's item path supports GET / PUT / DELETE on the addressable child."""
+        spec = _generate()
+        item = spec["paths"]["/orders/{id}/line_items/{line_item_id}"]
+        assert "get" in item
+        assert "put" in item
+        assert "delete" in item
+
+    def test_no_resourcelink_if_no_reference_relationships(self):
+        """A schema with only composition slots doesn't emit ResourceLink."""
+        import tempfile
+
+        schema_yaml = """
+id: https://example.org/comp-only
+name: comp_only
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Order:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      line_items:
+        range: LineItem
+        multivalued: true
+        inlined: true
+  LineItem:
+    attributes:
+      line_id: { identifier: true, range: string, required: true }
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+            assert "ResourceLink" not in spec["components"]["schemas"]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_nested_opt_out_suppresses_paths(self):
+        """`openapi.nested: "false"` on a slot suppresses its nested paths.
+
+        Person.knows is a multivalued self-reference annotated to opt out;
+        Person.addresses is the normal default and stays.
+        """
+        spec = _generate()
+        assert "/persons/{id}/addresses" in spec["paths"]
+        assert "/persons/{id}/knows" not in spec["paths"]
+        assert "/persons/{id}/knows/{person_id}" not in spec["paths"]
+
+    def test_nested_default_remains_on(self):
+        """A slot without `openapi.nested` keeps the inferred-from-LinkML behaviour."""
+        spec = _generate()
+        # Person.addresses has no opt-out → both paths emitted.
+        assert "/persons/{id}/addresses" in spec["paths"]
+        assert "/persons/{id}/addresses/{address_id}" in spec["paths"]
+
+    def test_resource_without_addressability_raises(self):
+        """openapi.resource: "true" with no identifier and item-path ops fails loudly."""
+        import tempfile
+
+        import pytest
+
+        schema_yaml = """
+id: https://example.org/no-id
+name: no_id
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Floating:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      label: { range: string }
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="Floating"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestErrorModel:
     def test_problem_schema_emitted_by_default(self):
         """A Problem component schema is added when error_schema is on (the default)."""

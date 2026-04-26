@@ -48,6 +48,9 @@ classes:
       addresses:
         range: Address
         multivalued: true
+      knows:
+        range: Person
+        multivalued: true
     slot_usage:
       id:
         annotations:
@@ -58,6 +61,9 @@ classes:
       age:
         annotations:
           openapi.query_param: "true"
+      knows:
+        annotations:
+          openapi.nested: "false"
 
   Address:
     description: A mailing address
@@ -112,6 +118,33 @@ classes:
       id:
         annotations:
           openapi.path_variable: slug
+
+  Order:
+    description: A composition example — line items have no independent identity
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      line_items:
+        range: LineItem
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+
+  LineItem:
+    description: An order line item (composed, has its own identifier)
+    attributes:
+      line_id:
+        identifier: true
+        range: string
+        required: true
+      sku:
+        range: string
+      quantity:
+        range: integer
 
 enums:
   PersonStatus:
