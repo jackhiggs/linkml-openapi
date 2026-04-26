@@ -530,6 +530,24 @@ classes:
         finally:
             Path(tmp).unlink(missing_ok=True)
 
+    def test_nested_opt_out_suppresses_paths(self):
+        """`openapi.nested: "false"` on a slot suppresses its nested paths.
+
+        Person.knows is a multivalued self-reference annotated to opt out;
+        Person.addresses is the normal default and stays.
+        """
+        spec = _generate()
+        assert "/persons/{id}/addresses" in spec["paths"]
+        assert "/persons/{id}/knows" not in spec["paths"]
+        assert "/persons/{id}/knows/{person_id}" not in spec["paths"]
+
+    def test_nested_default_remains_on(self):
+        """A slot without `openapi.nested` keeps the inferred-from-LinkML behaviour."""
+        spec = _generate()
+        # Person.addresses has no opt-out → both paths emitted.
+        assert "/persons/{id}/addresses" in spec["paths"]
+        assert "/persons/{id}/addresses/{address_id}" in spec["paths"]
+
     def test_resource_without_addressability_raises(self):
         """openapi.resource: "true" with no identifier and item-path ops fails loudly."""
         import tempfile

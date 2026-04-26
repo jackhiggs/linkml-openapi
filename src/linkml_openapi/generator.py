@@ -909,6 +909,7 @@ class OpenAPIGenerator(Generator):
           via ``oneOf``), DELETE on the per-target item path to detach.
         """
         sv = self.schemaview
+        parent_cls = sv.get_class(parent_class_name)
         out: dict[str, PathItem] = {}
         parent_var_suffix = "/".join(f"{{{s.name}}}" for s, _mode in parent_path_vars)
         parent_path_params = [
@@ -927,6 +928,13 @@ class OpenAPIGenerator(Generator):
             target_name = slot.range
             if not target_name or sv.get_class(target_name) is None:
                 continue  # primitive, enum, or unresolved range
+
+            # Opt-out: a slot may carry `openapi.nested: "false"` to suppress
+            # nested-path generation (e.g. back-references that aren't a
+            # browseable collection, or relationships exposed elsewhere).
+            nested_ann = self._get_slot_annotation(parent_cls, slot.name, "openapi.nested")
+            if nested_ann is not None and not _is_truthy(nested_ann):
+                continue
 
             collection_path = f"/{parent_path_segment}/{parent_var_suffix}/{slot.name}"
             target_id_slot = self._identifier_slot(target_name)

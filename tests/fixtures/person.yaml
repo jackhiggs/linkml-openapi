@@ -48,6 +48,9 @@ classes:
       addresses:
         range: Address
         multivalued: true
+      knows:
+        range: Person
+        multivalued: true
     slot_usage:
       id:
         annotations:
@@ -58,6 +61,9 @@ classes:
       age:
         annotations:
           openapi.query_param: "true"
+      knows:
+        annotations:
+          openapi.nested: "false"
 
   Address:
     description: A mailing address

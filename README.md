@@ -334,7 +334,29 @@ path manages the *link*, not the linked entity. Composition is the
 opposite: the nested path *is* how the child is mutated, since it has
 no independent flat path.
 
-Loud failure: a class with `openapi.resource: "true"` and item-path
+**Opt-out per slot.** Some multivalued class-ranged slots aren't
+browseable collections — back-references, lookups, relationships
+already exposed elsewhere. Suppress nested-path generation for an
+individual slot with `openapi.nested: "false"`:
+
+```yaml
+Person:
+  attributes:
+    addresses: { range: Address, multivalued: true }   # default — nested paths emitted
+    knows:     { range: Person,  multivalued: true }
+  slot_usage:
+    knows:
+      annotations:
+        openapi.nested: "false"                        # ← /persons/{id}/knows is NOT emitted
+```
+
+The slot still appears in the parent's component schema (so it
+serializes / deserializes normally); only the nested-path operations
+are skipped. The default remains on — `multivalued: true, range: Class`
+already says "this is a collection," and the API exposes it unless you
+say otherwise.
+
+**Loud failure** — a class with `openapi.resource: "true"` and item-path
 operations (`read`/`update`/`delete`) but no identifier slot raises at
 generation time with an exact remediation message.
 
