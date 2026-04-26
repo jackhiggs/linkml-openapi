@@ -283,6 +283,9 @@ class OpenAPIGenerator(Generator):
                     item.get = self._make_read_operation(cls, class_name)
                 if "update" in operations:
                     item.put = self._make_update_operation(cls, class_name)
+                if "patch" in operations:
+                    item.patch = self._make_patch_operation(cls, class_name)
+                    schemas[f"{class_name}Patch"] = self._build_patch_schema(class_name, cls)
                 if "delete" in operations:
                     item.delete = self._make_delete_operation(cls, class_name)
                 paths[item_path] = item
@@ -823,6 +826,78 @@ class OpenAPIGenerator(Generator):
                 "404": self._error_response("Not found"),
             },
         )
+
+    # --- PATCH (issue #16) -------------------------------------------------
+
+    def _make_patch_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        """Emit a PATCH item operation using JSON Merge Patch (RFC 7396).
+
+        Request body media type is fixed at ``application/merge-patch+json``
+        — RFC 7396 is JSON-specific, so the class's ``openapi.media_types``
+        do not apply to the request side. The 200 response uses the full
+        class schema and honours ``openapi.media_types`` as usual.
+        """
+        media_types = self._get_media_types(cls)
+        full_ref = Reference(ref=f"#/components/schemas/{class_name}")
+        patch_ref = Reference(ref=f"#/components/schemas/{class_name}Patch")
+        return Operation(
+            summary=f"Patch a {class_name}",
+            operationId=f"patch_{_to_snake_case(class_name)}",
+            tags=[class_name],
+            requestBody=RequestBody(
+                required=True,
+                content={
+                    "application/merge-patch+json": MediaType(media_type_schema=patch_ref),
+                },
+                description=(
+                    "Partial update per RFC 7396. Omit fields you don't want to change. "
+                    "Sending null clears the field; sending a value sets it."
+                ),
+            ),
+            responses={
+                "200": Response(
+                    description=f"{class_name} patched",
+                    content=self._content_for(full_ref, media_types),
+                ),
+                "404": self._error_response("Not found"),
+                "422": self._error_response("Validation error"),
+            },
+        )
+
+    def _build_patch_schema(self, class_name: str, cls: ClassDefinition) -> Schema:
+        """Build a ``<Class>Patch`` schema: every induced slot, all optional.
+
+        Identifier slots are excluded — the path already names the
+        resource and merge-patch can't cleanly express "leave id alone"
+        on a non-nullable string.
+
+        ``x-rdf-class`` and ``x-rdf-property`` mappings are recorded so
+        downstream RDF tooling that reads the spec can apply patches as
+        named-graph mutations.
+        """
+        sv = self.schemaview
+        patch_name = f"{class_name}Patch"
+        if cls.class_uri:
+            self._x_rdf_class[patch_name] = sv.expand_curie(cls.class_uri)
+
+        properties: dict[str, Schema | Reference] = {}
+        for slot in sv.class_induced_slots(class_name):
+            if slot.identifier:
+                continue
+            properties[slot.name] = self._slot_to_schema(slot)
+            if slot.slot_uri:
+                self._x_rdf_property[(patch_name, slot.name)] = sv.expand_curie(slot.slot_uri)
+
+        schema = Schema(type=DataType.OBJECT, additionalProperties=False)
+        schema.title = patch_name
+        schema.description = (
+            f"Partial update for {class_name}. All fields optional; semantics "
+            "per RFC 7396 (JSON Merge Patch). The identifier is excluded — "
+            "the path already names the resource."
+        )
+        if properties:
+            schema.properties = properties
+        return schema
 
     # --- Composition vs reference (issue #18) ------------------------------
 
