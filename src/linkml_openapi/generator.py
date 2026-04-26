@@ -154,6 +154,11 @@ class OpenAPIGenerator(Generator):
     # Emit RFC 7807 Problem (or a user-declared error class) as the body
     # schema for non-2xx responses. Off → today's body-less responses.
     error_schema: bool = True
+    # Active profile name (or None for the full surface). Profiles are
+    # declared via `openapi.profile.<name>.<key>` schema annotations; a
+    # profile lets a single LinkML schema drive multiple API surfaces
+    # (internal / partner / external) by excluding classes or slots.
+    profile: str | None = None
 
     def serialize(self, **kwargs) -> str:
         """Generate and serialize the OpenAPI spec."""
@@ -164,6 +169,13 @@ class OpenAPIGenerator(Generator):
         # None when error_schema is off. Cached per-build so each operation
         # builder doesn't re-resolve.
         self._error_class_name: str | None = self._resolve_error_class()
+        # Resolve the active profile (or no-op when self.profile is None).
+        (
+            self._excluded_classes,
+            self._excluded_slots,
+            self._profile_description,
+        ) = self._resolve_profile_filter()
+        self._validate_profile_drift()
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
         raw["openapi"] = self.openapi_version
@@ -221,13 +233,23 @@ class OpenAPIGenerator(Generator):
         info = Info(title=title, version=self.api_version)
         if sv.schema.description:
             info.description = sv.schema.description
+        if self.profile:
+            tag_line = (
+                f"\n\n[Profile: {self.profile}] {self._profile_description}"
+                if self._profile_description
+                else f"\n\n[Profile: {self.profile}]"
+            )
+            info.description = (info.description or "") + tag_line
 
         schemas: dict[str, Schema | Reference] = {}
 
-        # Component schemas for all classes. Slot-walking happens once per
-        # class inside `_class_to_schema`; the same walk also records any
-        # slot_uri values for `_inject_rdf_extensions` to consume.
+        # Component schemas for all classes (filtered by the active profile).
+        # Slot-walking happens once per class inside `_class_to_schema`; the
+        # same walk also records any slot_uri values for
+        # `_inject_rdf_extensions` to consume.
         for class_name in sv.all_classes():
+            if class_name in self._excluded_classes:
+                continue
             cls = sv.get_class(class_name)
             self._record_rdf_class_uri(cls)
             schemas[class_name] = self._class_to_schema(cls)
@@ -324,6 +346,8 @@ class OpenAPIGenerator(Generator):
             local_properties: dict[str, Schema | Reference] = {}
             local_required: list[str] = []
             for slot in sv.class_induced_slots(cls.name):
+                if self._is_slot_excluded(slot):
+                    continue
                 self._record_rdf_slot_uri(cls.name, slot)
                 if slot.name not in parent_slot_names:
                     local_properties[slot.name] = self._slot_to_schema(slot)
@@ -354,6 +378,8 @@ class OpenAPIGenerator(Generator):
         required: list[str] = []
 
         for slot in sv.class_induced_slots(cls.name):
+            if self._is_slot_excluded(slot):
+                continue
             self._record_rdf_slot_uri(cls.name, slot)
             properties[slot.name] = self._slot_to_schema(slot)
             if slot.required:
@@ -491,16 +517,23 @@ class OpenAPIGenerator(Generator):
         return None
 
     def _get_resource_classes(self) -> list[str]:
-        """Determine which classes should have REST endpoints."""
+        """Determine which classes should have REST endpoints.
+
+        Profile filtering applies last: a class excluded by the active
+        profile never gets endpoints, even if it carries
+        ``openapi.resource: "true"``.
+        """
         sv = self.schemaview
+        excluded = self._excluded_classes
 
         if self.resource_filter:
-            return self.resource_filter
+            return [c for c in self.resource_filter if c not in excluded]
 
         annotated = [
             name
             for name in sv.all_classes()
-            if _is_truthy(self._class_annotation(sv.get_class(name), "openapi.resource") or False)
+            if name not in excluded
+            and _is_truthy(self._class_annotation(sv.get_class(name), "openapi.resource") or False)
         ]
         if annotated:
             return annotated
@@ -508,7 +541,8 @@ class OpenAPIGenerator(Generator):
         return [
             name
             for name in sv.all_classes()
-            if not sv.get_class(name).abstract
+            if name not in excluded
+            and not sv.get_class(name).abstract
             and not sv.get_class(name).mixin
             and list(sv.class_induced_slots(name))
         ]
@@ -694,6 +728,117 @@ class OpenAPIGenerator(Generator):
                 "add the class to the schema or remove the annotation."
             )
         return custom
+
+    # --- Profiles (issue #17) ----------------------------------------------
+
+    _PROFILE_LIST_KEYS = ("exclude_classes", "exclude_slots", "include_classes", "include_slots")
+    _PROFILE_STR_KEYS = ("description",)
+
+    def _load_profiles(self) -> dict[str, dict[str, Any]]:
+        """Parse ``openapi.profile.<name>.<key>`` schema annotations into profile dicts.
+
+        Linkml-runtime rejects nested-dict annotation values and unknown
+        top-level keys, so the profile config is encoded as flat dotted
+        annotation tags. Comma-separated string values are split into
+        lists for the four ``*_classes`` / ``*_slots`` keys; the
+        ``description`` key keeps its raw string.
+        """
+        annotations = getattr(self.schemaview.schema, "annotations", None) or {}
+        if not annotations:
+            return {}
+        profiles: dict[str, dict[str, Any]] = {}
+        items = annotations.values() if hasattr(annotations, "values") else annotations
+        for ann in items:
+            tag = getattr(ann, "tag", None)
+            if not tag or not str(tag).startswith("openapi.profile."):
+                continue
+            rest = str(tag)[len("openapi.profile.") :]
+            if "." not in rest:
+                continue
+            name, key = rest.rsplit(".", 1)
+            value = str(getattr(ann, "value", "") or "")
+            profile = profiles.setdefault(name, {})
+            if key in self._PROFILE_LIST_KEYS:
+                profile[key] = [v.strip() for v in value.split(",") if v.strip()]
+            elif key in self._PROFILE_STR_KEYS:
+                profile[key] = value
+            else:
+                import warnings
+
+                warnings.warn(
+                    f"Unknown profile key {key!r} in annotation {tag!r}; "
+                    "expected one of "
+                    + ", ".join(self._PROFILE_LIST_KEYS + self._PROFILE_STR_KEYS),
+                    stacklevel=2,
+                )
+        return profiles
+
+    def _resolve_profile_filter(self) -> tuple[set[str], set[str], str | None]:
+        """Resolve the active profile to (excluded_classes, excluded_slots, description)."""
+        if not self.profile:
+            return (set(), set(), None)
+        profiles = self._load_profiles()
+        if self.profile not in profiles:
+            available = sorted(profiles) or ["<none declared>"]
+            raise ValueError(
+                f"Unknown profile {self.profile!r}. Available profiles: "
+                f"{', '.join(available)}. Declare via `openapi.profile."
+                f"{self.profile}.<key>` schema annotations."
+            )
+        p = profiles[self.profile]
+        return (
+            set(p.get("exclude_classes", [])),
+            set(p.get("exclude_slots", [])),
+            p.get("description"),
+        )
+
+    def _validate_profile_drift(self) -> None:
+        """Loud failure when an excluded slot is referenced by another annotation.
+
+        A profile that excludes a slot referenced by ``openapi.path_variable``
+        or ``openapi.query_param`` would silently produce a broken spec —
+        the path / query parameter pointing at a slot that doesn't exist
+        on the emitted schema. Fail at generation time so the schema
+        author can choose: drop the annotation or drop the exclusion.
+        """
+        if not self.profile:
+            return
+        sv = self.schemaview
+        for class_name in sv.all_classes():
+            if class_name in self._excluded_classes:
+                continue
+            cls = sv.get_class(class_name)
+            for slot in sv.class_induced_slots(class_name):
+                if slot.name not in self._excluded_slots:
+                    continue
+                pv = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
+                qp = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
+                if not (pv or qp):
+                    continue
+                tags = []
+                if pv:
+                    tags.append("openapi.path_variable")
+                if qp:
+                    tags.append("openapi.query_param")
+                raise ValueError(
+                    f"Profile {self.profile!r} excludes slot {slot.name!r} on "
+                    f"{class_name!r}, but the slot is annotated with "
+                    f"{' / '.join(tags)}. Remove the annotation, drop "
+                    "the slot from exclude_slots, or exclude the whole class."
+                )
+
+    def _is_slot_excluded(self, slot: SlotDefinition) -> bool:
+        """True when the active profile filters this slot out of generated schemas.
+
+        A slot is excluded when:
+          - its name is in ``exclude_slots``, or
+          - its range is an excluded class (the target schema won't exist).
+        """
+        if slot.name in self._excluded_slots:
+            return True
+        if slot.range and slot.range in self._excluded_classes:
+            return True
+        return False
 
     @staticmethod
     def _build_problem_schema() -> Schema:
@@ -1198,6 +1343,8 @@ class OpenAPIGenerator(Generator):
         for slot in sv.class_induced_slots(parent_class_name):
             if not slot.multivalued:
                 continue
+            if self._is_slot_excluded(slot):
+                continue
             target_name = slot.range
             if not target_name or sv.get_class(target_name) is None:
                 continue  # primitive, enum, or unresolved range
@@ -1271,6 +1418,8 @@ class OpenAPIGenerator(Generator):
         out: list[tuple[str, str]] = []
         seen: set[str] = set()
         for src_class_name in sv.all_classes():
+            if src_class_name in self._excluded_classes:
+                continue  # source has no schema, no IRI to reference
             for slot in sv.class_induced_slots(src_class_name):
                 if not slot.inverse or "." not in str(slot.inverse):
                     continue
@@ -1279,6 +1428,8 @@ class OpenAPIGenerator(Generator):
                     continue
                 if tgt_slot_name in target_slot_names:
                     continue  # naturally emitted from the target's own walk
+                if tgt_slot_name in self._excluded_slots:
+                    continue  # the profile excludes this slot name
                 if tgt_slot_name in seen:
                     continue  # already synthesised from another source
                 seen.add(tgt_slot_name)
@@ -1523,6 +1674,8 @@ class OpenAPIGenerator(Generator):
         any_annotated = False
 
         for slot in sv.class_induced_slots(cls.name):
+            if self._is_slot_excluded(slot):
+                continue
             caps = self._query_param_capabilities(cls, slot.name)
             if caps is None:
                 continue
@@ -1594,6 +1747,8 @@ class OpenAPIGenerator(Generator):
 
         # Fall back to auto-inference (unchanged from the legacy default).
         for slot in sv.class_induced_slots(cls.name):
+            if self._is_slot_excluded(slot):
+                continue
             if not slot.multivalued and not slot.identifier:
                 range_name = slot.range or "string"
                 if range_name in ("string", "integer", "boolean") or sv.get_enum(range_name):

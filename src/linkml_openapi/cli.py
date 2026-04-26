@@ -47,6 +47,18 @@ from linkml_openapi.generator import OpenAPIGenerator
         "schema annotation."
     ),
 )
+@click.option(
+    "--profile",
+    default=None,
+    metavar="NAME",
+    help=(
+        "Active profile name. The profile must be declared via "
+        "`openapi.profile.<NAME>.<key>` schema annotations; classes / "
+        "slots listed in `exclude_classes` / `exclude_slots` are filtered "
+        "out of the generated spec. Use this to drive multiple API "
+        "surfaces (internal, partner, external) from one LinkML schema."
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
 def cli(yamlfile, resource_filter=(), **kwargs):
     """Generate an OpenAPI specification from a LinkML schema."""

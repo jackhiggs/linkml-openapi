@@ -3,6 +3,13 @@ name: person_schema
 title: Person Schema
 description: A test schema for persons
 
+annotations:
+  # --- Profiles for multi-view OpenAPI generation (issue #17) ---
+  openapi.profile.external.description: Public surface; internal-only data hidden.
+  openapi.profile.external.exclude_slots: avatar_blob,byte_size
+  openapi.profile.external.exclude_classes: Reviewer
+  openapi.profile.partner.exclude_slots: avatar_blob
+
 prefixes:
   linkml: https://w3id.org/linkml/
   ex: https://example.org/
