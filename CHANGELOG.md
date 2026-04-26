@@ -6,6 +6,78 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [0.3.0] — 2026-04-26
+
+This release adds the annotations and CLI surface needed to drive a
+realistic catalog API (DCAT3, FOAF, internal/partner/external splits)
+from a single LinkML schema. New annotations are listed alongside each
+feature; new CLI flags are summarised at the end.
+
+### Added
+
+- **RFC 7807 error model.** Non-2xx responses reference a `Problem`
+  schema by default. Override the schema name via the
+  `openapi.error_class` schema-level annotation, or disable emission
+  entirely with `--no-error-schema`.
+  ([#14](https://github.com/jackhiggs/linkml-openapi/issues/14))
+- **Composition vs. reference nested paths.** Nested resources whose
+  range is a `inlined: true` (composition) class are inlined into the
+  parent's request/response bodies; nested resources whose range is a
+  class with its own `identifier` (reference) emit child paths under
+  the parent. Use the `openapi.nested: "false"` slot annotation to
+  opt a slot out of the nested-path emission while keeping the
+  property in the schema body.
+  ([#18](https://github.com/jackhiggs/linkml-openapi/issues/18))
+- **Discriminator / polymorphism.** Subclass schemas under an abstract
+  parent emit an OpenAPI `discriminator` block. Two signals are
+  honoured: LinkML-native `designates_type: true` on a slot, and the
+  `openapi.discriminator: <field>` class annotation paired with
+  per-subclass `openapi.type_value: <VALUE>` to keep custom field
+  names and uppercase enum values used by existing systems.
+  ([#20](https://github.com/jackhiggs/linkml-openapi/issues/20))
+- **PATCH operations.** `openapi.operations` accepts `patch` in
+  addition to the existing tokens. Generated PATCH bodies use
+  `application/merge-patch+json` (RFC 7396) and reuse the resource
+  schema with all properties optional.
+  ([#16](https://github.com/jackhiggs/linkml-openapi/issues/16))
+- **Inverse-direction nested paths.** When a slot declares
+  `inverse: <Class>.<slot>` and the named inverse slot is missing on
+  the target class, the generator synthesises the reverse-direction
+  path so the consumer can still navigate the relationship from
+  either end.
+  ([#19](https://github.com/jackhiggs/linkml-openapi/issues/19))
+- **Query operator grammar.** `openapi.query_param` now accepts a
+  comma-separated set of tokens instead of a single string. `sortable`
+  emits an `order` query parameter; `comparable` emits `<slot>__gt` /
+  `<slot>__gte` / `<slot>__lt` / `<slot>__lte` query parameters with
+  the slot's range. Unknown tokens warn at generation time so typos
+  surface early.
+  ([#15](https://github.com/jackhiggs/linkml-openapi/issues/15))
+- **Profiles for multi-view generation.** `--profile <NAME>` filters
+  the spec to a named view configured via flat-dotted schema-level
+  annotations: `openapi.profile.<NAME>.exclude_classes`,
+  `openapi.profile.<NAME>.exclude_slots`, and
+  `openapi.profile.<NAME>.description`. Run the generator multiple
+  times against one LinkML schema to publish internal, partner, and
+  external surfaces from a single source of truth.
+  ([#17](https://github.com/jackhiggs/linkml-openapi/issues/17))
+
+### Changed
+
+- Post-merge cleanup of the v0.2.0..main changeset
+  ([#28](https://github.com/jackhiggs/linkml-openapi/pull/28)):
+  precomputed synthetic-inverse index (O(N²) → O(N)), single-pass
+  query-param emission, shared `_parse_csv` helper, profile-filter
+  drift detection folded into resolution, and a small set of
+  comment / docstring fixes flagged by the simplify review.
+
+### CLI
+
+- New flags: `--profile NAME`, `--error-schema` /
+  `--no-error-schema`. Existing flags
+  (`--openapi-version`, `--flatten-inheritance`, `--api-title`,
+  `--api-version`, `--server-url`, `--classes`) are unchanged.
+
 ## [0.2.0] — 2026-04-25
 
 ### Added
@@ -46,5 +118,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Initial public release.
 
+[0.3.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.2.0
 [0.1.2]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.1.2
