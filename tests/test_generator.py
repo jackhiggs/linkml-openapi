@@ -793,6 +793,137 @@ classes:
             Path(tmp).unlink(missing_ok=True)
 
 
+class TestDiscriminator:
+    """Coverage for issue #20 — discriminator + polymorphism."""
+
+    def test_explicit_discriminator_field_synthesised(self):
+        """`openapi.discriminator: kind` synthesises the field on the parent."""
+        spec = _generate()
+        product = spec["components"]["schemas"]["Product"]
+        assert "kind" in product["properties"]
+        assert product["properties"]["kind"]["type"] == "string"
+        assert "kind" in product["required"]
+
+    def test_explicit_discriminator_mapping_uses_type_value(self):
+        """Type values from `openapi.type_value` flow into the mapping."""
+        spec = _generate()
+        product = spec["components"]["schemas"]["Product"]
+        assert product["discriminator"]["propertyName"] == "kind"
+        assert product["discriminator"]["mapping"] == {
+            "BOOK": "#/components/schemas/Book",
+            "VINYL": "#/components/schemas/Vinyl",
+        }
+        assert set(product["properties"]["kind"]["enum"]) == {"BOOK", "VINYL"}
+
+    def test_subclass_redeclares_field_with_single_value_enum(self):
+        """A concrete subclass's local schema pins the discriminator to its value."""
+        spec = _generate()
+        book_local = spec["components"]["schemas"]["Book"]["allOf"][1]
+        assert book_local["properties"]["kind"]["enum"] == ["BOOK"]
+        assert book_local["properties"]["kind"]["default"] == "BOOK"
+        assert "kind" in book_local["required"]
+
+    def test_designates_type_drives_discriminator(self):
+        """LinkML's `designates_type: true` produces an OpenAPI discriminator block."""
+        spec = _generate()
+        animal = spec["components"]["schemas"]["Animal"]
+        assert animal["discriminator"]["propertyName"] == "species"
+        assert animal["discriminator"]["mapping"] == {
+            "Dog": "#/components/schemas/Dog",
+            "Cat": "#/components/schemas/Cat",
+        }
+
+    def test_designates_type_default_value_is_class_name_as_is(self):
+        """Without openapi.type_value, the default matches LinkML's `designates_type` behaviour."""
+        spec = _generate()
+        dog_local = spec["components"]["schemas"]["Dog"]["allOf"][1]
+        assert dog_local["properties"]["species"]["enum"] == ["Dog"]
+        assert dog_local["properties"]["species"]["default"] == "Dog"
+
+    def test_descendant_does_not_re_emit_discriminator(self):
+        """Only the root that declares the discriminator carries the block."""
+        spec = _generate()
+        book = spec["components"]["schemas"]["Book"]
+        assert "discriminator" not in book
+
+    def test_conflict_designates_type_and_openapi_discriminator_raises(self):
+        """Declaring both ways for the same class is a generation-time error."""
+        import tempfile
+
+        import pytest
+
+        schema_yaml = """
+id: https://example.org/conflict
+name: conflict
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Item:
+    abstract: true
+    annotations:
+      openapi.discriminator: kind
+    attributes:
+      type:
+        designates_type: true
+        range: string
+      sku:
+        identifier: true
+        range: string
+        required: true
+  Widget:
+    is_a: Item
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="designates_type"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_duplicate_type_values_raises(self):
+        """Two subclasses with the same openapi.type_value is a generation-time error."""
+        import tempfile
+
+        import pytest
+
+        schema_yaml = """
+id: https://example.org/dup-type-value
+name: dup_type_value
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Item:
+    abstract: true
+    annotations:
+      openapi.discriminator: kind
+    attributes:
+      sku:
+        identifier: true
+        range: string
+        required: true
+  Widget:
+    is_a: Item
+    annotations:
+      openapi.type_value: SAME
+  Gadget:
+    is_a: Item
+    annotations:
+      openapi.type_value: SAME
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="Duplicate"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestRdfExtensions:
     def test_class_uri_emitted_as_x_rdf_class(self):
         """Person.class_uri = schema:Person becomes x-rdf-class on the schema."""
