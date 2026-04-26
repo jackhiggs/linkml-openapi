@@ -175,6 +175,36 @@ classes:
       artist:
         range: string
 
+  # --- Inverse-direction nested paths (issue #19) ---
+  # Article.reviewers declares `inverse: Reviewer.articles` — Reviewer
+  # has no explicit `articles` slot, so the generator synthesises the
+  # reverse-direction path `/reviewers/{id}/articles`.
+  Article:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      doi:
+        identifier: true
+        range: string
+        required: true
+      title:
+        range: string
+      reviewers:
+        range: Reviewer
+        multivalued: true
+        inverse: Reviewer.articles
+
+  Reviewer:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      reviewer_id:
+        identifier: true
+        range: string
+        required: true
+      full_name:
+        range: string
+
   # --- Discriminator: LinkML-native designates_type ---
   Animal:
     abstract: true

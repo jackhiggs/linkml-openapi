@@ -456,6 +456,55 @@ say otherwise.
 operations (`read`/`update`/`delete`) but no identifier slot raises at
 generation time with an exact remediation message.
 
+##### Inverse direction via LinkML's `inverse:`
+
+LinkML slots are unidirectional. To get the reverse-direction nested
+path *without* declaring a real slot on the other side, use LinkML's
+existing `inverse:` field:
+
+```yaml
+classes:
+  Article:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      doi: { identifier: true, range: string, required: true }
+      reviewers:
+        range: Reviewer
+        multivalued: true
+        inverse: Reviewer.articles      # ← Reviewer has no real `articles` slot
+  Reviewer:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      reviewer_id: { identifier: true, range: string, required: true }
+```
+
+emits both directions:
+
+```
+GET    /articles/{doi}/reviewers                  # forward (real slot)
+POST   /articles/{doi}/reviewers
+DELETE /articles/{doi}/reviewers/{reviewer_id}
+
+GET    /reviewers/{reviewer_id}/articles          # reverse (synthesised from inverse:)
+POST   /reviewers/{reviewer_id}/articles
+DELETE /reviewers/{reviewer_id}/articles/{article_id}
+```
+
+The synthesised reverse direction is always reference-shaped: it uses
+the same `ResourceLink` attach / detach body as a real reference slot
+would. Composition can't be inverted (a composed child has no
+independent IRI to reference, so there's nothing to attach to from
+the other side).
+
+If both sides declare real slots that point at each other via
+`inverse:`, no synthesis happens — each side emits naturally from its
+own slot walk. The `inverse:` declaration is only the load-bearing
+signal when one side wants the path without paying for a real slot.
+
+**No name-based inference.** Without an `inverse:` declaration, the
+generator never guesses that `Article.reviewers` implies a path on
+`Reviewer`. That's a parallel-vocabulary trap.
+
 ### Slot-level annotations
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.

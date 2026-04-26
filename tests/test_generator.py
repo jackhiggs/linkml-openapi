@@ -576,6 +576,52 @@ classes:
             Path(tmp).unlink(missing_ok=True)
 
 
+class TestInverseDirection:
+    """Coverage for issue #19 — inverse-direction nested paths from `inverse:`."""
+
+    def test_forward_path_emitted(self):
+        """Article.reviewers (a multivalued class slot) emits /articles/{id}/reviewers."""
+        spec = _generate()
+        assert "/articles/{doi}/reviewers" in spec["paths"]
+        assert "/articles/{doi}/reviewers/{reviewer_id}" in spec["paths"]
+
+    def test_inverse_path_synthesised_from_inverse_declaration(self):
+        """Article.reviewers `inverse: Reviewer.articles` synthesises the reverse path."""
+        spec = _generate()
+        assert "/reviewers/{reviewer_id}/articles" in spec["paths"]
+        assert "/reviewers/{reviewer_id}/articles/{article_id}" in spec["paths"]
+
+    def test_synthesised_inverse_is_reference_shaped(self):
+        """Synthesised inverse paths are always attach/detach, never composition."""
+        spec = _generate()
+        coll = spec["paths"]["/reviewers/{reviewer_id}/articles"]
+        # Reference: GET (list attached) and POST (attach via ResourceLink).
+        assert "get" in coll
+        assert "post" in coll
+        # No PUT — to mutate an Article, hit /articles/{doi}.
+        assert "put" not in coll
+        # Item path: only DELETE (detach).
+        item = spec["paths"]["/reviewers/{reviewer_id}/articles/{article_id}"]
+        assert "delete" in item
+        assert "get" not in item
+        assert "put" not in item
+
+    def test_no_inverse_path_without_declaration(self):
+        """Without `inverse:` declared, no reverse path is synthesised — no name guessing."""
+        spec = _generate()
+        # Person.addresses (no `inverse:`) doesn't synthesise /addresses/{id}/persons.
+        assert "/addresses/{id}/persons" not in spec["paths"]
+        assert "/addresses/{id}/people" not in spec["paths"]
+
+    def test_inverse_attach_body_is_resourcelink(self):
+        """Synthesised inverse uses the same ResourceLink attach body as forward references."""
+        spec = _generate()
+        attach = spec["paths"]["/reviewers/{reviewer_id}/articles"]["post"]
+        body = attach["requestBody"]["content"]["application/json"]["schema"]
+        refs = [s.get("$ref") for s in body.get("oneOf", []) if "$ref" in s]
+        assert "#/components/schemas/ResourceLink" in refs
+
+
 class TestPatchOperations:
     """Coverage for issue #16 — PATCH operations via JSON Merge Patch."""
 
