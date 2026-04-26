@@ -199,6 +199,92 @@ spec's behaviour, not a generator quirk.
       openapi.operations: "list"        # Collection-only, no item endpoint
 ```
 
+#### Discriminator (polymorphism)
+
+The generator emits an OpenAPI `discriminator` block on a parent schema
+when either signal is present:
+
+1. **LinkML-native** — a slot with `designates_type: true`. The slot
+   becomes the discriminator field; concrete subclass instances default
+   to the class name (LinkML's own behaviour).
+
+   ```yaml
+   classes:
+     Animal:
+       abstract: true
+       attributes:
+         species:
+           designates_type: true
+           range: string
+     Dog:    { is_a: Animal }
+     Cat:    { is_a: Animal }
+   ```
+
+2. **Existing-system override** — `openapi.discriminator: <field>` on the
+   parent picks (or synthesizes) the field, and `openapi.type_value:
+   <string>` on each subclass pins the wire value. Use this when you're
+   adopting linkml-openapi against an existing API surface that already
+   has a fixed field name and fixed values you can't change.
+
+   ```yaml
+   classes:
+     Product:
+       abstract: true
+       annotations:
+         openapi.discriminator: kind     # synthesizes the field if needed
+       attributes:
+         sku: { identifier: true, range: string, required: true }
+     Book:
+       is_a: Product
+       annotations:
+         openapi.type_value: BOOK        # not "Book"
+       attributes:
+         title: { range: string }
+     Vinyl:
+       is_a: Product
+       annotations:
+         openapi.type_value: VINYL
+   ```
+
+   produces
+
+   ```yaml
+   Product:
+     properties:
+       kind: { type: string, enum: [BOOK, VINYL] }
+     required: [sku, kind]
+     discriminator:
+       propertyName: kind
+       mapping:
+         BOOK: '#/components/schemas/Book'
+         VINYL: '#/components/schemas/Vinyl'
+   Book:
+     allOf:
+       - $ref: '#/components/schemas/Product'
+       - properties:
+           kind: { type: string, enum: [BOOK], default: BOOK }
+         required: [kind]
+   ```
+
+| Annotation | Where | Purpose |
+|------------|-------|---------|
+| `openapi.discriminator: <field>` | parent class | Pick or synthesise the discriminator field. Errors if the class also has `designates_type`. |
+| `openapi.type_value: <string>` | concrete subclass | Override the default wire value (class name) for an existing-system match. |
+
+Validation:
+
+- `designates_type: true` and `openapi.discriminator` on the same class
+  → generation error (they say the same thing two ways).
+- Two subclasses with the same `openapi.type_value` in one discriminator
+  group → generation error.
+- Mixins are not part of the polymorphic mapping (they're trait
+  composition, not subtyping).
+
+Polymorphic endpoints fall out automatically: an abstract parent with
+`openapi.resource: "true"` gets standard CRUD paths whose request /
+response schemas `$ref` the parent — and the discriminator block on
+the parent does the polymorphic dispatch at codegen / runtime.
+
 #### `openapi.media_types`
 
 Comma-separated list of media types each operation generated for the class

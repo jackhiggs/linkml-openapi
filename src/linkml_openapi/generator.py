@@ -18,6 +18,7 @@ from linkml_runtime.linkml_model import ClassDefinition, SlotDefinition
 from openapi_pydantic import (
     Components,
     DataType,
+    Discriminator,
     Info,
     MediaType,
     OpenAPI,
@@ -241,6 +242,11 @@ class OpenAPIGenerator(Generator):
         # already exists in the schema.
         if self._error_class_name == "Problem" and "Problem" not in schemas:
             schemas["Problem"] = self._build_problem_schema()
+
+        # Apply discriminator blocks driven by `designates_type` or by
+        # `openapi.discriminator` annotations. Done after class schemas are
+        # built so we can patch the in-memory Schema models in place.
+        self._apply_discriminators(schemas)
 
         # Track whether any reference relationship is generated; if so the
         # shared ResourceLink component is added to the schema set below.
@@ -739,6 +745,198 @@ class OpenAPIGenerator(Generator):
                 "application/problem+json": MediaType(media_type_schema=ref),
             },
         )
+
+    # --- Discriminator / polymorphism (issue #20) --------------------------
+
+    def _designates_type_slot(self, class_name: str) -> SlotDefinition | None:
+        """Return the slot with `designates_type: true` on this class, or None."""
+        for slot in self.schemaview.class_induced_slots(class_name):
+            if getattr(slot, "designates_type", False):
+                return slot
+        return None
+
+    def _discriminator_field(self, cls: ClassDefinition) -> str | None:
+        """The discriminator field name for `cls`, or None.
+
+        Reads (in priority order):
+          1. ``openapi.discriminator: <field>`` class annotation
+          2. ``designates_type: true`` on a slot induced into the class
+
+        Setting both at once is a generation-time error — they say the
+        same thing two ways.
+        """
+        annotation_field = self._class_annotation(cls, "openapi.discriminator")
+        designates_slot = self._designates_type_slot(cls.name)
+        if annotation_field is not None and designates_slot is not None:
+            raise ValueError(
+                f"Class {cls.name!r} declares both designates_type "
+                f"(on slot {designates_slot.name!r}) and "
+                f"openapi.discriminator. Remove one — they describe the same "
+                "discriminator two different ways."
+            )
+        if annotation_field is not None:
+            return annotation_field.strip()
+        if designates_slot is not None:
+            return designates_slot.name
+        return None
+
+    def _is_discriminator_root(self, cls: ClassDefinition, field: str) -> bool:
+        """True when ``cls`` is the topmost class declaring ``field`` as discriminator.
+
+        ``designates_type`` and ``class_induced_slots`` propagate through the
+        ``is_a`` chain, so a concrete leaf naively reports the same
+        discriminator as its abstract parent. Only the root should emit the
+        ``discriminator`` block.
+        """
+        if not cls.is_a:
+            return True
+        parent_cls = self.schemaview.get_class(cls.is_a)
+        if parent_cls is None:
+            return True
+        parent_field = self._discriminator_field(parent_cls)
+        return parent_field != field
+
+    def _concrete_descendants_including_self(self, class_name: str) -> list[str]:
+        """Concrete (non-abstract, non-mixin) descendants plus self if concrete.
+
+        Mixins are excluded entirely from polymorphic mappings — they're
+        trait composition, not subtyping.
+        """
+        sv = self.schemaview
+        out: list[str] = []
+        for name in [class_name] + list(sv.class_descendants(class_name, reflexive=False)):
+            cls = sv.get_class(name)
+            if cls is None or cls.abstract or cls.mixin:
+                continue
+            out.append(name)
+        return out
+
+    def _type_value(self, cls: ClassDefinition) -> str:
+        """The discriminator value for a concrete subclass.
+
+        Defaults to the class name as-is, matching ``designates_type``'s
+        LinkML default. ``openapi.type_value`` overrides — used when an
+        existing system has a fixed value the schema needs to honour.
+        """
+        override = self._class_annotation(cls, "openapi.type_value")
+        return override.strip() if override else cls.name
+
+    def _apply_discriminators(self, schemas: dict[str, Schema | Reference]) -> None:
+        """Patch component schemas with OpenAPI ``discriminator`` blocks.
+
+        For each class that declares a discriminator (via ``designates_type``
+        or ``openapi.discriminator``), attaches:
+          - a ``discriminator`` block on the parent's component schema
+          - a ``required``-with-enum form of the discriminator field
+            (synthesizing the property if the LinkML side didn't declare it)
+          - a single-value enum + default on every concrete descendant's
+            local property block
+        """
+        sv = self.schemaview
+        for class_name in sv.all_classes():
+            cls = sv.get_class(class_name)
+            field = self._discriminator_field(cls)
+            if field is None:
+                continue
+            if not self._is_discriminator_root(cls, field):
+                continue
+            concrete = self._concrete_descendants_including_self(class_name)
+            if not concrete:
+                # Discriminator declared but nothing concrete to dispatch
+                # to — the parent is itself abstract and has no concrete
+                # subclasses. Skip silently; the schema is still valid.
+                continue
+
+            mapping: dict[str, str] = {}
+            seen: dict[str, str] = {}
+            for sub_name in concrete:
+                tv = self._type_value(sv.get_class(sub_name))
+                if tv in seen:
+                    raise ValueError(
+                        f"Duplicate openapi.type_value {tv!r} on classes "
+                        f"{seen[tv]!r} and {sub_name!r}; values must be unique "
+                        "across a discriminator group."
+                    )
+                seen[tv] = sub_name
+                mapping[tv] = f"#/components/schemas/{sub_name}"
+
+            self._inject_discriminator_on_parent(
+                schemas, class_name, field, list(mapping.keys()), mapping
+            )
+            for tv, sub_name in seen.items():
+                self._inject_subclass_type_value(schemas, sub_name, field, tv)
+
+    def _inject_discriminator_on_parent(
+        self,
+        schemas: dict[str, Schema | Reference],
+        class_name: str,
+        field: str,
+        type_values: list[str],
+        mapping: dict[str, str],
+    ) -> None:
+        schema = schemas.get(class_name)
+        if not isinstance(schema, Schema):
+            return  # Reference — nothing to patch
+
+        # The discriminator goes at the schema-object level so it applies to
+        # any $ref that resolves to this schema.
+        schema.discriminator = Discriminator(propertyName=field, mapping=mapping)
+
+        # Locate or synthesise the discriminator field. With `is_a`
+        # inheritance the local properties live under `allOf[1]`; for
+        # standalone classes they're at the top level.
+        local = self._writable_local_schema(schema)
+        properties = local.properties or {}
+        existing = properties.get(field)
+        if existing is None or not isinstance(existing, Schema):
+            properties[field] = Schema(type=DataType.STRING, enum=type_values)
+        else:
+            existing.type = DataType.STRING
+            existing.enum = type_values
+        local.properties = properties
+
+        required = list(local.required or [])
+        if field not in required:
+            required.append(field)
+        local.required = required
+
+    @staticmethod
+    def _writable_local_schema(schema: Schema) -> Schema:
+        """Return the Schema where local properties live (top-level or allOf[1])."""
+        if schema.allOf:
+            for part in schema.allOf:
+                if isinstance(part, Schema):
+                    return part
+            # No inline part — append one so we have somewhere to put properties
+            inline = Schema(type=DataType.OBJECT)
+            schema.allOf.append(inline)
+            return inline
+        return schema
+
+    def _inject_subclass_type_value(
+        self,
+        schemas: dict[str, Schema | Reference],
+        class_name: str,
+        field: str,
+        type_value: str,
+    ) -> None:
+        schema = schemas.get(class_name)
+        if not isinstance(schema, Schema):
+            return
+        local = self._writable_local_schema(schema)
+        properties = dict(local.properties or {})
+        # Single-value enum so a hand-written client reading the spec sees
+        # exactly what to send for this concrete subclass.
+        properties[field] = Schema(
+            type=DataType.STRING,
+            enum=[type_value],
+            default=type_value,
+        )
+        local.properties = properties
+        required = list(local.required or [])
+        if field not in required:
+            required.append(field)
+        local.required = required
 
     def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)

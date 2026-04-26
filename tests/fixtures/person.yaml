@@ -147,6 +147,53 @@ classes:
       quantity:
         range: integer
 
+  # --- Discriminator: openapi.discriminator + openapi.type_value (existing-system case) ---
+  Product:
+    abstract: true
+    description: Polymorphic root using a custom field name and uppercase type values.
+    annotations:
+      openapi.discriminator: kind
+    attributes:
+      sku:
+        identifier: true
+        range: string
+        required: true
+
+  Book:
+    is_a: Product
+    annotations:
+      openapi.type_value: BOOK
+    attributes:
+      title:
+        range: string
+
+  Vinyl:
+    is_a: Product
+    annotations:
+      openapi.type_value: VINYL
+    attributes:
+      artist:
+        range: string
+
+  # --- Discriminator: LinkML-native designates_type ---
+  Animal:
+    abstract: true
+    description: Polymorphic root using LinkML's designates_type signal.
+    attributes:
+      species:
+        designates_type: true
+        range: string
+      tag:
+        identifier: true
+        range: string
+        required: true
+
+  Dog:
+    is_a: Animal
+
+  Cat:
+    is_a: Animal
+
 enums:
   PersonStatus:
     description: Status of a person
