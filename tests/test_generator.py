@@ -458,6 +458,101 @@ class TestRdfExtensions:
         assert gen.schemaview.expand_curie("unknown:Foo") == "unknown:Foo"
 
 
+class TestNestedRelationships:
+    """`/parent/{id}/<slot>` sub-resource paths derived from relationship slots."""
+
+    def test_multivalued_resource_relationship_emits_array_path(self):
+        """Person.addresses (multivalued, range Address) → GET /persons/{id}/addresses."""
+        spec = _generate()
+        path = spec["paths"].get("/persons/{id}/addresses")
+        assert path is not None
+        assert "get" in path
+        schema = path["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert schema["type"] == "array"
+        assert schema["items"] == {"$ref": "#/components/schemas/Address"}
+
+    def test_single_valued_resource_relationship_emits_object_path(self):
+        """Person.primary_address (single, range Address) → GET /persons/{id}/primary_address."""
+        spec = _generate()
+        path = spec["paths"].get("/persons/{id}/primary_address")
+        assert path is not None
+        assert "get" in path
+        schema = path["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        # Single-valued relationship — response is a $ref, not an array.
+        assert schema == {"$ref": "#/components/schemas/Address"}
+
+    def test_nested_path_inherits_parent_path_params(self):
+        """The sub-resource path carries the parent's path variables."""
+        spec = _generate()
+        params = spec["paths"]["/persons/{id}/addresses"].get("parameters", [])
+        assert any(p["name"] == "id" and p["in"] == "path" for p in params)
+
+    def test_nested_list_has_pagination(self):
+        spec = _generate()
+        list_op = spec["paths"]["/persons/{id}/addresses"]["get"]
+        param_names = {p["name"] for p in list_op["parameters"]}
+        assert "limit" in param_names
+        assert "offset" in param_names
+
+    def test_nested_operation_id_uses_parent_and_slot(self):
+        spec = _generate()
+        list_op = spec["paths"]["/persons/{id}/addresses"]["get"]
+        assert list_op["operationId"] == "list_person_addresses"
+        get_op = spec["paths"]["/persons/{id}/primary_address"]["get"]
+        assert get_op["operationId"] == "get_person_primary_address"
+
+    def test_nested_tags_include_both_parent_and_child(self):
+        spec = _generate()
+        list_op = spec["paths"]["/persons/{id}/addresses"]["get"]
+        assert set(list_op["tags"]) == {"Person", "Address"}
+
+    def test_nested_404_when_parent_missing(self):
+        spec = _generate()
+        list_op = spec["paths"]["/persons/{id}/addresses"]["get"]
+        assert "404" in list_op["responses"]
+
+    def test_slot_level_opt_out_suppresses_nested_path(self):
+        """`openapi.nested: "false"` on a slot prevents the sub-resource path."""
+        spec = _generate()
+        assert "/persons/{id}/secret_address" not in spec["paths"]
+
+    def test_class_level_opt_out_suppresses_all_nested_paths(self):
+        """`openapi.nest_subresources: "false"` on a class drops every nested path."""
+        spec = _generate(resource_filter=["Organization", "Address"])
+        # Organization.headquarters has range Address (a resource), so without
+        # the class-level opt-out we'd expect /organizations/{id}/headquarters.
+        assert "/organizations/{id}/headquarters" not in spec["paths"]
+        # And the parent's own paths are still emitted.
+        assert "/organizations" in spec["paths"]
+
+    def test_no_nested_path_when_range_is_not_a_resource(self):
+        """Person.email (range string) must not produce a nested path."""
+        spec = _generate()
+        assert "/persons/{id}/email" not in spec["paths"]
+        assert "/persons/{id}/age" not in spec["paths"]
+
+    def test_nested_path_inherits_parent_media_types(self):
+        """Person declares JSON, JSON-LD and Turtle — the nested list does too."""
+        spec = _generate()
+        list_op = spec["paths"]["/persons/{id}/addresses"]["get"]
+        content = list_op["responses"]["200"]["content"]
+        assert set(content.keys()) == {
+            "application/json",
+            "application/ld+json",
+            "text/turtle",
+        }
+
+    def test_bookstore_nested_authors_path_present(self):
+        """End-to-end: bookstore example now exposes /books/{id}/authors."""
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator as _Gen
+
+        gen = _Gen(str(Path(__file__).parent.parent / "examples" / "bookstore" / "schema.yaml"))
+        spec = yaml.safe_load(gen.serialize())
+        assert "/books/{id}/authors" in spec["paths"]
+
+
 class TestMediaTypes:
     def test_default_media_type_is_json(self):
         """Address has no openapi.media_types — only application/json content."""

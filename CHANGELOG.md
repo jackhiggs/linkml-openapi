@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## Unreleased
+
+### Added
+
+- **Nested sub-resource paths from relationship slots.** Slots whose range
+  is itself a resource class now produce `/<parent>/{id}/<slot>` endpoints
+  alongside the existing flat collection paths. Multivalued slots emit a
+  list endpoint with `limit` / `offset` and a `404` for missing parents;
+  single-valued slots emit a single-object `GET`. The parent's path
+  parameters are carried through, and the parent's `openapi.media_types`
+  apply to the nested response.
+- `openapi.nested: "false"` slot annotation suppresses one sub-resource
+  path; `openapi.nest_subresources: "false"` class annotation suppresses
+  every nested path under a parent class. Default is to nest.
+
 ## [0.2.0] — 2026-04-25
 
 ### Added

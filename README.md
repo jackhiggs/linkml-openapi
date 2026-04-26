@@ -10,6 +10,7 @@ Generate [OpenAPI 3.1](https://spec.openapis.org/oas/v3.1.0) specifications from
 
 - Converts LinkML classes to OpenAPI component schemas (JSON Schema)
 - Generates CRUD endpoints with path/query parameters
+- Derives nested sub-resource paths (`/parent/{id}/<slot>`) from relationship slots
 - Supports inheritance via `allOf` references
 - Maps LinkML enums, ranges, constraints, and multivalued slots
 - Annotation-driven control over resources, paths, operations, path variables, and query parameters
@@ -180,6 +181,29 @@ blocks by hand.
       openapi.media_types: "application/json,application/ld+json,text/turtle,application/rdf+xml"
 ```
 
+#### `openapi.nest_subresources`
+
+Class-level kill-switch for nested sub-resource paths. When set to `"false"`,
+the generator emits `/<parent>` and `/<parent>/{id}` for the class but no
+`/<parent>/{id}/<slot>` paths, regardless of which slots reference other
+resources.
+
+| Value | Behaviour |
+|-------|-----------|
+| `"false"` | Suppress every nested path under this parent |
+| omitted / `"true"` | Default: nest any slot whose range is itself a resource class |
+
+```yaml
+  Organization:
+    annotations:
+      openapi.resource: "true"
+      openapi.nest_subresources: "false"   # /organizations only — no /organizations/{id}/*
+```
+
+Use this when the parent is a flat lookup surface — directories, audit logs,
+event streams — where the relationships are real but you don't want to expose
+them as URL hierarchy.
+
 #### `x-rdf-class` / `x-rdf-property` extensions
 
 The generator propagates LinkML's `class_uri` and `slot_uri` into the OpenAPI
@@ -303,6 +327,32 @@ When no slots are annotated as path variables, the generator falls back to the c
           openapi.path_variable: slug     # GET /catalogs/{id}, schema is plain string
 ```
 
+#### `openapi.nested`
+
+Per-slot opt-out for nested sub-resource paths. When a relationship slot is
+annotated `openapi.nested: "false"`, the generator skips emitting
+`/<parent>/{id}/<slot>` for that slot but keeps every other relationship
+under the same parent.
+
+| Value | Behaviour |
+|-------|-----------|
+| `"false"` | Skip the nested path for this slot |
+| omitted / `"true"` | Default: emit a nested path when the slot's range is a resource class |
+
+```yaml
+  Person:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      addresses:
+        range: Address
+        multivalued: true                  # → GET /persons/{id}/addresses
+      audit_log_entry:
+        range: AuditLogEntry
+        annotations:
+          openapi.nested: "false"          # → no /persons/{id}/audit_log_entry
+```
+
 #### `openapi.query_param`
 
 Marks a slot as a query parameter on the `list` operation.
@@ -340,8 +390,10 @@ When no slots are annotated with `openapi.query_param`, the generator auto-infer
 | `openapi.path` | class | path segment string | Auto-pluralized snake_case of class name |
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
 | `openapi.media_types` | class | comma-separated list | `application/json` |
-| `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
+| `openapi.nest_subresources` | class | `"true"` / `"false"` | `"true"` (nest relationship slots) |
+| `openapi.path_variable` | slot (via `slot_usage`) | `"true"` / `"iri"` / `"slug"` | Identifier slot |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` | Auto-inferred from slot type |
+| `openapi.nested` | slot | `"true"` / `"false"` | `"true"` for resource-ranged slots |
 | `openapi.format` | slot | format string | derived from slot range |
 
 ## Type Mapping
@@ -380,6 +432,76 @@ LinkML slot constraints map to JSON Schema in component schemas:
 | `is_a` (inheritance) | `allOf` with `$ref` to parent |
 | `multivalued: true` | `type: array` with `items` |
 | `description` | `description` |
+
+## Nested sub-resources
+
+Relationship slots whose range is itself a resource class produce nested
+paths under the parent's item path. The generator infers them
+automatically — no annotation is required for the common case.
+
+| Slot shape | Inferred path | HTTP | Response |
+|------------|---------------|------|----------|
+| `slot.range = R` (R is a resource), `multivalued: true` | `/<parent>/{id}/<slot>` | `GET` | array of `R` with `limit` / `offset` |
+| `slot.range = R` (R is a resource), single-valued | `/<parent>/{id}/<slot>` | `GET` | single `R` (or `404`) |
+| `slot.range = R`, R is **not** a resource | not emitted | — | — |
+| Parent class has `openapi.nest_subresources: "false"` | not emitted | — | — |
+| Slot has `openapi.nested: "false"` | not emitted | — | — |
+
+The nested operation's `tags` include both the parent and child class names so Swagger UI groups them under both. The parent's `openapi.media_types` apply to nested responses.
+
+```yaml
+classes:
+  Book:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: books
+    attributes:
+      id:
+        identifier: true
+      authors:
+        range: Author
+        multivalued: true             # → GET /books/{id}/authors
+
+  Author:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: authors
+    attributes:
+      id:
+        identifier: true
+      name:
+```
+
+produces:
+
+```yaml
+paths:
+  /books:           { get: …, post: … }
+  /books/{id}:      { get: …, put: …, delete: … }
+  /books/{id}/authors:
+    get:
+      tags: [Book, Author]
+      summary: List authors of a Book
+      responses:
+        '200':
+          description: List of Author for the Book
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Author'
+        '404':
+          description: Book not found
+  /authors:         { get: …, post: … }
+  /authors/{id}:    { get: …, put: …, delete: … }
+```
+
+Only `GET` is emitted on nested paths. Whether a relationship is composing
+(create-the-child-under-the-parent) or referencing (just listing existing
+children) cannot be inferred from LinkML alone, so write operations on
+nested paths are deliberately left out — model them as flat operations on
+the child resource (`POST /authors`) instead.
 
 ## Complete Example
 

@@ -128,6 +128,51 @@ paths:
         type: string
       name: id
       in: path
+  /books/{id}/authors:
+    get:
+      tags:
+      - Book
+      - Author
+      summary: List authors of a Book
+      operationId: list_book_authors
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      responses:
+        '200':
+          description: List of Author for the Book
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Author'
+                type: array
+        '404':
+          description: Book not found
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
   /authors:
     get:
       tags:

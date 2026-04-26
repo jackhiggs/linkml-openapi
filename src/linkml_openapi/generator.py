@@ -3,6 +3,7 @@
 Converts LinkML schema definitions into OpenAPI 3.1 specifications with:
 - JSON Schema components derived from classes and slots
 - CRUD endpoints for classes annotated with openapi.resource: true
+- Nested sub-resource endpoints for slots whose range is itself a resource
 - Path/query parameter inference from slot annotations
 """
 
@@ -230,8 +231,10 @@ class OpenAPIGenerator(Generator):
             schemas[enum_name] = self._enum_to_schema(enum_def)
 
         # Build paths for resource classes
+        resource_class_names = self._get_resource_classes()
+        resource_class_set = set(resource_class_names)
         paths: dict[str, PathItem] = {}
-        for class_name in self._get_resource_classes():
+        for class_name in resource_class_names:
             cls = sv.get_class(class_name)
             path_vars = self._get_path_variables(cls)
             path_segment = self._get_path_segment(cls)
@@ -250,16 +253,7 @@ class OpenAPIGenerator(Generator):
             if path_vars:
                 item_suffix = "/".join(f"{{{s.name}}}" for s, _mode in path_vars)
                 item_path = f"/{path_segment}/{item_suffix}"
-                path_params = [
-                    Parameter(
-                        name=s.name,
-                        param_in=ParameterLocation.PATH,
-                        required=True,
-                        param_schema=self._path_variable_schema(s, mode),
-                    )
-                    for s, mode in path_vars
-                ]
-                item = PathItem(parameters=path_params)
+                item = PathItem(parameters=self._make_path_params(path_vars))
                 if "read" in operations:
                     item.get = self._make_read_operation(cls, class_name)
                 if "update" in operations:
@@ -267,6 +261,20 @@ class OpenAPIGenerator(Generator):
                 if "delete" in operations:
                     item.delete = self._make_delete_operation(cls, class_name)
                 paths[item_path] = item
+
+                # Nested sub-resource paths derived from relationship slots
+                for slot, target_name in self._get_nested_relationships(cls, resource_class_set):
+                    nested_path = f"{item_path}/{slot.name}"
+                    nested_item = PathItem(parameters=self._make_path_params(path_vars))
+                    if slot.multivalued:
+                        nested_item.get = self._make_nested_list_operation(
+                            cls, slot, target_name
+                        )
+                    else:
+                        nested_item.get = self._make_nested_get_operation(
+                            cls, slot, target_name
+                        )
+                    paths[nested_path] = nested_item
 
         # openapi-pydantic restricts the `openapi` field to 3.1.x literals;
         # we build the model with 3.1.0 and then rewrite the version string
@@ -614,6 +622,124 @@ class OpenAPIGenerator(Generator):
                     slot_uri = self._x_rdf_property.get((class_name, slot_name))
                     if slot_uri and isinstance(slot_schema, dict):
                         slot_schema["x-rdf-property"] = slot_uri
+
+    # --- Nested-relationship helpers --------------------------------------
+
+    def _get_nested_relationships(
+        self, cls: ClassDefinition, resource_class_set: set[str]
+    ) -> list[tuple[SlotDefinition, str]]:
+        """Slots of `cls` whose range is itself a resource class.
+
+        Drives the `/parent/{id}/<slot>` sub-resource paths. The slot is
+        skipped when:
+
+        * the parent class declares `openapi.nest_subresources: "false"`
+        * the slot is annotated `openapi.nested: "false"`
+        * the slot is one of the parent's own path variables (an identifier)
+        * the slot's range is not a resource class in its own right
+
+        Returns a list of `(slot, target_class_name)` tuples in induced-slot
+        order so the emitted paths track the schema author's intent.
+        """
+        if (
+            str(self._class_annotation(cls, "openapi.nest_subresources") or "").lower()
+            == "false"
+        ):
+            return []
+
+        sv = self.schemaview
+        path_var_names = {s.name for s, _m in self._get_path_variables(cls)}
+        nested: list[tuple[SlotDefinition, str]] = []
+        for slot in sv.class_induced_slots(cls.name):
+            if slot.name in path_var_names:
+                continue
+            opt = self._get_slot_annotation(cls, slot.name, "openapi.nested")
+            if opt is not None and str(opt).lower() == "false":
+                continue
+            target = slot.range
+            if not target or target not in resource_class_set:
+                continue
+            nested.append((slot, target))
+        return nested
+
+    def _make_path_params(
+        self, path_vars: list[tuple[SlotDefinition, str]]
+    ) -> list[Parameter]:
+        """Build a fresh list of path Parameter objects for a set of path variables.
+
+        We construct new Parameter instances every time rather than sharing
+        them across PathItems — openapi-pydantic serializes shared Pydantic
+        models via YAML anchors, which downstream codegens routinely
+        mishandle.
+        """
+        return [
+            Parameter(
+                name=s.name,
+                param_in=ParameterLocation.PATH,
+                required=True,
+                param_schema=self._path_variable_schema(s, mode),
+            )
+            for s, mode in path_vars
+        ]
+
+    def _make_nested_list_operation(
+        self,
+        parent_cls: ClassDefinition,
+        slot: SlotDefinition,
+        target_name: str,
+    ) -> Operation:
+        media_types = self._get_media_types(parent_cls)
+        array_schema = Schema(
+            type=DataType.ARRAY,
+            items=Reference(ref=f"#/components/schemas/{target_name}"),
+        )
+        parent_snake = _to_snake_case(parent_cls.name)
+        return Operation(
+            summary=f"List {slot.name} of a {parent_cls.name}",
+            operationId=f"list_{parent_snake}_{slot.name}",
+            tags=[parent_cls.name, target_name],
+            parameters=[
+                Parameter(
+                    name="limit",
+                    param_in=ParameterLocation.QUERY,
+                    param_schema=Schema(type=DataType.INTEGER, default=100),
+                ),
+                Parameter(
+                    name="offset",
+                    param_in=ParameterLocation.QUERY,
+                    param_schema=Schema(type=DataType.INTEGER, default=0),
+                ),
+            ],
+            responses={
+                "200": Response(
+                    description=f"List of {target_name} for the {parent_cls.name}",
+                    content=self._content_for(array_schema, media_types),
+                ),
+                "404": Response(description=f"{parent_cls.name} not found"),
+            },
+        )
+
+    def _make_nested_get_operation(
+        self,
+        parent_cls: ClassDefinition,
+        slot: SlotDefinition,
+        target_name: str,
+    ) -> Operation:
+        media_types = self._get_media_types(parent_cls)
+        ref = Reference(ref=f"#/components/schemas/{target_name}")
+        parent_snake = _to_snake_case(parent_cls.name)
+        return Operation(
+            summary=f"Get {slot.name} of a {parent_cls.name}",
+            operationId=f"get_{parent_snake}_{slot.name}",
+            tags=[parent_cls.name, target_name],
+            responses={
+                "200": Response(
+                    description=f"{target_name} for the {parent_cls.name}",
+                    content=self._content_for(ref, media_types),
+                ),
+                "404": Response(description="Not found"),
+            },
+        )
 
     # --- Operation builders ------------------------------------------------
 

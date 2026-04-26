@@ -48,6 +48,14 @@ classes:
       addresses:
         range: Address
         multivalued: true
+      primary_address:
+        range: Address
+        description: The person's primary mailing address
+      secret_address:
+        range: Address
+        description: An address we deliberately do NOT expose as a sub-resource
+        annotations:
+          openapi.nested: "false"
     slot_usage:
       id:
         annotations:
@@ -93,9 +101,14 @@ classes:
   Organization:
     is_a: NamedThing
     description: An organization
+    annotations:
+      openapi.nest_subresources: "false"
     attributes:
       founding_date:
         range: date
+      headquarters:
+        range: Address
+        description: HQ address — suppressed because the class disables nesting
 
   Catalog:
     description: A catalog whose URL uses a slug rather than the full IRI
