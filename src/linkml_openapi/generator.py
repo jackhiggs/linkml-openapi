@@ -125,6 +125,16 @@ def _to_path_segment(name: str) -> str:
     return _pluralize(_to_snake_case(name))
 
 
+def _parse_csv(value: str | None, *, lowercase: bool = False) -> list[str]:
+    """Split a comma-separated annotation value, trimming whitespace and empties."""
+    if not value:
+        return []
+    out = [t.strip() for t in str(value).split(",")]
+    if lowercase:
+        out = [t.lower() for t in out]
+    return [t for t in out if t]
+
+
 @dataclass
 class OpenAPIGenerator(Generator):
     """Generate an OpenAPI 3.1 specification from a LinkML schema."""
@@ -152,7 +162,7 @@ class OpenAPIGenerator(Generator):
     # codegens that still trip on inline-schema-inside-allOf.
     flatten_inheritance: bool = False
     # Emit RFC 7807 Problem (or a user-declared error class) as the body
-    # schema for non-2xx responses. Off → today's body-less responses.
+    # schema for non-2xx responses. Off emits description-only responses.
     error_schema: bool = True
     # Active profile name (or None for the full surface). Profiles are
     # declared via `openapi.profile.<name>.<key>` schema annotations; a
@@ -170,12 +180,18 @@ class OpenAPIGenerator(Generator):
         # builder doesn't re-resolve.
         self._error_class_name: str | None = self._resolve_error_class()
         # Resolve the active profile (or no-op when self.profile is None).
+        # `_resolve_profile_filter` also runs drift detection — failing
+        # loudly if an excluded slot is referenced by another annotation.
         (
             self._excluded_classes,
             self._excluded_slots,
             self._profile_description,
         ) = self._resolve_profile_filter()
-        self._validate_profile_drift()
+        # Pre-compute the synthetic-inverse index once; without this each
+        # resource-class iteration in `_build_openapi` would re-walk every
+        # class and slot in the schema (O(resource_classes × all_classes ×
+        # max_slots) per build).
+        self._synthetic_inverses_index = self._collect_synthetic_inverses()
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
         raw["openapi"] = self.openapi_version
@@ -641,7 +657,7 @@ class OpenAPIGenerator(Generator):
         ops = self._class_annotation(cls, "openapi.operations")
         if ops is None:
             return ["list", "create", "read", "update", "delete"]
-        return [o.strip() for o in ops.split(",")]
+        return _parse_csv(ops)
 
     # --- RDF extension propagation -----------------------------------------
 
@@ -695,7 +711,7 @@ class OpenAPIGenerator(Generator):
         raw = self._class_annotation(cls, "openapi.media_types")
         if not raw:
             return ["application/json"]
-        return [m.strip() for m in raw.split(",") if m.strip()]
+        return _parse_csv(raw)
 
     # --- Error model (RFC 7807) -------------------------------------------
 
@@ -759,7 +775,7 @@ class OpenAPIGenerator(Generator):
             value = str(getattr(ann, "value", "") or "")
             profile = profiles.setdefault(name, {})
             if key in self._PROFILE_LIST_KEYS:
-                profile[key] = [v.strip() for v in value.split(",") if v.strip()]
+                profile[key] = _parse_csv(value)
             elif key in self._PROFILE_STR_KEYS:
                 profile[key] = value
             else:
@@ -774,7 +790,13 @@ class OpenAPIGenerator(Generator):
         return profiles
 
     def _resolve_profile_filter(self) -> tuple[set[str], set[str], str | None]:
-        """Resolve the active profile to (excluded_classes, excluded_slots, description)."""
+        """Resolve the active profile and validate it.
+
+        Returns ``(excluded_classes, excluded_slots, description)``. Raises
+        on an unknown profile name or when an excluded slot is referenced
+        by ``openapi.path_variable`` / ``openapi.query_param`` (drift
+        detection — the spec would be broken silently otherwise).
+        """
         if not self.profile:
             return (set(), set(), None)
         profiles = self._load_profiles()
@@ -786,30 +808,26 @@ class OpenAPIGenerator(Generator):
                 f"{self.profile}.<key>` schema annotations."
             )
         p = profiles[self.profile]
-        return (
-            set(p.get("exclude_classes", [])),
-            set(p.get("exclude_slots", [])),
-            p.get("description"),
-        )
+        excluded_classes = set(p.get("exclude_classes", []))
+        excluded_slots = set(p.get("exclude_slots", []))
+        self._raise_on_drift(excluded_classes, excluded_slots)
+        return excluded_classes, excluded_slots, p.get("description")
 
-    def _validate_profile_drift(self) -> None:
-        """Loud failure when an excluded slot is referenced by another annotation.
+    def _raise_on_drift(self, excluded_classes: set[str], excluded_slots: set[str]) -> None:
+        """Fail when an excluded slot is referenced by an annotation.
 
-        A profile that excludes a slot referenced by ``openapi.path_variable``
-        or ``openapi.query_param`` would silently produce a broken spec —
-        the path / query parameter pointing at a slot that doesn't exist
-        on the emitted schema. Fail at generation time so the schema
-        author can choose: drop the annotation or drop the exclusion.
+        ``openapi.path_variable`` and ``openapi.query_param`` would point
+        at slots that no longer exist on the emitted schemas — the spec
+        would be valid YAML but operationally broken. Surface that as a
+        generation-time error.
         """
-        if not self.profile:
-            return
         sv = self.schemaview
         for class_name in sv.all_classes():
-            if class_name in self._excluded_classes:
+            if class_name in excluded_classes:
                 continue
             cls = sv.get_class(class_name)
             for slot in sv.class_induced_slots(class_name):
-                if slot.name not in self._excluded_slots:
+                if slot.name not in excluded_slots:
                     continue
                 pv = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
                 qp = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
@@ -1405,36 +1423,48 @@ class OpenAPIGenerator(Generator):
     def _synthetic_inverses_for(self, target_class_name: str) -> list[tuple[str, str]]:
         """Inverse declarations that name a slot not present on ``target_class_name``.
 
-        For each ``inverse: target_class_name.slot_name`` declaration on
-        another class's slot, if ``slot_name`` isn't already a real slot on
-        ``target_class_name``, we synthesise the reverse-direction path.
+        Reads from the ``self._synthetic_inverses_index`` precomputed once
+        per build by ``_collect_synthetic_inverses`` — without that cache,
+        the per-class lookup would be O(all_classes × max_slots) and the
+        per-build cost O(resource_classes × all_classes × max_slots).
+        """
+        return self._synthetic_inverses_index.get(target_class_name, [])
 
-        Both sides declaring the inverse needs no special handling — when
-        both sides have real slots, each emits naturally; when only one
-        side has a real slot, the other side's path is synthesised here.
+    def _collect_synthetic_inverses(self) -> dict[str, list[tuple[str, str]]]:
+        """Build the per-target index of inverse-direction slots to synthesise.
+
+        For each ``inverse: TargetClass.slot_name`` declaration whose named
+        slot doesn't already exist on the target, record one entry under
+        ``TargetClass``. Excluded source classes and excluded slot names
+        are skipped so the index reflects the active profile.
         """
         sv = self.schemaview
-        target_slot_names = {s.name for s in sv.class_induced_slots(target_class_name)}
-        out: list[tuple[str, str]] = []
-        seen: set[str] = set()
+        index: dict[str, list[tuple[str, str]]] = {}
+        # Cache target_class_name → set of its existing slot names so we
+        # don't rebuild it once per declaration.
+        target_slot_names_cache: dict[str, set[str]] = {}
+        seen_per_target: dict[str, set[str]] = {}
         for src_class_name in sv.all_classes():
             if src_class_name in self._excluded_classes:
-                continue  # source has no schema, no IRI to reference
+                continue
             for slot in sv.class_induced_slots(src_class_name):
                 if not slot.inverse or "." not in str(slot.inverse):
                     continue
                 tgt_class, tgt_slot_name = str(slot.inverse).split(".", 1)
-                if tgt_class != target_class_name:
-                    continue
-                if tgt_slot_name in target_slot_names:
-                    continue  # naturally emitted from the target's own walk
                 if tgt_slot_name in self._excluded_slots:
-                    continue  # the profile excludes this slot name
+                    continue
+                if tgt_class not in target_slot_names_cache:
+                    target_slot_names_cache[tgt_class] = {
+                        s.name for s in sv.class_induced_slots(tgt_class)
+                    }
+                if tgt_slot_name in target_slot_names_cache[tgt_class]:
+                    continue  # the target has a real slot — emits naturally
+                seen = seen_per_target.setdefault(tgt_class, set())
                 if tgt_slot_name in seen:
-                    continue  # already synthesised from another source
+                    continue  # another source already synthesised this slot
                 seen.add(tgt_slot_name)
-                out.append((tgt_slot_name, src_class_name))
-        return out
+                index.setdefault(tgt_class, []).append((tgt_slot_name, src_class_name))
+        return index
 
     def _add_composition_paths(
         self,
@@ -1626,35 +1656,54 @@ class OpenAPIGenerator(Generator):
     # intent is almost always "numeric / temporal range" — warn if asked.
     _COMPARABLE_RANGES = frozenset({"integer", "float", "double", "decimal", "date", "datetime"})
 
+    _QUERY_PARAM_TOKENS = frozenset({"equality", "comparable", "sortable"})
+
     def _query_param_capabilities(self, cls: ClassDefinition, slot_name: str) -> set[str] | None:
         """Parse the slot's `openapi.query_param` annotation into a capability set.
 
         Accepted tokens (comma-separated):
 
-          ``"true"`` / ``"equality"``  — exact-match query param (today's behaviour)
+          ``"true"`` / ``"equality"``  — exact-match query param
           ``"comparable"``             — equality + ``__gte`` / ``__lte`` / ``__gt`` / ``__lt``
           ``"sortable"``               — equality + token in ``?sort=`` array
 
         ``comparable`` and ``sortable`` imply ``equality`` (most APIs that filter
         by range also filter by exact match). Returns ``None`` when the
-        annotation is absent or explicitly false.
+        annotation is absent or explicitly false. Unknown tokens are warned
+        about so typos like ``"sorteable"`` don't silently disable filtering.
         """
         raw = self._get_slot_annotation(cls, slot_name, "openapi.query_param")
         if raw is None:
             return None
-        tokens = {t.strip().lower() for t in str(raw).split(",") if t.strip()}
+        tokens = set(_parse_csv(raw, lowercase=True))
         if not tokens or tokens == {"false"}:
             return None
+        unknown = tokens - {"true", "false"} - self._QUERY_PARAM_TOKENS
+        if unknown:
+            import warnings
+
+            warnings.warn(
+                f"Slot {cls.name}.{slot_name!r} declares unknown "
+                f"openapi.query_param token(s) {sorted(unknown)!r}; "
+                f"expected one or more of {sorted(self._QUERY_PARAM_TOKENS)!r}. "
+                "Token(s) ignored — fix the typo or remove them.",
+                stacklevel=3,
+            )
         if "true" in tokens:
             tokens.add("equality")
             tokens.discard("true")
         if "comparable" in tokens or "sortable" in tokens:
             tokens.add("equality")
-        valid = tokens & {"equality", "comparable", "sortable"}
+        valid = tokens & self._QUERY_PARAM_TOKENS
         return valid or None
 
     def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
-        """Generate query parameters for list endpoint filtering, sorting, paginating."""
+        """Generate query parameters for the list endpoint.
+
+        Annotated slots win when any are present on the class; otherwise
+        the legacy auto-inference picks scalar non-identifier slots. Both
+        paths walk induced slots once.
+        """
         sv = self.schemaview
         params: list[Parameter] = [
             Parameter(
@@ -1670,95 +1719,103 @@ class OpenAPIGenerator(Generator):
         ]
 
         annotated_params: list[Parameter] = []
+        inferred_params: list[Parameter] = []
         sort_tokens: list[str] = []
-        any_annotated = False
 
         for slot in sv.class_induced_slots(cls.name):
             if self._is_slot_excluded(slot):
                 continue
             caps = self._query_param_capabilities(cls, slot.name)
-            if caps is None:
+            if caps is not None:
+                self._add_annotated_query_params(cls, slot, caps, annotated_params, sort_tokens)
                 continue
-            any_annotated = True
-            slot_schema = self._slot_to_schema(slot)
-            range_name = slot.range or "string"
-
-            if "equality" in caps:
-                annotated_params.append(
+            if (
+                not slot.multivalued
+                and not slot.identifier
+                and (
+                    (slot.range or "string") in ("string", "integer", "boolean")
+                    or sv.get_enum(slot.range or "string")
+                )
+            ):
+                inferred_params.append(
                     Parameter(
                         name=slot.name,
                         param_in=ParameterLocation.QUERY,
                         required=False,
-                        param_schema=slot_schema,
+                        param_schema=self._slot_to_schema(slot),
                     )
                 )
 
-            if "comparable" in caps:
-                if range_name not in self._COMPARABLE_RANGES:
-                    import warnings
-
-                    warnings.warn(
-                        f"Slot {cls.name}.{slot.name!r} marked `comparable` but "
-                        f"range {range_name!r} is not a numeric or temporal type; "
-                        "comparison operators may behave unexpectedly.",
-                        stacklevel=2,
-                    )
-                for op in ("gte", "lte", "gt", "lt"):
-                    annotated_params.append(
-                        Parameter(
-                            name=f"{slot.name}__{op}",
-                            param_in=ParameterLocation.QUERY,
-                            required=False,
-                            param_schema=self._slot_to_schema(slot),
-                        )
-                    )
-
-            if "sortable" in caps:
-                if slot.multivalued:
-                    raise ValueError(
-                        f"Slot {cls.name}.{slot.name!r} is multivalued; sort "
-                        "order over a set is not well-defined. Remove `sortable` "
-                        "or change the slot to single-valued."
-                    )
-                sort_tokens.extend([slot.name, f"-{slot.name}"])
-
-        if sort_tokens:
-            annotated_params.append(
-                Parameter(
-                    name="sort",
-                    param_in=ParameterLocation.QUERY,
-                    required=False,
-                    description=(
-                        "Comma-separated list of slot names to sort by. "
-                        "Prefix a name with `-` for descending."
-                    ),
-                    style="form",
-                    explode=False,
-                    param_schema=Schema(
-                        type=DataType.ARRAY,
-                        items=Schema(type=DataType.STRING, enum=sort_tokens),
-                    ),
-                )
-            )
-
-        if any_annotated:
+        if annotated_params or sort_tokens:
             params.extend(annotated_params)
+            if sort_tokens:
+                params.append(self._make_sort_param(sort_tokens))
             return params
 
-        # Fall back to auto-inference (unchanged from the legacy default).
-        for slot in sv.class_induced_slots(cls.name):
-            if self._is_slot_excluded(slot):
-                continue
-            if not slot.multivalued and not slot.identifier:
-                range_name = slot.range or "string"
-                if range_name in ("string", "integer", "boolean") or sv.get_enum(range_name):
-                    params.append(
-                        Parameter(
-                            name=slot.name,
-                            param_in=ParameterLocation.QUERY,
-                            required=False,
-                            param_schema=self._slot_to_schema(slot),
-                        )
-                    )
-
+        params.extend(inferred_params)
         return params
+
+    def _add_annotated_query_params(
+        self,
+        cls: ClassDefinition,
+        slot: SlotDefinition,
+        caps: set[str],
+        out: list[Parameter],
+        sort_tokens: list[str],
+    ) -> None:
+        """Emit equality / comparison / sort entries for one annotated slot."""
+        range_name = slot.range or "string"
+        if "equality" in caps:
+            out.append(
+                Parameter(
+                    name=slot.name,
+                    param_in=ParameterLocation.QUERY,
+                    required=False,
+                    param_schema=self._slot_to_schema(slot),
+                )
+            )
+        if "comparable" in caps:
+            if range_name not in self._COMPARABLE_RANGES:
+                import warnings
+
+                warnings.warn(
+                    f"Slot {cls.name}.{slot.name!r} marked `comparable` but "
+                    f"range {range_name!r} is not a numeric or temporal type; "
+                    "comparison operators may behave unexpectedly.",
+                    stacklevel=3,
+                )
+            for op in ("gte", "lte", "gt", "lt"):
+                out.append(
+                    Parameter(
+                        name=f"{slot.name}__{op}",
+                        param_in=ParameterLocation.QUERY,
+                        required=False,
+                        param_schema=self._slot_to_schema(slot),
+                    )
+                )
+        if "sortable" in caps:
+            if slot.multivalued:
+                raise ValueError(
+                    f"Slot {cls.name}.{slot.name!r} is multivalued; sort "
+                    "order over a set is not well-defined. Remove `sortable` "
+                    "or change the slot to single-valued."
+                )
+            sort_tokens.extend([slot.name, f"-{slot.name}"])
+
+    @staticmethod
+    def _make_sort_param(sort_tokens: list[str]) -> Parameter:
+        return Parameter(
+            name="sort",
+            param_in=ParameterLocation.QUERY,
+            required=False,
+            description=(
+                "Comma-separated list of slot names to sort by. "
+                "Prefix a name with `-` for descending."
+            ),
+            style="form",
+            explode=False,
+            param_schema=Schema(
+                type=DataType.ARRAY,
+                items=Schema(type=DataType.STRING, enum=sort_tokens),
+            ),
+        )
