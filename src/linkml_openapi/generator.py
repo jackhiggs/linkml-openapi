@@ -242,6 +242,10 @@ class OpenAPIGenerator(Generator):
         if self._error_class_name == "Problem" and "Problem" not in schemas:
             schemas["Problem"] = self._build_problem_schema()
 
+        # Track whether any reference relationship is generated; if so the
+        # shared ResourceLink component is added to the schema set below.
+        self._needs_resource_link: bool = False
+
         # Build paths for resource classes
         paths: dict[str, PathItem] = {}
         for class_name in self._get_resource_classes():
@@ -249,6 +253,8 @@ class OpenAPIGenerator(Generator):
             path_vars = self._get_path_variables(cls)
             path_segment = self._get_path_segment(cls)
             operations = self._get_operations(cls)
+
+            self._validate_resource_addressability(class_name, path_vars, operations)
 
             # Collection path
             collection_path = f"/{path_segment}"
@@ -280,6 +286,11 @@ class OpenAPIGenerator(Generator):
                 if "delete" in operations:
                     item.delete = self._make_delete_operation(cls, class_name)
                 paths[item_path] = item
+
+                paths.update(self._make_nested_paths(class_name, path_segment, path_vars))
+
+        if self._needs_resource_link and "ResourceLink" not in schemas:
+            schemas["ResourceLink"] = self._build_resource_link_schema()
 
         # openapi-pydantic restricts the `openapi` field to 3.1.x literals;
         # we build the model with 3.1.0 and then rewrite the version string
@@ -812,6 +823,322 @@ class OpenAPIGenerator(Generator):
                 "404": self._error_response("Not found"),
             },
         )
+
+    # --- Composition vs reference (issue #18) ------------------------------
+
+    def _validate_resource_addressability(
+        self, class_name: str, path_vars: list, operations: list[str]
+    ) -> None:
+        """Resource classes that need item-path operations must be addressable.
+
+        Item-path ops (read / update / delete) require either an identifier
+        slot or an explicit ``openapi.path_variable`` annotation. If neither
+        is present the class can't be referenced individually and the
+        generator should fail loudly rather than silently drop the item path.
+        """
+        item_ops = {"read", "update", "delete"} & set(operations)
+        if item_ops and not path_vars:
+            raise ValueError(
+                f'Class {class_name!r} has openapi.resource: "true" with '
+                f"item-path operations ({sorted(item_ops)}) but no identifier "
+                "slot and no `openapi.path_variable` annotation. Either add "
+                "an identifier slot, mark a slot as path_variable, or limit "
+                "openapi.operations to list/create."
+            )
+
+    def _identifier_slot(self, class_name: str) -> SlotDefinition | None:
+        """Return the identifier slot of the class, or None if it has none."""
+        for slot in self.schemaview.class_induced_slots(class_name):
+            if slot.identifier:
+                return slot
+        return None
+
+    @staticmethod
+    def _is_composition(slot: SlotDefinition) -> bool:
+        """True when a class-ranged slot is composition rather than reference.
+
+        Reads LinkML's `inlined` flag, which SchemaView already resolves to
+        the right default: True when the target class has no identifier
+        (composition is the only option), False when it does (reference).
+        """
+        return bool(slot.inlined)
+
+    @staticmethod
+    def _build_resource_link_schema() -> Schema:
+        """The shared body schema for reference attach operations."""
+        schema = Schema(type=DataType.OBJECT)
+        schema.title = "ResourceLink"
+        schema.description = (
+            "A reference to another resource by IRI. Body shape for attach "
+            "operations on reference relationships."
+        )
+        schema.required = ["id"]
+        schema.properties = {
+            "id": Schema(
+                type=DataType.STRING,
+                format="uri",
+                description="IRI of the linked resource.",
+            ),
+        }
+        return schema
+
+    @staticmethod
+    def _nested_item_path_var(target_class_name: str) -> str:
+        """Path-variable name for the linked item under a nested path.
+
+        Avoids colliding with the parent's ``{id}`` by namespacing on the
+        target class (e.g. ``/books/{id}/authors/{author_id}``).
+        """
+        return f"{_to_snake_case(target_class_name)}_id"
+
+    def _make_nested_paths(
+        self,
+        parent_class_name: str,
+        parent_path_segment: str,
+        parent_path_vars: list,
+    ) -> dict[str, PathItem]:
+        """Generate nested paths for composition and reference relationships.
+
+        Walks every multivalued, class-ranged slot on the parent and emits:
+
+        - **Composition** (``slot.inlined``): full CRUD nested at
+          ``/{parent}/{id}/{slot}`` (and ``/{slot}/{target_id}`` when the
+          target has an identifier).
+        - **Reference** (target has identifier, ``inlined: false``): GET to
+          list, POST with a ``ResourceLink`` body to attach (single or batch
+          via ``oneOf``), DELETE on the per-target item path to detach.
+        """
+        sv = self.schemaview
+        out: dict[str, PathItem] = {}
+        parent_var_suffix = "/".join(f"{{{s.name}}}" for s, _mode in parent_path_vars)
+        parent_path_params = [
+            Parameter(
+                name=s.name,
+                param_in=ParameterLocation.PATH,
+                required=True,
+                param_schema=self._path_variable_schema(s, mode),
+            )
+            for s, mode in parent_path_vars
+        ]
+
+        for slot in sv.class_induced_slots(parent_class_name):
+            if not slot.multivalued:
+                continue
+            target_name = slot.range
+            if not target_name or sv.get_class(target_name) is None:
+                continue  # primitive, enum, or unresolved range
+
+            collection_path = f"/{parent_path_segment}/{parent_var_suffix}/{slot.name}"
+            target_id_slot = self._identifier_slot(target_name)
+
+            if self._is_composition(slot):
+                self._add_composition_paths(
+                    out,
+                    collection_path,
+                    parent_class_name,
+                    slot,
+                    target_name,
+                    target_id_slot,
+                    parent_path_params,
+                )
+            else:
+                self._needs_resource_link = True
+                self._add_reference_paths(
+                    out,
+                    collection_path,
+                    parent_class_name,
+                    slot,
+                    target_name,
+                    target_id_slot,
+                    parent_path_params,
+                )
+
+        return out
+
+    def _add_composition_paths(
+        self,
+        paths: dict,
+        collection_path: str,
+        parent_class_name: str,
+        slot: SlotDefinition,
+        target_class_name: str,
+        target_id_slot: SlotDefinition | None,
+        parent_path_params: list[Parameter],
+    ) -> None:
+        target_cls = self.schemaview.get_class(target_class_name)
+        media_types = self._get_media_types(target_cls)
+        target_ref = Reference(ref=f"#/components/schemas/{target_class_name}")
+        array_schema = Schema(type=DataType.ARRAY, items=target_ref)
+        op_tag = f"{parent_class_name}.{slot.name}"
+        slot_seg = slot.name
+
+        collection = PathItem(parameters=list(parent_path_params))
+        collection.get = Operation(
+            summary=f"List {target_class_name} composed in {parent_class_name}.{slot.name}",
+            operationId=f"list_{_to_snake_case(parent_class_name)}_{slot_seg}",
+            tags=[op_tag],
+            responses={
+                "200": Response(
+                    description=f"{target_class_name} list",
+                    content=self._content_for(array_schema, media_types),
+                ),
+                "404": self._error_response("Parent not found"),
+            },
+        )
+        collection.post = Operation(
+            summary=f"Create a {target_class_name} in {parent_class_name}.{slot.name}",
+            operationId=f"create_{_to_snake_case(parent_class_name)}_{slot_seg}",
+            tags=[op_tag],
+            requestBody=RequestBody(
+                required=True, content=self._content_for(target_ref, media_types)
+            ),
+            responses={
+                "201": Response(
+                    description=f"{target_class_name} created",
+                    content=self._content_for(target_ref, media_types),
+                ),
+                "404": self._error_response("Parent not found"),
+                "422": self._error_response("Validation error"),
+            },
+        )
+        paths[collection_path] = collection
+
+        # Item path is only emitted when the target has an identifier — a
+        # composed child without one has no addressable handle.
+        if target_id_slot is None:
+            return
+
+        item_var = self._nested_item_path_var(target_class_name)
+        item_path = f"{collection_path}/{{{item_var}}}"
+        item_path_params = list(parent_path_params) + [
+            Parameter(
+                name=item_var,
+                param_in=ParameterLocation.PATH,
+                required=True,
+                param_schema=self._slot_to_schema(target_id_slot),
+            )
+        ]
+        item = PathItem(parameters=item_path_params)
+        item.get = Operation(
+            summary=f"Get a {target_class_name} from {parent_class_name}.{slot.name}",
+            operationId=f"get_{_to_snake_case(parent_class_name)}_{slot_seg}_item",
+            tags=[op_tag],
+            responses={
+                "200": Response(
+                    description=f"{target_class_name} details",
+                    content=self._content_for(target_ref, media_types),
+                ),
+                "404": self._error_response("Not found"),
+            },
+        )
+        item.put = Operation(
+            summary=f"Replace a {target_class_name} in {parent_class_name}.{slot.name}",
+            operationId=f"replace_{_to_snake_case(parent_class_name)}_{slot_seg}_item",
+            tags=[op_tag],
+            requestBody=RequestBody(
+                required=True, content=self._content_for(target_ref, media_types)
+            ),
+            responses={
+                "200": Response(
+                    description=f"{target_class_name} replaced",
+                    content=self._content_for(target_ref, media_types),
+                ),
+                "404": self._error_response("Not found"),
+                "422": self._error_response("Validation error"),
+            },
+        )
+        item.delete = Operation(
+            summary=f"Delete a {target_class_name} from {parent_class_name}.{slot.name}",
+            operationId=f"delete_{_to_snake_case(parent_class_name)}_{slot_seg}_item",
+            tags=[op_tag],
+            responses={
+                "204": Response(description=f"{target_class_name} deleted"),
+                "404": self._error_response("Not found"),
+            },
+        )
+        paths[item_path] = item
+
+    def _add_reference_paths(
+        self,
+        paths: dict,
+        collection_path: str,
+        parent_class_name: str,
+        slot: SlotDefinition,
+        target_class_name: str,
+        target_id_slot: SlotDefinition | None,
+        parent_path_params: list[Parameter],
+    ) -> None:
+        # Reference relationships require the target to be addressable —
+        # otherwise there's no IRI to put in the ResourceLink body.
+        if target_id_slot is None:
+            raise ValueError(
+                f"Slot {parent_class_name}.{slot.name!r} (range "
+                f"{target_class_name!r}) is non-inlined but the target has "
+                "no identifier slot. Either mark the slot `inlined: true` "
+                "or add an identifier to the target class."
+            )
+
+        target_cls = self.schemaview.get_class(target_class_name)
+        media_types = self._get_media_types(target_cls)
+        target_ref = Reference(ref=f"#/components/schemas/{target_class_name}")
+        array_schema = Schema(type=DataType.ARRAY, items=target_ref)
+
+        link_ref = Reference(ref="#/components/schemas/ResourceLink")
+        # Body accepts a single link or a batch — clients prefer batch.
+        link_body_schema = Schema(oneOf=[link_ref, Schema(type=DataType.ARRAY, items=link_ref)])
+        op_tag = f"{parent_class_name}.{slot.name}"
+        slot_seg = slot.name
+
+        collection = PathItem(parameters=list(parent_path_params))
+        collection.get = Operation(
+            summary=f"List {target_class_name} attached to {parent_class_name}.{slot.name}",
+            operationId=f"list_{_to_snake_case(parent_class_name)}_{slot_seg}",
+            tags=[op_tag],
+            responses={
+                "200": Response(
+                    description=f"{target_class_name} list",
+                    content=self._content_for(array_schema, media_types),
+                ),
+                "404": self._error_response("Parent not found"),
+            },
+        )
+        collection.post = Operation(
+            summary=f"Attach {target_class_name} to {parent_class_name}.{slot.name}",
+            operationId=f"attach_{_to_snake_case(parent_class_name)}_{slot_seg}",
+            tags=[op_tag],
+            requestBody=RequestBody(
+                required=True,
+                content={"application/json": MediaType(media_type_schema=link_body_schema)},
+            ),
+            responses={
+                "204": Response(description="Attached"),
+                "404": self._error_response("Parent or target not found"),
+                "422": self._error_response("Validation error"),
+            },
+        )
+        paths[collection_path] = collection
+
+        item_var = self._nested_item_path_var(target_class_name)
+        item_path = f"{collection_path}/{{{item_var}}}"
+        item_path_params = list(parent_path_params) + [
+            Parameter(
+                name=item_var,
+                param_in=ParameterLocation.PATH,
+                required=True,
+                param_schema=self._slot_to_schema(target_id_slot),
+            )
+        ]
+        item = PathItem(parameters=item_path_params)
+        item.delete = Operation(
+            summary=f"Detach {target_class_name} from {parent_class_name}.{slot.name}",
+            operationId=f"detach_{_to_snake_case(parent_class_name)}_{slot_seg}",
+            tags=[op_tag],
+            responses={
+                "204": Response(description="Detached (target entity preserved)"),
+                "404": self._error_response("Parent or attachment not found"),
+            },
+        )
+        paths[item_path] = item
 
     def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
         """Generate query parameters for list endpoint filtering."""

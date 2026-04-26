@@ -163,6 +163,107 @@ paths:
         type: string
       name: id
       in: path
+  /books/{id}/authors:
+    get:
+      tags:
+      - Book.authors
+      summary: List Author attached to Book.authors
+      operationId: list_book_authors
+      responses:
+        '200':
+          description: Author list
+          content:
+            application/json:
+              schema:
+                items:
+                  $ref: '#/components/schemas/Author'
+                type: array
+        '404':
+          description: Parent not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    post:
+      tags:
+      - Book.authors
+      summary: Attach Author to Book.authors
+      operationId: attach_book_authors
+      requestBody:
+        content:
+          application/json:
+            schema:
+              oneOf:
+              - $ref: '#/components/schemas/ResourceLink'
+              - items:
+                  $ref: '#/components/schemas/ResourceLink'
+                type: array
+        required: true
+      responses:
+        '204':
+          description: Attached
+        '404':
+          description: Parent or target not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
+  /books/{id}/authors/{author_id}:
+    delete:
+      tags:
+      - Book.authors
+      summary: Detach Author from Book.authors
+      operationId: detach_book_authors
+      responses:
+        '204':
+          description: Detached (target entity preserved)
+        '404':
+          description: Parent or attachment not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: author_id
+      in: path
   /authors:
     get:
       tags:
@@ -416,4 +517,16 @@ components:
       description: "RFC 7807 Problem Details for HTTP APIs. Default error response\
         \ shape for non-2xx replies; additional members are permitted per RFC 7807\
         \ \xA73.2."
+    ResourceLink:
+      properties:
+        id:
+          type: string
+          format: uri
+          description: IRI of the linked resource.
+      type: object
+      required:
+      - id
+      title: ResourceLink
+      description: A reference to another resource by IRI. Body shape for attach operations
+        on reference relationships.
 
