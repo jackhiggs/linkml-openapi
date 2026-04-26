@@ -1234,6 +1234,55 @@ class OpenAPIGenerator(Generator):
                     parent_path_params,
                 )
 
+        # Synthetic inverse paths — emitted for `inverse:` declarations
+        # whose target slot doesn't actually exist on this class. Always
+        # reference-shaped (composition can't be inverted: a composed
+        # child has no independent identity to put on the wire).
+        for synth_name, source_class in self._synthetic_inverses_for(parent_class_name):
+            collection_path = f"/{parent_path_segment}/{parent_var_suffix}/{synth_name}"
+            target_id_slot = self._identifier_slot(source_class)
+            fake_slot = SlotDefinition(name=synth_name, range=source_class, multivalued=True)
+            self._needs_resource_link = True
+            self._add_reference_paths(
+                out,
+                collection_path,
+                parent_class_name,
+                fake_slot,
+                source_class,
+                target_id_slot,
+                parent_path_params,
+            )
+
+        return out
+
+    def _synthetic_inverses_for(self, target_class_name: str) -> list[tuple[str, str]]:
+        """Inverse declarations that name a slot not present on ``target_class_name``.
+
+        For each ``inverse: target_class_name.slot_name`` declaration on
+        another class's slot, if ``slot_name`` isn't already a real slot on
+        ``target_class_name``, we synthesise the reverse-direction path.
+
+        Both sides declaring the inverse needs no special handling — when
+        both sides have real slots, each emits naturally; when only one
+        side has a real slot, the other side's path is synthesised here.
+        """
+        sv = self.schemaview
+        target_slot_names = {s.name for s in sv.class_induced_slots(target_class_name)}
+        out: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for src_class_name in sv.all_classes():
+            for slot in sv.class_induced_slots(src_class_name):
+                if not slot.inverse or "." not in str(slot.inverse):
+                    continue
+                tgt_class, tgt_slot_name = str(slot.inverse).split(".", 1)
+                if tgt_class != target_class_name:
+                    continue
+                if tgt_slot_name in target_slot_names:
+                    continue  # naturally emitted from the target's own walk
+                if tgt_slot_name in seen:
+                    continue  # already synthesised from another source
+                seen.add(tgt_slot_name)
+                out.append((tgt_slot_name, src_class_name))
         return out
 
     def _add_composition_paths(
