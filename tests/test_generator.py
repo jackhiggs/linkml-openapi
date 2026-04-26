@@ -1090,6 +1090,110 @@ classes:
             Path(tmp).unlink(missing_ok=True)
 
 
+class TestProfiles:
+    """Coverage for issue #17 — multi-view profile filtering."""
+
+    def test_no_profile_includes_everything(self):
+        """Without --profile, all classes and slots remain (sanity check)."""
+        spec = _generate()
+        assert "Reviewer" in spec["components"]["schemas"]
+        addr_props = spec["components"]["schemas"]["Address"]["properties"]
+        assert "avatar_blob" in addr_props
+        assert "byte_size" in addr_props
+
+    def test_profile_excludes_named_slots(self):
+        """`exclude_slots` removes those slot keys from every schema's properties."""
+        spec = _generate(profile="external")
+        addr_props = spec["components"]["schemas"]["Address"]["properties"]
+        assert "avatar_blob" not in addr_props
+        assert "byte_size" not in addr_props
+        # A non-excluded slot stays.
+        assert "street" in addr_props
+
+    def test_profile_excludes_named_classes_from_components(self):
+        """`exclude_classes` removes the class from components.schemas."""
+        spec = _generate(profile="external")
+        assert "Reviewer" not in spec["components"]["schemas"]
+
+    def test_profile_excludes_paths_for_excluded_classes(self):
+        """No path is emitted for an excluded class."""
+        spec = _generate(profile="external")
+        assert "/reviewers" not in spec["paths"]
+        assert not any(p.startswith("/reviewers/") for p in spec["paths"])
+
+    def test_profile_filters_slots_referencing_excluded_classes(self):
+        """Article.reviewers' range is Reviewer (excluded) — slot drops out."""
+        spec = _generate(profile="external")
+        article_props = spec["components"]["schemas"]["Article"]["properties"]
+        assert "reviewers" not in article_props
+        # Forward nested path also disappears.
+        assert "/articles/{doi}/reviewers" not in spec["paths"]
+
+    def test_profile_does_not_synthesise_inverse_paths_into_excluded_class(self):
+        """The synthesised /reviewers/{id}/articles disappears when Reviewer is excluded."""
+        spec = _generate(profile="external")
+        assert "/reviewers/{reviewer_id}/articles" not in spec["paths"]
+
+    def test_partner_profile_keeps_more_than_external(self):
+        """Different profiles apply different filters from the same schema."""
+        spec = _generate(profile="partner")
+        addr_props = spec["components"]["schemas"]["Address"]["properties"]
+        # `partner` excludes only avatar_blob.
+        assert "avatar_blob" not in addr_props
+        assert "byte_size" in addr_props
+        # And keeps Reviewer (only `external` drops it).
+        assert "Reviewer" in spec["components"]["schemas"]
+
+    def test_profile_description_appears_in_info(self):
+        """The profile's description gets tagged into info.description."""
+        spec = _generate(profile="external")
+        assert "Profile: external" in spec["info"]["description"]
+        assert "Public surface" in spec["info"]["description"]
+
+    def test_unknown_profile_raises(self):
+        """Activating a profile that wasn't declared fails loudly."""
+        import pytest
+
+        with pytest.raises(ValueError, match="Unknown profile 'nope'"):
+            _generate(profile="nope")
+
+    def test_profile_drift_on_path_variable_raises(self):
+        """Excluding a slot that's annotated as path_variable fails loudly."""
+        import tempfile
+
+        import pytest
+
+        schema_yaml = """
+id: https://example.org/drift
+name: drift
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.profile.bad.exclude_slots: id
+classes:
+  Item:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: "true"
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp, profile="bad")
+            with pytest.raises(ValueError, match="path_variable"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestRdfExtensions:
     def test_class_uri_emitted_as_x_rdf_class(self):
         """Person.class_uri = schema:Person becomes x-rdf-class on the schema."""

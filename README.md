@@ -84,6 +84,57 @@ All `openapi.*` annotations use LinkML's built-in `annotations` mechanism and do
 Placed at the top of the schema, in the same `annotations:` block that LinkML
 uses for schema-wide metadata.
 
+#### `openapi.profile.<name>.<key>` — multi-view filtering
+
+A single LinkML schema can drive multiple API surfaces (internal,
+partner, external) by declaring named profiles, then activating one at
+generation time. Each profile is encoded as flat dotted annotation
+tags at the schema level:
+
+```yaml
+annotations:
+  openapi.profile.external.description:    Public surface; PII hidden.
+  openapi.profile.external.exclude_classes: AuditLog
+  openapi.profile.external.exclude_slots:   internal_notes,pii_email,contributor_id
+
+  openapi.profile.partner.description: Authenticated partner organisations.
+  openapi.profile.partner.exclude_slots: internal_notes
+```
+
+| Key | Value | Effect |
+|-----|-------|--------|
+| `description` | string | Tagged into `info.description` of the generated spec. |
+| `exclude_classes` | comma-separated class names | Removes the class from `components.schemas` and drops every endpoint emitted for it. Slots whose `range` is an excluded class are also dropped. |
+| `exclude_slots` | comma-separated slot names | Removes the slot from every class schema (including via `is_a` inheritance) and from every nested-path / query-param walk. |
+| `include_classes` / `include_slots` | comma-separated names | Reserved for whitelist semantics; not yet implemented. |
+
+Activate a profile at generation time:
+
+```bash
+gen-openapi schema.yaml                       > openapi-internal.yaml   # full surface
+gen-openapi schema.yaml --profile partner     > openapi-partner.yaml
+gen-openapi schema.yaml --profile external    > openapi-external.yaml
+```
+
+Profile-restricted specs still carry valid `x-rdf-class` /
+`x-rdf-property` extensions on every slot they *do* expose — the same
+in-memory service can serve different audiences with faithful RDF
+graphs from the same data.
+
+**Drift detection.** A profile that excludes a slot annotated with
+`openapi.path_variable` or `openapi.query_param` would silently emit
+a broken spec — so the generator fails at generation time with the
+exact remediation:
+
+```
+ValueError: Profile 'external' excludes slot 'id' on 'Item', but the
+slot is annotated with openapi.path_variable. Remove the annotation,
+drop the slot from exclude_slots, or exclude the whole class.
+```
+
+**Activating a non-declared profile** also fails loudly, listing the
+profiles that *are* declared.
+
 #### `openapi.error_class`
 
 Names a class in the schema to use as the body of every non-2xx response,
