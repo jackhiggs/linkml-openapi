@@ -31,7 +31,7 @@ pip install linkml-openapi
 gen-openapi schema.yaml > openapi.yaml
 
 # JSON output
-gen-openapi schema.yaml -f json -o openapi.json
+gen-openapi schema.yaml -f json > openapi.json
 
 # Custom title, version, server
 gen-openapi schema.yaml --api-title "My API" --api-version 2.0.0 --server-url https://api.example.com

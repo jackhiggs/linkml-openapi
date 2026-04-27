@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import yaml
-from linkml.utils.generator import Generator
 from linkml_runtime.linkml_model import ClassDefinition, SlotDefinition
 from openapi_pydantic import (
     Components,
@@ -34,6 +33,7 @@ from openapi_pydantic import (
 )
 
 from linkml_openapi import __version__
+from linkml_openapi._base import Generator
 
 # LinkML range → OpenAPI DataType mapping
 RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
