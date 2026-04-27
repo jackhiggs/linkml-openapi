@@ -61,9 +61,7 @@ class Generator:
         if self.format is None:
             self.format = self.valid_formats[0]
         if self.format not in self.valid_formats:
-            raise ValueError(
-                f"Unrecognized format: {self.format!r}; known={self.valid_formats}"
-            )
+            raise ValueError(f"Unrecognized format: {self.format!r}; known={self.valid_formats}")
         # SchemaView already accepts the full union (path, YAML/JSON source,
         # SchemaDefinition, file-like) that the upstream Generator did, so
         # no wrapping is needed here.
