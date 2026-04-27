@@ -6,7 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
-## Unreleased
+## [0.4.0] — 2026-04-27
+
+Dependency-surface release: cuts the install tree down to `linkml-runtime`
+and a handful of small, permissively-licensed transitives so the package
+clears strict corporate licence-scanning policies. No behaviour change —
+generated specs are byte-identical against every committed example, and
+the public Python and CLI surfaces are unchanged apart from the removal
+of seven CLI flags that were always no-ops in this generator.
 
 ### Changed
 
@@ -141,6 +148,7 @@ feature; new CLI flags are summarised at the end.
 
 Initial public release.
 
+[0.4.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.2.0
 [0.1.2]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.1.2
