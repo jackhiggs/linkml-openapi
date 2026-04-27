@@ -429,6 +429,97 @@ paths:
         type: string
       name: id
       in: path
+  /books/{book_id}/authors/{id}:
+    get:
+      tags:
+      - Author
+      summary: Get a Author
+      operationId: get_author_via_book
+      responses:
+        '200':
+          description: Author details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Author'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    put:
+      tags:
+      - Author
+      summary: Update a Author
+      operationId: update_author_via_book
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Author'
+        required: true
+      responses:
+        '200':
+          description: Author updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Author'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    delete:
+      tags:
+      - Author
+      summary: Delete a Author
+      operationId: delete_author_via_book
+      responses:
+        '204':
+          description: Author deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: book_id
+      in: path
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: id
+      in: path
 components:
   schemas:
     Product:

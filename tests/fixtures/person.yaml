@@ -231,6 +231,95 @@ classes:
   Cat:
     is_a: Animal
 
+  # --- Deep nested item paths via parent chain (issue #32) ---
+  # Three-level chain. `openapi.path_id` on each ancestor renames the URL
+  # parameter from the default `<class>_id` snake form to camelCase, so the
+  # generated paths match DCAT3-shaped conventions:
+  #   /catalogs/{catalogId}
+  #   /catalogs/{catalogId}/datasets/{datasetId}
+  #   /catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}
+  Catalog2:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs2
+      openapi.path_id: catalog2Id
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      datasets:
+        range: Dataset2
+        multivalued: true
+
+  Dataset2:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets2
+      openapi.path_id: dataset2Id
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      distributions:
+        range: Distribution2
+        multivalued: true
+
+  # `openapi.nested_only: "true"` drops the flat `/distributions2` /
+  # `/distributions2/{id}` paths — Distribution2 is canonical only under its
+  # parent chain.
+  Distribution2:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: distributions2
+      openapi.path_id: dist2Id
+      openapi.nested_only: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+
+  # --- Ambiguous parent chain → openapi.parent_path resolves it ---
+  # Tag2 is reachable via Folder.tags AND Bookmark.tags. The leaf declares
+  # the canonical chain so the generator picks one deterministically.
+  Folder:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      tags:
+        range: Tag2
+        multivalued: true
+
+  Bookmark:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      tags:
+        range: Tag2
+        multivalued: true
+
+  Tag2:
+    annotations:
+      openapi.resource: "true"
+      openapi.parent_path: Folder.tags
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      label:
+        range: string
+
   # --- Layered opt-out for auto-inferred query params (issue #34) ---
   # `BigCatalogItem` opts out of auto-inference at the class level so that
   # only `limit` / `offset` emit on its list endpoint, regardless of how

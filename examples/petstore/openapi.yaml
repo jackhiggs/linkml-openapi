@@ -175,6 +175,98 @@ paths:
         description: Unique pet identifier
       name: id
       in: path
+  /owners/{owner_id}/pets/{id}:
+    get:
+      tags:
+      - Pet
+      summary: Get a Pet
+      operationId: get_pet_via_owner
+      responses:
+        '200':
+          description: Pet details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    put:
+      tags:
+      - Pet
+      summary: Update a Pet
+      operationId: update_pet_via_owner
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+        required: true
+      responses:
+        '200':
+          description: Pet updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Pet'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    delete:
+      tags:
+      - Pet
+      summary: Delete a Pet
+      operationId: delete_pet_via_owner
+      responses:
+        '204':
+          description: Pet deleted
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+      deprecated: false
+    parameters:
+    - required: true
+      deprecated: false
+      schema:
+        type: string
+      name: owner_id
+      in: path
+    - required: true
+      deprecated: false
+      schema:
+        type: integer
+        description: Unique pet identifier
+      name: id
+      in: path
   /stores:
     get:
       tags:

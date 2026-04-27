@@ -28,6 +28,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Default remains ``"true"``, so schemas without any of the new
   annotations regenerate byte-identically. ``limit`` / ``offset``
   always emit on list endpoints regardless of the setting.
+- **Deep nested item paths via parent-chain walk** ([#32](https://github.com/jackhiggs/linkml-openapi/issues/32)).
+  When a resource class is reachable from one or more ancestor resource
+  classes via multivalued relationship slots, the generator now emits a
+  deep item path that includes every ancestor's identifier as a path
+  parameter. For ``Catalog.datasets: list[Dataset]`` and
+  ``Dataset.distributions: list[Distribution]`` (all three resources),
+  the canonical deep paths are::
+
+      /catalogs/{catalogId}/datasets/{datasetId}
+      /catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}
+
+  Each ancestor's identifier becomes a URL parameter — *not* a field on
+  the leaf component schema. Operation IDs on deep paths are suffixed
+  ``_via_<chain>`` so they remain globally unique alongside the
+  flat-path operations.
+- **`openapi.path_id` class annotation** — overrides the default
+  ``<class_snake>_id`` URL parameter name everywhere the class appears
+  in a URL (its own flat item path, single-level nested item paths
+  pointing to it, and ancestor segments in deep chains). Set to
+  ``catalogId`` to emit ``{catalogId}`` instead of the default
+  ``{catalog_id}``. Existing schemas without the annotation keep
+  byte-identical output.
+- **`openapi.parent_path` class annotation** — picks the canonical
+  chain when a leaf class is reachable via multiple ancestor chains.
+  Accepts ``/``-separated hops; each hop is either ``slot_name``
+  (when unambiguous) or ``ClassName.slot_name`` (when class qualifier
+  is needed to disambiguate). Without the annotation, an ambiguous
+  leaf raises at generation time with the candidate chains listed.
+- **`openapi.nested_only` class annotation** — drops the flat
+  ``/<class>`` and ``/<class>/{id}`` paths so the deep nested URL is
+  the only canonical surface for a class. Pairs naturally with
+  ``openapi.parent_path`` for sub-resources that don't make sense on
+  their own.
 
 ## [0.4.0] — 2026-04-27
 
