@@ -289,13 +289,23 @@ class TestSerialization:
         assert parsed["openapi"] == "3.0.3"
 
     def test_is_linkml_generator(self):
-        """Verify it extends the LinkML Generator base class."""
-        from linkml.utils.generator import Generator
+        """Verify it extends our minimal Generator shim and exposes a SchemaView.
+
+        The upstream `linkml.utils.generator.Generator` was dropped in favour
+        of `linkml_openapi._base.Generator` to remove the `linkml`
+        distribution as a runtime dependency (and with it `pyshex`,
+        `sphinx-click`, `SQLAlchemy`, and `linkml-dataops`). The contract the
+        OpenAPI generator depends on — `valid_formats`, `uses_schemaloader`,
+        `schemaview` — is preserved.
+        """
+        from linkml_runtime.utils.schemaview import SchemaView
+
+        from linkml_openapi._base import Generator
 
         gen = _make_generator()
         assert isinstance(gen, Generator)
         assert gen.uses_schemaloader is False
-        assert gen.schemaview is not None
+        assert isinstance(gen.schemaview, SchemaView)
 
 
 # --- Slot annotation tests ---

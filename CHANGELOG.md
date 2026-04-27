@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## Unreleased
+
+### Changed
+
+- **Dropped `linkml` as a runtime dependency.** The package now relies on
+  `linkml-runtime` alone, with a minimal `linkml_openapi._base.Generator`
+  shim replacing the upstream `linkml.utils.generator.Generator` base
+  class. The OpenAPI generator only ever used the SchemaView-based
+  new-style path (`uses_schemaloader = False`); the SchemaLoader visitor
+  pattern, the legacy CLI options (`--useuris`, `--importmap`,
+  `--mergeimports`, `--log_level`, `--verbose`, `--stacktrace`,
+  `--metadata`), and the SchemaLoader-only fields (`base_dir`,
+  `namespaces`, `metamodel`) were never read.
+- **Effect on transitive dependencies.** Removing the `linkml`
+  distribution drops `pyshex` / `pyshexc` (which pulled in `rfc3987`,
+  GPL-licensed), `sphinx-click` (which pulled in `docutils`),
+  `SQLAlchemy` (which pulled in `greenlet`), and `linkml-dataops` /
+  `jsonpatch` (which pulled in `jsonpointer`) from the install tree.
+  Generated specs are byte-identical against every committed example.
+- The `linkml.generators` plugin entry point is preserved so users who
+  also have `linkml` installed can keep invoking the unified
+  `linkml`/`gen-linkml` CLIs against this generator.
+
 ## [0.3.0] — 2026-04-26
 
 This release adds the annotations and CLI surface needed to drive a

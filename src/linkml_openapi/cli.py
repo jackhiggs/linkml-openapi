@@ -1,14 +1,21 @@
 """CLI for generating OpenAPI specs from LinkML schemas."""
 
 import click
-from linkml.utils.generator import shared_arguments
 
 from linkml_openapi import __version__
 from linkml_openapi.generator import OpenAPIGenerator
 
 
-@shared_arguments(OpenAPIGenerator)
 @click.command(name="gen-openapi")
+@click.argument("yamlfile", type=click.Path(exists=True, dir_okay=False))
+@click.option(
+    "--format",
+    "-f",
+    type=click.Choice(OpenAPIGenerator.valid_formats),
+    default=OpenAPIGenerator.valid_formats[0],
+    show_default=True,
+    help="Output format.",
+)
 @click.option("--api-title", help="API title (default: schema name)")
 @click.option("--api-version", default="1.0.0", show_default=True, help="API version")
 @click.option(
