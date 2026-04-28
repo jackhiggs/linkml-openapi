@@ -135,6 +135,25 @@ def _parse_csv(value: str | None, *, lowercase: bool = False) -> list[str]:
     return [t for t in out if t]
 
 
+# URL path-segment styles. Module-level so the CLI can import the
+# canonical list of choices without re-listing it.
+PATH_STYLE_SNAKE = "snake_case"
+PATH_STYLE_KEBAB = "kebab-case"
+SUPPORTED_PATH_STYLES: frozenset[str] = frozenset({PATH_STYLE_SNAKE, PATH_STYLE_KEBAB})
+
+# Operation tokens accepted by `openapi.operations`. Order matters for
+# the default emission tuple — list/create on collection, then item ops.
+OP_LIST = "list"
+OP_CREATE = "create"
+OP_READ = "read"
+OP_UPDATE = "update"
+OP_PATCH = "patch"
+OP_DELETE = "delete"
+DEFAULT_OPERATIONS: tuple[str, ...] = (OP_LIST, OP_CREATE, OP_READ, OP_UPDATE, OP_DELETE)
+# Operations that need an item path (i.e. an addressable identifier).
+ITEM_OPERATIONS: frozenset[str] = frozenset({OP_READ, OP_UPDATE, OP_PATCH, OP_DELETE})
+
+
 @dataclass
 class OpenAPIGenerator(Generator):
     """Generate an OpenAPI 3.1 specification from a LinkML schema."""
@@ -199,6 +218,17 @@ class OpenAPIGenerator(Generator):
             self._excluded_slots,
             self._profile_description,
         ) = self._resolve_profile_filter()
+        # Per-build cache of induced slots keyed `(class_name, slot_name)`.
+        # `_get_slot_annotation`, `_render_slot_segment`, and the
+        # nested-path / chain emitters used to call
+        # `class_induced_slots(name)` and linearly scan the result on
+        # every lookup, giving O(slots²) per class. The cache collapses
+        # the inner loop to O(1).
+        self._induced_slot_cache: dict[str, dict[str, SlotDefinition]] = {}
+        # Pre-compute the resource-class list once. `_collect_parent_chains`
+        # and `_build_openapi` both need it, and the underlying walk is
+        # O(classes × slots).
+        self._resource_classes_cache: list[str] | None = None
         # Pre-compute the synthetic-inverse index once; without this each
         # resource-class iteration in `_build_openapi` would re-walk every
         # class and slot in the schema (O(resource_classes × all_classes ×
@@ -331,9 +361,9 @@ class OpenAPIGenerator(Generator):
             if not nested_only:
                 collection_path = f"/{path_segment}"
                 collection_item = PathItem()
-                if "list" in operations:
+                if OP_LIST in operations:
                     collection_item.get = self._make_list_operation(cls, class_name)
-                if "create" in operations:
+                if OP_CREATE in operations:
                     collection_item.post = self._make_create_operation(cls, class_name)
                 paths[collection_path] = collection_item
 
@@ -344,45 +374,18 @@ class OpenAPIGenerator(Generator):
             # nested-paths-from-this-class, and in any deep chain that
             # passes through this class as an ancestor.
             if path_vars:
-                path_id_override = (
-                    self._class_annotation(cls, "openapi.path_id") if len(path_vars) == 1 else None
-                )
-                resolved_path_vars = [
-                    (
-                        path_id_override.strip() if path_id_override else slot.name,
-                        slot,
-                        mode,
-                    )
-                    for slot, mode in path_vars
-                ]
-                item_suffix = "/".join(f"{{{name}}}" for name, _slot, _mode in resolved_path_vars)
-                path_params = [
-                    Parameter(
-                        name=name,
-                        param_in=ParameterLocation.PATH,
-                        required=True,
-                        param_schema=self._path_variable_schema(slot, mode),
-                    )
-                    for name, slot, mode in resolved_path_vars
-                ]
+                item_suffix, path_params = self._resolve_item_path_vars(class_name, path_vars)
 
                 if not nested_only:
                     item_path = f"/{path_segment}/{item_suffix}"
                     item = PathItem(parameters=path_params)
-                    if "read" in operations:
-                        item.get = self._make_read_operation(cls, class_name)
-                    if "update" in operations:
-                        item.put = self._make_update_operation(cls, class_name)
-                    if "patch" in operations:
-                        item.patch = self._make_patch_operation(cls, class_name)
-                    if "delete" in operations:
-                        item.delete = self._make_delete_operation(cls, class_name)
+                    self._attach_item_operations(item, cls, class_name, operations)
                     paths[item_path] = item
 
                 # The PATCH body schema is needed whenever `patch` is
                 # listed, regardless of which URL forms emit, so generate
                 # it outside the nested-only branch.
-                if "patch" in operations and f"{class_name}Patch" not in schemas:
+                if OP_PATCH in operations and f"{class_name}Patch" not in schemas:
                     schemas[f"{class_name}Patch"] = self._build_patch_schema(class_name, cls)
 
                 paths.update(self._make_nested_paths(class_name, path_segment, path_vars))
@@ -448,13 +451,11 @@ class OpenAPIGenerator(Generator):
 
     def _class_to_schema(self, cls: ClassDefinition) -> Schema:
         """Convert a LinkML class to a JSON Schema object."""
-        sv = self.schemaview
-
         if cls.is_a and not self.flatten_inheritance:
-            parent_slot_names = {s.name for s in sv.class_induced_slots(cls.is_a)}
+            parent_slot_names = set(self._induced_slots_by_name(cls.is_a))
             local_properties: dict[str, Schema | Reference] = {}
             local_required: list[str] = []
-            for slot in sv.class_induced_slots(cls.name):
+            for slot in self._induced_slots_iter(cls.name):
                 if self._is_slot_excluded(slot):
                     continue
                 self._record_rdf_slot_uri(cls.name, slot)
@@ -486,7 +487,7 @@ class OpenAPIGenerator(Generator):
         properties: dict[str, Schema | Reference] = {}
         required: list[str] = []
 
-        for slot in sv.class_induced_slots(cls.name):
+        for slot in self._induced_slots_iter(cls.name):
             if self._is_slot_excluded(slot):
                 continue
             self._record_rdf_slot_uri(cls.name, slot)
@@ -628,33 +629,72 @@ class OpenAPIGenerator(Generator):
     def _get_resource_classes(self) -> list[str]:
         """Determine which classes should have REST endpoints.
 
+        Cached on the instance for the duration of a build because both
+        ``_collect_parent_chains`` and ``_build_openapi`` need it; the
+        underlying walk is O(classes × slots).
+
         Profile filtering applies last: a class excluded by the active
         profile never gets endpoints, even if it carries
         ``openapi.resource: "true"``.
         """
+        cached = getattr(self, "_resource_classes_cache", None)
+        if cached is not None:
+            return cached
         sv = self.schemaview
         excluded = self._excluded_classes
 
         if self.resource_filter:
-            return [c for c in self.resource_filter if c not in excluded]
+            result = [c for c in self.resource_filter if c not in excluded]
+        else:
+            annotated = [
+                name
+                for name in sv.all_classes()
+                if name not in excluded
+                and _is_truthy(
+                    self._class_annotation(sv.get_class(name), "openapi.resource") or False
+                )
+            ]
+            if annotated:
+                result = annotated
+            else:
+                result = [
+                    name
+                    for name in sv.all_classes()
+                    if name not in excluded
+                    and not sv.get_class(name).abstract
+                    and not sv.get_class(name).mixin
+                    and list(self._induced_slots_iter(name))
+                ]
+        self._resource_classes_cache = result
+        return result
 
-        annotated = [
-            name
-            for name in sv.all_classes()
-            if name not in excluded
-            and _is_truthy(self._class_annotation(sv.get_class(name), "openapi.resource") or False)
-        ]
-        if annotated:
-            return annotated
+    def _induced_slots_by_name(self, class_name: str) -> dict[str, SlotDefinition]:
+        """Per-build cache of induced slots indexed by slot name.
 
-        return [
-            name
-            for name in sv.all_classes()
-            if name not in excluded
-            and not sv.get_class(name).abstract
-            and not sv.get_class(name).mixin
-            and list(sv.class_induced_slots(name))
-        ]
+        The first call walks ``class_induced_slots(class_name)``;
+        subsequent calls are an O(1) dict lookup. Used by
+        ``_get_slot_annotation``, ``_render_slot_segment``, the
+        nested-path emitters, and the chain builder — call sites that
+        previously did a full linear scan per slot lookup, giving
+        O(slots²) per class.
+
+        The backing dict is also lazily allocated on first call so test
+        paths that exercise helper methods directly (without going
+        through ``serialize()``) still work.
+        """
+        cache = getattr(self, "_induced_slot_cache", None)
+        if cache is None:
+            cache = {}
+            self._induced_slot_cache = cache
+        cached = cache.get(class_name)
+        if cached is None:
+            cached = {s.name: s for s in self.schemaview.class_induced_slots(class_name)}
+            cache[class_name] = cached
+        return cached
+
+    def _induced_slots_iter(self, class_name: str):
+        """Cached iteration order matching ``class_induced_slots`` semantics."""
+        return self._induced_slots_by_name(class_name).values()
 
     def _get_slot_annotation(self, cls: ClassDefinition, slot_name: str, tag: str) -> str | None:
         """Read a slot annotation, walking the same inheritance chain LinkML does.
@@ -686,10 +726,10 @@ class OpenAPIGenerator(Generator):
                                 return str(ann.value)
         sv = self.schemaview
         # 2. Induced slot annotations — picks up slot_usage inherited from
-        # ancestor classes through the is_a chain.
-        for induced in sv.class_induced_slots(cls.name):
-            if induced.name != slot_name:
-                continue
+        # ancestor classes through the is_a chain. Cached by class name
+        # so this is an O(1) dict lookup.
+        induced = self._induced_slots_by_name(cls.name).get(slot_name)
+        if induced is not None:
             annotations = getattr(induced, "annotations", None)
             if annotations:
                 # `class_induced_slots` returns SlotDefinition objects whose
@@ -702,7 +742,6 @@ class OpenAPIGenerator(Generator):
                     ann = annotations[key]
                     if getattr(ann, "tag", None) == tag:
                         return str(ann.value)
-            break
         # 3. Top-level slot definition (global default).
         slot_def = sv.get_slot(slot_name)
         if slot_def and slot_def.annotations:
@@ -744,7 +783,7 @@ class OpenAPIGenerator(Generator):
         annotated: list[tuple[SlotDefinition, str]] = []
         identifier_slot: SlotDefinition | None = None
         id_named_slot: SlotDefinition | None = None
-        for slot in self.schemaview.class_induced_slots(cls.name):
+        for slot in self._induced_slots_iter(cls.name):
             mode = self._path_variable_mode(
                 self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
             )
@@ -759,26 +798,24 @@ class OpenAPIGenerator(Generator):
         fallback = identifier_slot or id_named_slot
         return [(fallback, "iri")] if fallback else []
 
-    _SUPPORTED_PATH_STYLES: ClassVar[frozenset[str]] = frozenset({"snake_case", "kebab-case"})
-
     def _resolve_path_style(self) -> str:
         """Pick the effective URL path-segment convention for this build.
 
         Resolution order: CLI / Python `path_style` kwarg, then the
         schema-level `openapi.path_style` annotation, then the
-        backward-compatible default `"snake_case"`. Unknown values raise
+        backward-compatible default `snake_case`. Unknown values raise
         with the supported list.
         """
         candidate = self.path_style
         if candidate is None:
             candidate = self._schema_annotation("openapi.path_style")
         if candidate is None:
-            return "snake_case"
+            return PATH_STYLE_SNAKE
         normalised = str(candidate).strip().lower()
-        if normalised not in self._SUPPORTED_PATH_STYLES:
+        if normalised not in SUPPORTED_PATH_STYLES:
             raise ValueError(
                 f"Unsupported `openapi.path_style` {candidate!r}; "
-                f"expected one of {sorted(self._SUPPORTED_PATH_STYLES)!r}."
+                f"expected one of {sorted(SUPPORTED_PATH_STYLES)!r}."
             )
         return normalised
 
@@ -792,11 +829,12 @@ class OpenAPIGenerator(Generator):
         ``openapi.path`` and ``openapi.path_segment`` are taken verbatim
         and never re-styled.
 
-        Falls back to ``"snake_case"`` when called before a full
-        ``serialize()`` build has cached the resolved style — keeps
-        helper methods safely callable from tests and ad-hoc scripts.
+        Reads `_effective_path_style` directly; the attribute is set
+        eagerly in ``serialize()`` for normal builds, and lazily by
+        ``_resolve_path_style`` if a helper method is called before a
+        full serialize (keeps test paths safe).
         """
-        if getattr(self, "_effective_path_style", "snake_case") == "kebab-case":
+        if getattr(self, "_effective_path_style", PATH_STYLE_SNAKE) == PATH_STYLE_KEBAB:
             return name.replace("_", "-")
         return name
 
@@ -842,7 +880,7 @@ class OpenAPIGenerator(Generator):
         """Get the list of CRUD operations for a class."""
         ops = self._class_annotation(cls, "openapi.operations")
         if ops is None:
-            return ["list", "create", "read", "update", "delete"]
+            return list(DEFAULT_OPERATIONS)
         return _parse_csv(ops)
 
     # --- RDF extension propagation -----------------------------------------
@@ -931,7 +969,7 @@ class OpenAPIGenerator(Generator):
             )
         return custom
 
-    # --- Profiles (issue #17) ----------------------------------------------
+    # --- Profiles --------------------------------------------------------
 
     _PROFILE_LIST_KEYS = ("exclude_classes", "exclude_slots", "include_classes", "include_slots")
     _PROFILE_STR_KEYS = ("description",)
@@ -1012,7 +1050,7 @@ class OpenAPIGenerator(Generator):
             if class_name in excluded_classes:
                 continue
             cls = sv.get_class(class_name)
-            for slot in sv.class_induced_slots(class_name):
+            for slot in self._induced_slots_iter(class_name):
                 if slot.name not in excluded_slots:
                     continue
                 pv = self._get_slot_annotation(cls, slot.name, "openapi.path_variable")
@@ -1095,11 +1133,11 @@ class OpenAPIGenerator(Generator):
             },
         )
 
-    # --- Discriminator / polymorphism (issue #20) --------------------------
+    # --- Discriminator / polymorphism -----------------------------------
 
     def _designates_type_slot(self, class_name: str) -> SlotDefinition | None:
         """Return the slot with `designates_type: true` on this class, or None."""
-        for slot in self.schemaview.class_induced_slots(class_name):
+        for slot in self._induced_slots_iter(class_name):
             if getattr(slot, "designates_type", False):
                 return slot
         return None
@@ -1374,7 +1412,7 @@ class OpenAPIGenerator(Generator):
             },
         )
 
-    # --- PATCH (issue #16) -------------------------------------------------
+    # --- PATCH operations ------------------------------------------------
 
     def _make_patch_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         """Emit a PATCH item operation using JSON Merge Patch (RFC 7396).
@@ -1428,7 +1466,7 @@ class OpenAPIGenerator(Generator):
             self._x_rdf_class[patch_name] = sv.expand_curie(cls.class_uri)
 
         properties: dict[str, Schema | Reference] = {}
-        for slot in sv.class_induced_slots(class_name):
+        for slot in self._induced_slots_iter(class_name):
             if slot.identifier:
                 continue
             properties[slot.name] = self._slot_to_schema(slot)
@@ -1446,7 +1484,7 @@ class OpenAPIGenerator(Generator):
             schema.properties = properties
         return schema
 
-    # --- Composition vs reference (issue #18) ------------------------------
+    # --- Composition vs reference ---------------------------------------
 
     def _validate_resource_addressability(
         self, class_name: str, path_vars: list, operations: list[str]
@@ -1458,7 +1496,7 @@ class OpenAPIGenerator(Generator):
         is present the class can't be referenced individually and the
         generator should fail loudly rather than silently drop the item path.
         """
-        item_ops = {"read", "update", "delete"} & set(operations)
+        item_ops = ITEM_OPERATIONS & set(operations) - {OP_PATCH}
         if item_ops and not path_vars:
             raise ValueError(
                 f'Class {class_name!r} has openapi.resource: "true" with '
@@ -1470,7 +1508,7 @@ class OpenAPIGenerator(Generator):
 
     def _identifier_slot(self, class_name: str) -> SlotDefinition | None:
         """Return the identifier slot of the class, or None if it has none."""
-        for slot in self.schemaview.class_induced_slots(class_name):
+        for slot in self._induced_slots_iter(class_name):
             if slot.identifier:
                 return slot
         return None
@@ -1523,6 +1561,63 @@ class OpenAPIGenerator(Generator):
             return override.strip()
         return f"{_to_snake_case(class_name)}_id"
 
+    def _resolve_item_path_vars(
+        self,
+        class_name: str,
+        path_vars: list,
+    ) -> tuple[str, list[Parameter]]:
+        """Render a class's path variables into a URL suffix and Parameter list.
+
+        Single source of truth for the ``openapi.path_id`` rename: when
+        the class has exactly one path variable *and* declares
+        ``openapi.path_id``, the override renames the URL parameter (and
+        the matching ``Parameter.name``) so the same identifier shows up
+        consistently in the flat item path, in nested-paths-from-this-
+        class, and in any deep chain that passes through this class as an
+        ancestor. Without the annotation the URL parameter falls back to
+        the slot name (preserving byte-identical output for existing
+        schemas).
+        """
+        cls = self.schemaview.get_class(class_name)
+        path_id_override: str | None = None
+        if len(path_vars) == 1 and cls is not None:
+            raw = self._class_annotation(cls, "openapi.path_id")
+            path_id_override = raw.strip() if raw else None
+        names = [path_id_override or slot.name for slot, _mode in path_vars]
+        item_suffix = "/".join(f"{{{name}}}" for name in names)
+        path_params = [
+            Parameter(
+                name=name,
+                param_in=ParameterLocation.PATH,
+                required=True,
+                param_schema=self._path_variable_schema(slot, mode),
+            )
+            for name, (slot, mode) in zip(names, path_vars)
+        ]
+        return item_suffix, path_params
+
+    def _attach_item_operations(
+        self,
+        item: PathItem,
+        cls: ClassDefinition,
+        class_name: str,
+        operations: list[str],
+    ) -> None:
+        """Attach `read` / `update` / `patch` / `delete` operations to a PathItem.
+
+        Single source of truth for the conditional CRUD-attach block,
+        previously duplicated across ``_build_openapi``,
+        ``_emit_chained_deep_path``, and ``_emit_templated_deep_path``.
+        """
+        if OP_READ in operations:
+            item.get = self._make_read_operation(cls, class_name)
+        if OP_UPDATE in operations:
+            item.put = self._make_update_operation(cls, class_name)
+        if OP_PATCH in operations:
+            item.patch = self._make_patch_operation(cls, class_name)
+        if OP_DELETE in operations:
+            item.delete = self._make_delete_operation(cls, class_name)
+
     def _nested_item_path_var(self, target_class_name: str) -> str:
         """Path-variable name for the linked item under a nested path.
 
@@ -1541,41 +1636,15 @@ class OpenAPIGenerator(Generator):
         """Single-level nested paths under a class's own item path.
 
         Thin wrapper that renders ``parent_path_segment`` + ``parent_path_vars``
-        into a URL prefix and the matching parameter list, then delegates to
-        :meth:`_make_nested_paths_with_prefix` so single-level and N-level
-        emission share the same code path. Honours the parent's
-        ``openapi.path_id`` so the nested URL and the class's own flat item
-        path use the same parameter name.
+        into a URL prefix and the matching parameter list (via the same
+        ``openapi.path_id`` resolution used by the flat item path), then
+        delegates to :meth:`_make_nested_paths_with_prefix` so single-level
+        and N-level emission share the same code path.
         """
-        parent_cls = self.schemaview.get_class(parent_class_name)
-        path_id_override = (
-            self._class_annotation(parent_cls, "openapi.path_id")
-            if parent_cls and len(parent_path_vars) == 1
-            else None
+        var_suffix, parent_path_params = self._resolve_item_path_vars(
+            parent_class_name, parent_path_vars
         )
-        named_vars = [
-            (
-                path_id_override.strip() if path_id_override else slot.name,
-                slot,
-                mode,
-            )
-            for slot, mode in parent_path_vars
-        ]
-        parent_var_suffix = "/".join(f"{{{name}}}" for name, _slot, _mode in named_vars)
-        prefix = (
-            f"{parent_path_segment}/{parent_var_suffix}"
-            if parent_var_suffix
-            else parent_path_segment
-        )
-        parent_path_params = [
-            Parameter(
-                name=name,
-                param_in=ParameterLocation.PATH,
-                required=True,
-                param_schema=self._path_variable_schema(slot, mode),
-            )
-            for name, slot, mode in named_vars
-        ]
+        prefix = f"{parent_path_segment}/{var_suffix}" if var_suffix else parent_path_segment
         return self._make_nested_paths_with_prefix(parent_class_name, prefix, parent_path_params)
 
     def _make_nested_paths_with_prefix(
@@ -1607,7 +1676,7 @@ class OpenAPIGenerator(Generator):
         parent_cls = sv.get_class(parent_class_name)
         out: dict[str, PathItem] = {}
 
-        for slot in sv.class_induced_slots(parent_class_name):
+        for slot in self._induced_slots_iter(parent_class_name):
             if not slot.multivalued:
                 continue
             if self._is_slot_excluded(slot):
@@ -1699,16 +1768,14 @@ class OpenAPIGenerator(Generator):
         for src_class_name in sv.all_classes():
             if src_class_name in self._excluded_classes:
                 continue
-            for slot in sv.class_induced_slots(src_class_name):
+            for slot in self._induced_slots_iter(src_class_name):
                 if not slot.inverse or "." not in str(slot.inverse):
                     continue
                 tgt_class, tgt_slot_name = str(slot.inverse).split(".", 1)
                 if tgt_slot_name in self._excluded_slots:
                     continue
                 if tgt_class not in target_slot_names_cache:
-                    target_slot_names_cache[tgt_class] = {
-                        s.name for s in sv.class_induced_slots(tgt_class)
-                    }
+                    target_slot_names_cache[tgt_class] = set(self._induced_slots_by_name(tgt_class))
                 if tgt_slot_name in target_slot_names_cache[tgt_class]:
                     continue  # the target has a real slot — emits naturally
                 seen = seen_per_target.setdefault(tgt_class, set())
@@ -1754,7 +1821,7 @@ class OpenAPIGenerator(Generator):
             if parent_name not in resource_classes:
                 continue
             parent_cls = sv.get_class(parent_name)
-            for slot in sv.class_induced_slots(parent_name):
+            for slot in self._induced_slots_iter(parent_name):
                 if not slot.multivalued:
                     continue
                 if self._is_slot_excluded(slot):
@@ -1772,10 +1839,12 @@ class OpenAPIGenerator(Generator):
         index: dict[str, list[list[tuple[str, str]]]] = {}
 
         def walk(leaf: str, on_path: tuple[str, ...]) -> list[list[tuple[str, str]]]:
-            if leaf in index:
-                # Memoised — but we still need to filter chains that would
-                # introduce a cycle from the caller's perspective.
-                return [c for c in index[leaf] if not any(p in on_path for p, _ in c)]
+            # Memoisation here is unsound: chains computed under one
+            # `on_path` can prune ancestors that a different caller's
+            # `on_path` would have allowed, so the cached result depends
+            # on which leaf's walk reaches a given subgraph first. The
+            # graph is small (resource classes only) so a fresh walk per
+            # leaf is cheap and deterministic.
             chains: list[list[tuple[str, str]]] = []
             for parent_name, slot_name in direct_parents.get(leaf, []):
                 if parent_name in on_path:
@@ -1786,13 +1855,13 @@ class OpenAPIGenerator(Generator):
                 else:
                     for u in upper:
                         chains.append(u + [(parent_name, slot_name)])
-            index[leaf] = chains
             return chains
 
         for cls_name in list(direct_parents.keys()):
-            walk(cls_name, ())
-        # Drop classes with no chains so callers can skip via membership check.
-        return {k: v for k, v in index.items() if v}
+            chains = walk(cls_name, (cls_name,))
+            if chains:
+                index[cls_name] = chains
+        return index
 
     @staticmethod
     def _suffix_operation_ids(paths: dict[str, PathItem], suffix: str) -> None:
@@ -1920,10 +1989,7 @@ class OpenAPIGenerator(Generator):
                 )
             param_name = self._class_path_id_name(parent_name)
             parent_cls = sv.get_class(parent_name)
-            slot_def = next(
-                (s for s in sv.class_induced_slots(parent_name) if s.name == slot_name),
-                None,
-            )
+            slot_def = self._induced_slots_by_name(parent_name).get(slot_name)
             slot_segment = (
                 self._render_slot_segment(parent_cls, slot_def)
                 if slot_def is not None
@@ -1963,16 +2029,8 @@ class OpenAPIGenerator(Generator):
         """
         chain_prefix, chain_params = self._build_chain_path_params(chain)
         deep_item_path = f"/{chain_prefix}/{item_suffix}"
-        deep_item_params = list(chain_params) + path_params
-        deep_item = PathItem(parameters=deep_item_params)
-        if "read" in operations:
-            deep_item.get = self._make_read_operation(cls, class_name)
-        if "update" in operations:
-            deep_item.put = self._make_update_operation(cls, class_name)
-        if "patch" in operations:
-            deep_item.patch = self._make_patch_operation(cls, class_name)
-        if "delete" in operations:
-            deep_item.delete = self._make_delete_operation(cls, class_name)
+        deep_item = PathItem(parameters=list(chain_params) + path_params)
+        self._attach_item_operations(deep_item, cls, class_name, operations)
         chain_suffix = "_via_" + "_".join(_to_snake_case(p) for p, _ in chain)
         deep_paths = {deep_item_path: deep_item}
         self._suffix_operation_ids(deep_paths, chain_suffix)
@@ -2068,10 +2126,7 @@ class OpenAPIGenerator(Generator):
                     f"refers to unknown class {src_class!r} for "
                     f"parameter {name!r}."
                 )
-            slot = next(
-                (s for s in sv.class_induced_slots(src_class) if s.name == src_slot),
-                None,
-            )
+            slot = self._induced_slots_by_name(src_class).get(src_slot)
             if slot is None:
                 raise ValueError(
                     f"Class {class_name!r} `openapi.path_param_sources` "
@@ -2088,14 +2143,7 @@ class OpenAPIGenerator(Generator):
             )
 
         deep_item = PathItem(parameters=params)
-        if "read" in operations:
-            deep_item.get = self._make_read_operation(cls, class_name)
-        if "update" in operations:
-            deep_item.put = self._make_update_operation(cls, class_name)
-        if "patch" in operations:
-            deep_item.patch = self._make_patch_operation(cls, class_name)
-        if "delete" in operations:
-            deep_item.delete = self._make_delete_operation(cls, class_name)
+        self._attach_item_operations(deep_item, cls, class_name, operations)
 
         deep_paths = {template: deep_item}
         self._suffix_operation_ids(deep_paths, "_via_template")
@@ -2379,7 +2427,7 @@ class OpenAPIGenerator(Generator):
         inferred_params: list[Parameter] = []
         sort_tokens: list[str] = []
 
-        for slot in sv.class_induced_slots(cls.name):
+        for slot in self._induced_slots_iter(cls.name):
             if self._is_slot_excluded(slot):
                 continue
             caps = self._query_param_capabilities(cls, slot.name)

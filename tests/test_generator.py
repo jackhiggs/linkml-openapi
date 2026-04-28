@@ -27,6 +27,41 @@ def _generate(**kwargs) -> dict:
     return yaml.safe_load(raw)
 
 
+def _generate_from_string(schema_yaml: str, **kwargs) -> dict:
+    """Run the generator against a one-shot YAML string.
+
+    Centralises the temp-file write / parse / cleanup dance that
+    several test classes need when verifying behaviour against a tiny
+    ad-hoc schema (ambiguous chains, malformed templates, schema-level
+    annotations, etc.).
+    """
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+        f.write(schema_yaml)
+        tmp = f.name
+    try:
+        return yaml.safe_load(OpenAPIGenerator(tmp, **kwargs).serialize(format="yaml"))
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
+def _generate_from_string_raises(schema_yaml: str, match: str, **kwargs) -> None:
+    """Same as :func:`_generate_from_string` but expects a ValueError."""
+    import tempfile
+
+    import pytest
+
+    with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+        f.write(schema_yaml)
+        tmp = f.name
+    try:
+        with pytest.raises(ValueError, match=match):
+            OpenAPIGenerator(tmp, **kwargs).serialize(format="yaml")
+    finally:
+        Path(tmp).unlink(missing_ok=True)
+
+
 # --- Utility function tests ---
 
 
@@ -536,12 +571,7 @@ class TestAutoQueryParamsOptOut:
 
     def test_schema_level_disables_auto_inference(self):
         """`openapi.auto_query_params: "false"` at schema level suppresses every class's auto."""
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string("""
 id: https://example.org/schema-off
 name: schema_off
 default_range: string
@@ -559,26 +589,13 @@ classes:
         range: string
       colour:
         range: string
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            spec = yaml.safe_load(gen.serialize(format="yaml"))
-            names = [p["name"] for p in spec["paths"]["/items"]["get"]["parameters"]]
-            assert names == ["limit", "offset"]
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""")
+        names = [p["name"] for p in spec["paths"]["/items"]["get"]["parameters"]]
+        assert names == ["limit", "offset"]
 
     def test_class_level_overrides_schema_level(self):
         """When the schema-level default is off, class-level "true" re-enables for one class."""
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string("""
 id: https://example.org/schema-mixed
 name: schema_mixed
 default_range: string
@@ -604,28 +621,15 @@ classes:
         required: true
       title:
         range: string
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            spec = yaml.safe_load(gen.serialize(format="yaml"))
-            quiet = {p["name"] for p in spec["paths"]["/quiets"]["get"]["parameters"]}
-            loud = {p["name"] for p in spec["paths"]["/louds"]["get"]["parameters"]}
-            assert quiet == {"limit", "offset"}
-            assert loud == {"limit", "offset", "title"}
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""")
+        quiet = {p["name"] for p in spec["paths"]["/quiets"]["get"]["parameters"]}
+        loud = {p["name"] for p in spec["paths"]["/louds"]["get"]["parameters"]}
+        assert quiet == {"limit", "offset"}
+        assert loud == {"limit", "offset", "title"}
 
     def test_explicitly_annotated_slots_still_emit_when_auto_off(self):
         """Auto off doesn't suppress slots that have a truthy `openapi.query_param`."""
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string("""
 id: https://example.org/schema-mixed-slots
 name: schema_mixed_slots
 default_range: string
@@ -644,20 +648,12 @@ classes:
           openapi.query_param: "true"
       ignored:
         range: string
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            spec = yaml.safe_load(gen.serialize(format="yaml"))
-            names = {p["name"] for p in spec["paths"]["/items"]["get"]["parameters"]}
-            # Annotated slot still emits; the un-annotated one does not.
-            assert "title" in names
-            assert "ignored" not in names
-            assert {"limit", "offset"} <= names
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""")
+        names = {p["name"] for p in spec["paths"]["/items"]["get"]["parameters"]}
+        # Annotated slot still emits; the un-annotated one does not.
+        assert "title" in names
+        assert "ignored" not in names
+        assert {"limit", "offset"} <= names
 
 
 class TestFormatAnnotation:
@@ -1218,14 +1214,8 @@ class TestDeepNestedPaths:
 
     def test_ambiguous_chain_without_annotation_raises(self):
         """An ambiguous leaf without `openapi.parent_path` raises with candidates."""
-        import tempfile
-        from pathlib import Path
-
-        import pytest
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        _generate_from_string_raises(
+            """
 id: https://example.org/ambig
 name: ambig
 default_range: string
@@ -1257,27 +1247,14 @@ classes:
       id:
         identifier: true
         required: true
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="multiple parent chains"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            match="multiple parent chains",
+        )
 
     def test_parent_path_unmatched_value_raises(self):
         """When `openapi.parent_path` doesn't match any chain, error lists candidates."""
-        import tempfile
-        from pathlib import Path
-
-        import pytest
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        _generate_from_string_raises(
+            """
 id: https://example.org/ambig2
 name: ambig2
 default_range: string
@@ -1310,16 +1287,9 @@ classes:
       id:
         identifier: true
         required: true
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="no matching chain"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            match="no matching chain",
+        )
 
 
 class TestPathTemplateAndFlatOnly:
@@ -1368,14 +1338,8 @@ class TestPathTemplateAndFlatOnly:
 
     def test_path_template_placeholder_mismatch_raises(self):
         """Source keys must exactly match template placeholders."""
-        import tempfile
-        from pathlib import Path
-
-        import pytest
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        _generate_from_string_raises(
+            """
 id: https://example.org/bad-template
 name: bt
 default_range: string
@@ -1389,27 +1353,14 @@ classes:
       id:
         identifier: true
         required: true
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="don't match"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            match="don't match",
+        )
 
     def test_path_template_unknown_source_raises(self):
         """A `Class.slot` source must resolve."""
-        import tempfile
-        from pathlib import Path
-
-        import pytest
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        _generate_from_string_raises(
+            """
 id: https://example.org/bad-source
 name: bs
 default_range: string
@@ -1423,27 +1374,14 @@ classes:
       id:
         identifier: true
         required: true
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="unknown class"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            match="unknown class",
+        )
 
     def test_path_template_malformed_source_entry_raises(self):
         """Source format is `name:Class.slot`; missing pieces raise."""
-        import tempfile
-        from pathlib import Path
-
-        import pytest
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        _generate_from_string_raises(
+            """
 id: https://example.org/malformed
 name: m
 default_range: string
@@ -1457,16 +1395,9 @@ classes:
       id:
         identifier: true
         required: true
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="malformed source"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            match="malformed source",
+        )
 
     def test_flat_only_drops_chain_derived_deep_path(self):
         """`openapi.flat_only` suppresses the deep chain emission for the class."""
@@ -1496,14 +1427,8 @@ classes:
 
     def test_flat_only_and_nested_only_together_raise(self):
         """Setting both is a generation error — they're mutually exclusive."""
-        import tempfile
-        from pathlib import Path
-
-        import pytest
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        _generate_from_string_raises(
+            """
 id: https://example.org/mutex
 name: mu
 default_range: string
@@ -1517,16 +1442,9 @@ classes:
       id:
         identifier: true
         required: true
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="mutually exclusive"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            match="mutually exclusive",
+        )
 
 
 class TestPathStyle:
@@ -1573,18 +1491,8 @@ class TestPathStyle:
 
     def test_kebab_case_kwarg_renders_slot_segments_with_dashes(self):
         """Slot-driven nested URL segments also pick up the kebab style."""
-        spec = _generate(path_style="kebab-case", resource_filter=["RegularItem"])
-        # RegularItem has no nested slots so verify on the flat side: the
-        # `secret_field` slot path_segment isn't relevant; verify by
-        # building a tailored schema below.
-        del spec  # only used for typing — assertions below use the real test.
-
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string(
+            """
 id: https://example.org/kebab-slot
 name: kebab_slot
 default_range: string
@@ -1600,29 +1508,17 @@ classes:
     annotations: { openapi.resource: "true" }
     attributes:
       id: { identifier: true, required: true }
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            spec = yaml.safe_load(
-                OpenAPIGenerator(tmp, path_style="kebab-case").serialize(format="yaml")
-            )
-            paths = set(spec["paths"])
-            assert "/catalogs/{id}/data-services" in paths
-            assert "/catalogs/{id}/data_services" not in paths
-            assert "/data-services" in paths
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            path_style="kebab-case",
+        )
+        paths = set(spec["paths"])
+        assert "/catalogs/{id}/data-services" in paths
+        assert "/catalogs/{id}/data_services" not in paths
+        assert "/data-services" in paths
 
     def test_schema_level_annotation_drives_default(self):
         """`openapi.path_style: kebab-case` at schema level applies without a kwarg."""
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string("""
 id: https://example.org/schema-kebab
 name: schema_kebab
 default_range: string
@@ -1633,24 +1529,13 @@ classes:
     annotations: { openapi.resource: "true" }
     attributes:
       id: { identifier: true, required: true }
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            spec = yaml.safe_load(OpenAPIGenerator(tmp).serialize(format="yaml"))
-            assert "/data-services" in spec["paths"]
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""")
+        assert "/data-services" in spec["paths"]
 
     def test_kwarg_overrides_schema_level(self):
         """Python kwarg / CLI flag wins over the schema annotation."""
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string(
+            """
 id: https://example.org/schema-kebab2
 name: schema_kebab2
 default_range: string
@@ -1661,18 +1546,11 @@ classes:
     annotations: { openapi.resource: "true" }
     attributes:
       id: { identifier: true, required: true }
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            spec = yaml.safe_load(
-                OpenAPIGenerator(tmp, path_style="snake_case").serialize(format="yaml")
-            )
-            assert "/data_services" in spec["paths"]
-            assert "/data-services" not in spec["paths"]
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""",
+            path_style="snake_case",
+        )
+        assert "/data_services" in spec["paths"]
+        assert "/data-services" not in spec["paths"]
 
     def test_unsupported_path_style_raises(self):
         """Unknown style values raise with the supported list."""
@@ -1728,12 +1606,7 @@ class TestSlotAnnotationInheritance:
 
     def test_subclass_can_override_inherited_annotation(self):
         """Direct slot_usage on the subclass wins over the inherited value."""
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string("""
 id: https://example.org/override
 name: ov
 default_range: string
@@ -1759,29 +1632,15 @@ classes:
       tags:
         annotations:
           openapi.nested: "true"
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            spec = yaml.safe_load(OpenAPIGenerator(tmp).serialize(format="yaml"))
-            # Child overrides the inherited "false" with "true" → nested path emits.
-            nested = [p for p in spec["paths"] if p.startswith("/childs/{id}/tags")]
-            paths_dump = sorted(spec["paths"])
-            assert nested, (
-                f"expected child override to re-enable nested emission; got: {paths_dump}"
-            )
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""")
+        # Child overrides the inherited "false" with "true" → nested path emits.
+        nested = [p for p in spec["paths"] if p.startswith("/childs/{id}/tags")]
+        paths_dump = sorted(spec["paths"])
+        assert nested, f"expected child override to re-enable nested emission; got: {paths_dump}"
 
     def test_inherited_path_variable_annotation(self):
         """Other openapi.* slot annotations propagate the same way (path_variable)."""
-        import tempfile
-        from pathlib import Path
-
-        from linkml_openapi.generator import OpenAPIGenerator
-
-        schema_yaml = """
+        spec = _generate_from_string("""
 id: https://example.org/pv
 name: pv
 default_range: string
@@ -1800,23 +1659,16 @@ classes:
   Child:
     is_a: Parent
     annotations: { openapi.resource: "true" }
-"""
-        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            spec = yaml.safe_load(OpenAPIGenerator(tmp).serialize(format="yaml"))
-            # `slug` mode emits `string` regardless of the slot's `uri` range —
-            # confirm the inherited annotation reached the subclass.
-            params = spec["paths"]["/childs/{uri}"]["parameters"]
-            uri_param = next(p for p in params if p["name"] == "uri")
-            assert uri_param["schema"]["type"] == "string"
-            assert "format" not in uri_param["schema"], (
-                "slug mode should drop format=uri; if format is present "
-                "the slot_usage annotation didn't propagate"
-            )
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+""")
+        # `slug` mode emits `string` regardless of the slot's `uri` range —
+        # confirm the inherited annotation reached the subclass.
+        params = spec["paths"]["/childs/{uri}"]["parameters"]
+        uri_param = next(p for p in params if p["name"] == "uri")
+        assert uri_param["schema"]["type"] == "string"
+        assert "format" not in uri_param["schema"], (
+            "slug mode should drop format=uri; if format is present "
+            "the slot_usage annotation didn't propagate"
+        )
 
 
 class TestDiscriminator:

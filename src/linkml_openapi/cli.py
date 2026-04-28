@@ -3,7 +3,7 @@
 import click
 
 from linkml_openapi import __version__
-from linkml_openapi.generator import OpenAPIGenerator
+from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
 
 
 @click.command(name="gen-openapi")
@@ -68,7 +68,7 @@ from linkml_openapi.generator import OpenAPIGenerator
 )
 @click.option(
     "--path-style",
-    type=click.Choice(["snake_case", "kebab-case"]),
+    type=click.Choice(sorted(SUPPORTED_PATH_STYLES)),
     default=None,
     help=(
         "URL path-segment convention. Defaults to the schema-level "
