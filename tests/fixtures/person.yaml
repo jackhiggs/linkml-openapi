@@ -450,6 +450,46 @@ classes:
         annotations:
           openapi.query_param: "false"
 
+  # --- Slot-annotation inheritance through is_a (issue #40) ---
+  # `BaseResource` declares `openapi.nested: "false"` on the
+  # `classified_by` slot via slot_usage. The two subclasses inherit the
+  # slot AND the suppression — the nested-path emitter must NOT emit
+  # `/foo_resources/{id}/classified_by` or
+  # `/bar_resources/{id}/classified_by`.
+  Classifier:
+    description: Used as the range of the suppressed slot — needs to be a class
+      so the nested walk would otherwise pick the slot up.
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+
+  BaseResource:
+    abstract: true
+    description: Parent that declares the suppression once for all subclasses.
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      classified_by:
+        range: Classifier
+        multivalued: true
+    slot_usage:
+      classified_by:
+        annotations:
+          openapi.nested: "false"
+
+  FooResource:
+    is_a: BaseResource
+    annotations:
+      openapi.resource: "true"
+
+  BarResource:
+    is_a: BaseResource
+    annotations:
+      openapi.resource: "true"
 enums:
   PersonStatus:
     description: Status of a person
