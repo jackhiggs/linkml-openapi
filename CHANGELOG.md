@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
-## Unreleased
+## [0.5.0] — 2026-04-28
+
+URL-shape and query-surface release: lets a single LinkML schema express
+the canonical URL hierarchies that catalog APIs (DCAT3, FHIR, etc.)
+expect, while giving lean control over which slots become list-endpoint
+filters. All additive — schemas without the new annotations regenerate
+byte-identically.
 
 ### Added
 
@@ -223,6 +229,7 @@ feature; new CLI flags are summarised at the end.
 
 Initial public release.
 
+[0.5.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.5.0
 [0.4.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.4.0
 [0.3.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.3.0
 [0.2.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.2.0
