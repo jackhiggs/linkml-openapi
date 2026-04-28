@@ -6,7 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
-## Unreleased
+## [0.7.0] — 2026-04-28
+
+DCAT3 1:1-match release. Three composition / tagging enhancements
+driven by 1:1 matching against the existing DCAT3 catalog API. The
+visible change in committed examples is the composition tag
+inheritance — operations under `Book.authors` are now tagged
+`Author` instead of `Book.authors`. Schemas without the new
+annotations get the same path *set* as 0.6.1 plus the new tag
+default.
 
 ### Added
 
@@ -353,6 +361,7 @@ feature; new CLI flags are summarised at the end.
 
 Initial public release.
 
+[0.7.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.7.0
 [0.6.1]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.6.1
 [0.6.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.5.0
