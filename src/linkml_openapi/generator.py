@@ -1697,12 +1697,32 @@ class OpenAPIGenerator(Generator):
         valid = tokens & self._QUERY_PARAM_TOKENS
         return valid or None
 
+    def _auto_query_params_enabled(self, cls: ClassDefinition) -> bool:
+        """Whether auto-inferred query parameters are emitted for this class.
+
+        Class-level ``openapi.auto_query_params`` wins over the schema-level
+        annotation; default is ``True`` so existing schemas keep their
+        current behaviour. Set to ``"false"`` at either level to suppress
+        the auto-inferred filter parameters on a class with many slots.
+        """
+        class_value = self._class_annotation(cls, "openapi.auto_query_params")
+        if class_value is not None:
+            return _is_truthy(class_value)
+        schema_value = self._schema_annotation("openapi.auto_query_params")
+        if schema_value is not None:
+            return _is_truthy(schema_value)
+        return True
+
     def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
         """Generate query parameters for the list endpoint.
 
         Annotated slots win when any are present on the class; otherwise
-        the legacy auto-inference picks scalar non-identifier slots. Both
-        paths walk induced slots once.
+        the auto-inference path picks scalar non-identifier slots — unless
+        ``openapi.auto_query_params: "false"`` is set at the class or
+        schema level, in which case only ``limit`` / ``offset`` emit.
+        Slots annotated ``openapi.query_param: "false"`` are excluded from
+        auto-inference even when it is enabled. Both paths walk induced
+        slots once.
         """
         sv = self.schemaview
         params: list[Parameter] = [
@@ -1718,6 +1738,8 @@ class OpenAPIGenerator(Generator):
             ),
         ]
 
+        auto_enabled = self._auto_query_params_enabled(cls)
+
         annotated_params: list[Parameter] = []
         inferred_params: list[Parameter] = []
         sort_tokens: list[str] = []
@@ -1728,6 +1750,15 @@ class OpenAPIGenerator(Generator):
             caps = self._query_param_capabilities(cls, slot.name)
             if caps is not None:
                 self._add_annotated_query_params(cls, slot, caps, annotated_params, sort_tokens)
+                continue
+            if not auto_enabled:
+                continue
+            # Slot-level explicit opt-out: `openapi.query_param: "false"`
+            # makes ``_query_param_capabilities`` return ``None``, but the
+            # raw annotation tells us the user explicitly removed this slot
+            # from auto-inference (vs. being silent about it).
+            raw = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
+            if raw is not None and set(_parse_csv(raw, lowercase=True)) == {"false"}:
                 continue
             if (
                 not slot.multivalued

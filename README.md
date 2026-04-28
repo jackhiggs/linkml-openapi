@@ -695,8 +695,63 @@ auto-infers equality-only query parameters from all non-multivalued,
 non-identifier slots with `string`, `integer`, `boolean`, or enum
 ranges (backwards compatible).
 
+For catalog-shaped classes with 30+ slots, that auto-inference produces
+unusably noisy list endpoints. Three layered annotations let you turn
+it off at whichever level matches your intent.
+
+##### `openapi.auto_query_params` — schema or class level
+
+Defaults to `"true"`. Set to `"false"` to suppress the auto-inference
+entirely; only `limit`, `offset`, and explicitly annotated slots emit
+as query parameters.
+
+```yaml
+# Schema-level: every class in the spec opts out of auto-inference.
+annotations:
+  openapi.auto_query_params: "false"
+
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"          # → /datasets?limit=&offset= only
+    slot_usage:
+      title:
+        annotations: { openapi.query_param: equality }
+      created:
+        annotations: { openapi.query_param: comparable,sortable }
+```
+
+Class-level wins over schema-level, so a single class can opt back in
+when the schema-level default is off:
+
+```yaml
+annotations:
+  openapi.auto_query_params: "false"
+
+classes:
+  Tag:
+    annotations:
+      openapi.resource: "true"
+      openapi.auto_query_params: "true"   # this class keeps auto-inference
+```
+
+##### `openapi.query_param: "false"` — slot level
+
+Removes one slot from auto-inference even when auto is enabled — for
+oversized strings, free-text descriptions, or fields you never want
+to filter on:
+
+```yaml
+classes:
+  Article:
+    slot_usage:
+      raw_blob:
+        annotations:
+          openapi.query_param: "false"   # excluded from /articles?... params
+```
+
 `limit` and `offset` pagination parameters are always included on list
-endpoints regardless of annotations.
+endpoints regardless of any of these annotations.
 
 ### Annotation summary
 
@@ -706,8 +761,9 @@ endpoints regardless of annotations.
 | `openapi.path` | class | path segment string | Auto-pluralized snake_case of class name |
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
 | `openapi.media_types` | class | comma-separated list | `application/json` |
+| `openapi.auto_query_params` | schema or class | `"true"` / `"false"` | `"true"` (auto-infer scalar slots) |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
-| `openapi.query_param` | slot (via `slot_usage`) | `"true"` | Auto-inferred from slot type |
+| `openapi.query_param` | slot (via `slot_usage`) | `"true"` / token list / `"false"` | Auto-inferred from slot type |
 | `openapi.format` | slot | format string | derived from slot range |
 
 ## Type Mapping

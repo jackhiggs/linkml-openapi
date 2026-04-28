@@ -506,6 +506,160 @@ class TestPathVariableMode:
         assert id_param["schema"]["type"] == "string"
 
 
+class TestAutoQueryParamsOptOut:
+    """Coverage for issue #34 — layered opt-out for auto-inferred query params."""
+
+    def test_class_level_disables_auto_inference(self):
+        """`openapi.auto_query_params: "false"` on the class drops every auto-inferred filter."""
+        spec = _generate()
+        params = spec["paths"]["/big_catalog_items"]["get"]["parameters"]
+        names = [p["name"] for p in params]
+        # Only pagination remains.
+        assert names == ["limit", "offset"]
+
+    def test_slot_level_false_excludes_one_slot_from_auto_inference(self):
+        """`openapi.query_param: "false"` on a slot opts that slot out of auto-inference."""
+        spec = _generate()
+        names = {p["name"] for p in spec["paths"]["/regular_items"]["get"]["parameters"]}
+        # `title` remains auto-inferred; `secret_field` was annotated false.
+        assert "title" in names
+        assert "secret_field" not in names
+        # And pagination still emits.
+        assert {"limit", "offset"} <= names
+
+    def test_default_behaviour_unchanged_when_no_annotations(self):
+        """Without any new annotation, query params are auto-inferred as before."""
+        spec = _generate(resource_filter=["Organization"])
+        names = {p["name"] for p in spec["paths"]["/organizations"]["get"]["parameters"]}
+        # Inherited slots from NamedThing — both auto-inferred (default true).
+        assert {"name", "description"} <= names
+
+    def test_schema_level_disables_auto_inference(self):
+        """`openapi.auto_query_params: "false"` at schema level suppresses every class's auto."""
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/schema-off
+name: schema_off
+default_range: string
+annotations:
+  openapi.auto_query_params: "false"
+classes:
+  Item:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        required: true
+      title:
+        range: string
+      colour:
+        range: string
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+            names = [p["name"] for p in spec["paths"]["/items"]["get"]["parameters"]]
+            assert names == ["limit", "offset"]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_class_level_overrides_schema_level(self):
+        """When the schema-level default is off, class-level "true" re-enables for one class."""
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/schema-mixed
+name: schema_mixed
+default_range: string
+annotations:
+  openapi.auto_query_params: "false"
+classes:
+  Quiet:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        required: true
+      title:
+        range: string
+  Loud:
+    annotations:
+      openapi.resource: "true"
+      openapi.auto_query_params: "true"
+    attributes:
+      id:
+        identifier: true
+        required: true
+      title:
+        range: string
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+            quiet = {p["name"] for p in spec["paths"]["/quiets"]["get"]["parameters"]}
+            loud = {p["name"] for p in spec["paths"]["/louds"]["get"]["parameters"]}
+            assert quiet == {"limit", "offset"}
+            assert loud == {"limit", "offset", "title"}
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_explicitly_annotated_slots_still_emit_when_auto_off(self):
+        """Auto off doesn't suppress slots that have a truthy `openapi.query_param`."""
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/schema-mixed-slots
+name: schema_mixed_slots
+default_range: string
+classes:
+  Item:
+    annotations:
+      openapi.resource: "true"
+      openapi.auto_query_params: "false"
+    attributes:
+      id:
+        identifier: true
+        required: true
+      title:
+        range: string
+        annotations:
+          openapi.query_param: "true"
+      ignored:
+        range: string
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+            names = {p["name"] for p in spec["paths"]["/items"]["get"]["parameters"]}
+            # Annotated slot still emits; the un-annotated one does not.
+            assert "title" in names
+            assert "ignored" not in names
+            assert {"limit", "offset"} <= names
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestFormatAnnotation:
     def test_int64_overrides_default_integer(self):
         spec = _generate()

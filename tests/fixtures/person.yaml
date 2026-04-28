@@ -231,6 +231,52 @@ classes:
   Cat:
     is_a: Animal
 
+  # --- Layered opt-out for auto-inferred query params (issue #34) ---
+  # `BigCatalogItem` opts out of auto-inference at the class level so that
+  # only `limit` / `offset` emit on its list endpoint, regardless of how
+  # many scalar slots it carries. `RegularItem` keeps the default and the
+  # `secret_field` slot opts out per-slot.
+  BigCatalogItem:
+    description: A class with many slots that don't all make sense as filters.
+    annotations:
+      openapi.resource: "true"
+      openapi.auto_query_params: "false"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      title:
+        range: string
+      description:
+        range: string
+      created:
+        range: datetime
+      updated:
+        range: datetime
+      ten:
+        range: integer
+      eleven:
+        range: integer
+      twelve:
+        range: integer
+
+  RegularItem:
+    description: A class that keeps default auto-inference but opts out of one slot.
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      title:
+        range: string
+      secret_field:
+        range: string
+        annotations:
+          openapi.query_param: "false"
+
 enums:
   PersonStatus:
     description: Status of a person

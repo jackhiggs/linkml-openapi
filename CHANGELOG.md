@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## Unreleased
+
+### Added
+
+- **Layered opt-out for auto-inferred query parameters**
+  ([#34](https://github.com/jackhiggs/linkml-openapi/issues/34)). Lean
+  classes still get one auto-inferred query parameter per scalar slot;
+  catalog-shaped classes with 30+ slots can now suppress the bloat with
+  one annotation:
+
+  - **Schema-level** ``openapi.auto_query_params: "false"`` flips the
+    default for the whole spec.
+  - **Class-level** ``openapi.auto_query_params: "false" | "true"``
+    overrides the schema-level setting per class (so a single noisy
+    class can opt out, or — when the schema-level default is off — a
+    single class can opt back in).
+  - **Slot-level** ``openapi.query_param: "false"`` excludes one slot
+    from auto-inference even when auto is enabled.
+
+  Default remains ``"true"``, so schemas without any of the new
+  annotations regenerate byte-identically. ``limit`` / ``offset``
+  always emit on list endpoints regardless of the setting.
+
 ## [0.4.0] — 2026-04-27
 
 Dependency-surface release: cuts the install tree down to `linkml-runtime`
