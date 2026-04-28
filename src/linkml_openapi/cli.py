@@ -66,6 +66,19 @@ from linkml_openapi.generator import OpenAPIGenerator
         "surfaces (internal, partner, external) from one LinkML schema."
     ),
 )
+@click.option(
+    "--path-style",
+    type=click.Choice(["snake_case", "kebab-case"]),
+    default=None,
+    help=(
+        "URL path-segment convention. Defaults to the schema-level "
+        "`openapi.path_style` annotation, or `snake_case` if neither is set "
+        "(byte-identical to today). `kebab-case` renders auto-derived "
+        "class- and slot-driven URL segments with `-` instead of `_`. Slot "
+        "identifiers in the OpenAPI body, operation IDs, and RDF extensions "
+        "are unaffected."
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
 def cli(yamlfile, resource_filter=(), **kwargs):
     """Generate an OpenAPI specification from a LinkML schema."""

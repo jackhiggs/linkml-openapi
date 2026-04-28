@@ -1529,6 +1529,188 @@ classes:
             Path(tmp).unlink(missing_ok=True)
 
 
+class TestPathStyle:
+    """Coverage for issue #38 — kebab-case URL paths and per-slot path_segment."""
+
+    def test_default_path_style_is_snake_case(self):
+        """No annotation, no kwarg → underscores preserved (current behaviour)."""
+        spec = _generate()
+        # /persons/{id}/addresses uses default style; that single-word slot
+        # has no underscores so we verify on a multi-word case below.
+        # The Person.knows nested path is suppressed (openapi.nested:false),
+        # so we cross-check via a class-level path with underscore-bearing
+        # auto-derived plural.
+        assert "/big_catalog_items" in spec["paths"]
+        assert "/regular_items" in spec["paths"]
+
+    def test_slot_path_segment_override_takes_verbatim(self):
+        """`openapi.path_segment` on a slot wins regardless of path style."""
+        spec = _generate()
+        # Hub.web_resources has openapi.path_segment: "web-resources".
+        assert "/hubs/{id}/web-resources" in spec["paths"]
+        # And the slot identifier in the schema body stays snake_case.
+        hub_props = spec["components"]["schemas"]["Hub"]["properties"]
+        assert "web_resources" in hub_props
+        assert "web-resources" not in hub_props
+
+    def test_slot_path_segment_override_in_chain_too(self):
+        """The override flows through to deep-chain emission via the leaf's chain."""
+        spec = _generate()
+        # WebResource has chain [(Hub, "web_resources")]; the chain prefix
+        # uses the slot's path_segment override.
+        deep = [p for p in spec["paths"] if "web-resources" in p and "{id}" in p]
+        assert any(p.startswith("/hubs/{hub_id}/web-resources/") for p in deep), (
+            f"expected chain-deep web-resources path; got: {deep}"
+        )
+
+    def test_kebab_case_kwarg_renders_class_segments_with_dashes(self):
+        """Python kwarg `path_style="kebab-case"` flips auto-derived class segments."""
+        spec = _generate(path_style="kebab-case")
+        # `BigCatalogItem` auto-pluralises to `big_catalog_items`; in kebab
+        # mode it becomes `big-catalog-items`.
+        assert "/big-catalog-items" in spec["paths"]
+        assert "/big_catalog_items" not in spec["paths"]
+
+    def test_kebab_case_kwarg_renders_slot_segments_with_dashes(self):
+        """Slot-driven nested URL segments also pick up the kebab style."""
+        spec = _generate(path_style="kebab-case", resource_filter=["RegularItem"])
+        # RegularItem has no nested slots so verify on the flat side: the
+        # `secret_field` slot path_segment isn't relevant; verify by
+        # building a tailored schema below.
+        del spec  # only used for typing — assertions below use the real test.
+
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/kebab-slot
+name: kebab_slot
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      data_services:
+        range: DataService
+        multivalued: true
+  DataService:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            spec = yaml.safe_load(
+                OpenAPIGenerator(tmp, path_style="kebab-case").serialize(format="yaml")
+            )
+            paths = set(spec["paths"])
+            assert "/catalogs/{id}/data-services" in paths
+            assert "/catalogs/{id}/data_services" not in paths
+            assert "/data-services" in paths
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_schema_level_annotation_drives_default(self):
+        """`openapi.path_style: kebab-case` at schema level applies without a kwarg."""
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/schema-kebab
+name: schema_kebab
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+classes:
+  DataService:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            spec = yaml.safe_load(OpenAPIGenerator(tmp).serialize(format="yaml"))
+            assert "/data-services" in spec["paths"]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_kwarg_overrides_schema_level(self):
+        """Python kwarg / CLI flag wins over the schema annotation."""
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/schema-kebab2
+name: schema_kebab2
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+classes:
+  DataService:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            spec = yaml.safe_load(
+                OpenAPIGenerator(tmp, path_style="snake_case").serialize(format="yaml")
+            )
+            assert "/data_services" in spec["paths"]
+            assert "/data-services" not in spec["paths"]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_unsupported_path_style_raises(self):
+        """Unknown style values raise with the supported list."""
+        import pytest
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        gen = OpenAPIGenerator(SCHEMA_PATH, path_style="camelCase")
+        with pytest.raises(ValueError, match="Unsupported"):
+            gen.serialize(format="yaml")
+
+    def test_class_path_override_still_wins(self):
+        """`openapi.path` on a class is taken verbatim — not re-styled."""
+        spec = _generate(path_style="kebab-case")
+        # Address declares `openapi.path: addresses` — already kebab-friendly,
+        # but the point is that even if it were `address_book` the override
+        # would be taken literally. Catalog declares `openapi.path: catalogs`.
+        assert "/addresses" in spec["paths"]
+        assert "/catalogs" in spec["paths"]
+
+    def test_path_template_not_affected_by_style(self):
+        """`openapi.path_template` URLs are taken literally — no style applied."""
+        spec = _generate(path_style="kebab-case")
+        # ResourceVersion declares an explicit template with `by-doi` segment;
+        # the path emits exactly as written.
+        assert "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}" in spec["paths"]
+
+    def test_operation_ids_and_property_keys_unchanged(self):
+        """Kebab style only touches URL segments — body identifiers stay snake."""
+        spec = _generate(path_style="kebab-case")
+        # `BigCatalogItem` becomes `/big-catalog-items` but the operation IDs
+        # and tags still use snake_case identifiers.
+        coll = spec["paths"]["/big-catalog-items"]
+        assert coll["get"]["operationId"] == "list_big_catalog_items"
+        # Component schema property keys for `web_resources` stay snake.
+        assert "web_resources" in spec["components"]["schemas"]["Hub"]["properties"]
+
+
 class TestDiscriminator:
     """Coverage for issue #20 — discriminator + polymorphism."""
 

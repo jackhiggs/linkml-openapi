@@ -169,6 +169,13 @@ class OpenAPIGenerator(Generator):
     # profile lets a single LinkML schema drive multiple API surfaces
     # (internal / partner / external) by excluding classes or slots.
     profile: str | None = None
+    # URL path-segment convention. None falls back to the schema-level
+    # `openapi.path_style` annotation (default `"snake_case"`). Set to
+    # `"kebab-case"` here or in the schema to render slot- and
+    # class-derived path segments with `-` instead of `_`. Slot
+    # identifiers in the OpenAPI body, operation IDs, tags, and RDF
+    # extensions are unaffected — only the URL segment changes.
+    path_style: str | None = None
 
     def serialize(self, **kwargs) -> str:
         """Generate and serialize the OpenAPI spec."""
@@ -179,6 +186,11 @@ class OpenAPIGenerator(Generator):
         # None when error_schema is off. Cached per-build so each operation
         # builder doesn't re-resolve.
         self._error_class_name: str | None = self._resolve_error_class()
+        # Resolve the active path-style: CLI / Python kwarg wins over the
+        # schema-level annotation, which falls back to `"snake_case"`. We
+        # validate once here so per-call-site renderers can just check the
+        # cached value without re-parsing.
+        self._effective_path_style = self._resolve_path_style()
         # Resolve the active profile (or no-op when self.profile is None).
         # `_resolve_profile_filter` also runs drift detection — failing
         # loudly if an excluded slot is referenced by another annotation.
@@ -717,8 +729,71 @@ class OpenAPIGenerator(Generator):
         fallback = identifier_slot or id_named_slot
         return [(fallback, "iri")] if fallback else []
 
+    _SUPPORTED_PATH_STYLES: ClassVar[frozenset[str]] = frozenset({"snake_case", "kebab-case"})
+
+    def _resolve_path_style(self) -> str:
+        """Pick the effective URL path-segment convention for this build.
+
+        Resolution order: CLI / Python `path_style` kwarg, then the
+        schema-level `openapi.path_style` annotation, then the
+        backward-compatible default `"snake_case"`. Unknown values raise
+        with the supported list.
+        """
+        candidate = self.path_style
+        if candidate is None:
+            candidate = self._schema_annotation("openapi.path_style")
+        if candidate is None:
+            return "snake_case"
+        normalised = str(candidate).strip().lower()
+        if normalised not in self._SUPPORTED_PATH_STYLES:
+            raise ValueError(
+                f"Unsupported `openapi.path_style` {candidate!r}; "
+                f"expected one of {sorted(self._SUPPORTED_PATH_STYLES)!r}."
+            )
+        return normalised
+
+    def _apply_path_style(self, name: str) -> str:
+        """Apply the active path-style to an auto-derived URL segment.
+
+        ``snake_case`` returns the name unchanged (current behaviour);
+        ``kebab-case`` swaps every ``_`` for ``-``. Only operates on
+        segments derived from snake_case identifiers (slot names,
+        pluralised class names) — explicit overrides like
+        ``openapi.path`` and ``openapi.path_segment`` are taken verbatim
+        and never re-styled.
+
+        Falls back to ``"snake_case"`` when called before a full
+        ``serialize()`` build has cached the resolved style — keeps
+        helper methods safely callable from tests and ad-hoc scripts.
+        """
+        if getattr(self, "_effective_path_style", "snake_case") == "kebab-case":
+            return name.replace("_", "-")
+        return name
+
+    def _render_slot_segment(self, parent_cls: ClassDefinition | None, slot: SlotDefinition) -> str:
+        """Render the URL segment for a slot used in a nested path.
+
+        Honours the slot's `openapi.path_segment` annotation (verbatim)
+        when set; otherwise applies the active path-style to the slot
+        name. The slot identifier in the OpenAPI body, operation IDs,
+        tags, and `x-rdf-property` extensions are untouched — only the
+        URL segment changes.
+        """
+        if parent_cls is not None:
+            override = self._get_slot_annotation(parent_cls, slot.name, "openapi.path_segment")
+            if override:
+                return override.strip()
+        return self._apply_path_style(slot.name)
+
     def _get_path_segment(self, cls: ClassDefinition) -> str:
-        """Get the URL path segment for a class."""
+        """Get the URL path segment for a class.
+
+        `openapi.path` is the explicit override (taken verbatim); when
+        absent, the auto-derived snake-pluralised form is run through
+        the active path-style so a schema-level
+        ``openapi.path_style: "kebab-case"`` flips every auto-derived
+        class segment in one place.
+        """
         explicit = self._class_annotation(cls, "openapi.path")
         if explicit is not None:
             return explicit.lstrip("/")
@@ -731,7 +806,7 @@ class OpenAPIGenerator(Generator):
                 "`openapi.path:` on the class to fix the URL.",
                 stacklevel=2,
             )
-        return _to_path_segment(cls.name)
+        return self._apply_path_style(_to_path_segment(cls.name))
 
     def _get_operations(self, cls: ClassDefinition) -> list[str]:
         """Get the list of CRUD operations for a class."""
@@ -1518,7 +1593,7 @@ class OpenAPIGenerator(Generator):
             if nested_ann is not None and not _is_truthy(nested_ann):
                 continue
 
-            collection_path = f"/{url_prefix}/{slot.name}"
+            collection_path = f"/{url_prefix}/{self._render_slot_segment(parent_cls, slot)}"
             target_id_slot = self._identifier_slot(target_name)
 
             if self._is_composition(slot):
@@ -1548,7 +1623,10 @@ class OpenAPIGenerator(Generator):
         # reference-shaped (composition can't be inverted: a composed
         # child has no independent identity to put on the wire).
         for synth_name, source_class in self._synthetic_inverses_for(parent_class_name):
-            collection_path = f"/{url_prefix}/{synth_name}"
+            # Synthetic inverses have no real slot to look up an
+            # `openapi.path_segment` annotation on, so we just apply the
+            # active path-style to the synthesised name.
+            collection_path = f"/{url_prefix}/{self._apply_path_style(synth_name)}"
             target_id_slot = self._identifier_slot(source_class)
             fake_slot = SlotDefinition(name=synth_name, range=source_class, multivalued=True)
             self._needs_resource_link = True
@@ -1811,12 +1889,21 @@ class OpenAPIGenerator(Generator):
                     "parameter."
                 )
             param_name = self._class_path_id_name(parent_name)
+            parent_cls = sv.get_class(parent_name)
+            slot_def = next(
+                (s for s in sv.class_induced_slots(parent_name) if s.name == slot_name),
+                None,
+            )
+            slot_segment = (
+                self._render_slot_segment(parent_cls, slot_def)
+                if slot_def is not None
+                else self._apply_path_style(slot_name)
+            )
             if i == 0:
-                parent_cls = sv.get_class(parent_name)
                 parent_segment = self._get_path_segment(parent_cls)
-                prefix_parts.append(f"{parent_segment}/{{{param_name}}}/{slot_name}")
+                prefix_parts.append(f"{parent_segment}/{{{param_name}}}/{slot_segment}")
             else:
-                prefix_parts.append(f"{{{param_name}}}/{slot_name}")
+                prefix_parts.append(f"{{{param_name}}}/{slot_segment}")
             params.append(
                 Parameter(
                     name=param_name,
