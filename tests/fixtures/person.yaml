@@ -490,6 +490,60 @@ classes:
     is_a: BaseResource
     annotations:
       openapi.resource: "true"
+
+  # --- Multi-level composition + openapi.tag (issue #44) ---
+  # Library composes BookEntry composes ChapterEntry. The composed
+  # targets are not resources in their own right; they have no flat
+  # path. The deeper composition chain emits naturally:
+  #   /libraries/{libraryId}/books            (collection)
+  #   /libraries/{libraryId}/books/{bookId}   (item)
+  #   /libraries/{libraryId}/books/{bookId}/chapters
+  #   /libraries/{libraryId}/books/{bookId}/chapters/{chapterId}
+  # Operations are tagged by `openapi.tag` (Library / Book / Chapter),
+  # not by class name (Library / BookEntry / ChapterEntry).
+  Library:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_id: libraryId
+      openapi.tag: Library
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      books:
+        range: BookEntry
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+
+  BookEntry:
+    annotations:
+      openapi.path_id: bookId
+      openapi.tag: Book
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      chapters:
+        range: ChapterEntry
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+
+  ChapterEntry:
+    annotations:
+      openapi.path_id: chapterId
+      openapi.tag: Chapter
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      title:
+        range: string
+
 enums:
   PersonStatus:
     description: Status of a person

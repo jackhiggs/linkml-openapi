@@ -981,6 +981,7 @@ endpoints regardless of any of these annotations.
 | `openapi.path` | class | path segment string | Auto-pluralized snake_case of class name |
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
 | `openapi.media_types` | class | comma-separated list | `application/json` |
+| `openapi.tag` | class | string | Class name (composition-derived ops inherit from the target) |
 | `openapi.path_style` | schema | `snake_case` / `kebab-case` | `snake_case` |
 | `openapi.auto_query_params` | schema or class | `"true"` / `"false"` | `"true"` (auto-infer scalar slots) |
 | `openapi.path_id` | class | identifier name | `<class_snake>_id` (e.g. `catalog_id`) |
@@ -988,6 +989,7 @@ endpoints regardless of any of these annotations.
 | `openapi.nested_only` | class | `"true"` / `"false"` | Both flat and deep paths emit |
 | `openapi.flat_only` | class | `"true"` / `"false"` | Both flat and deep paths emit (mutually exclusive with `nested_only`) |
 | `openapi.path_template` | class | URL template with `{name}` placeholders | Auto-derived chain |
+| `openapi.path_template_collection` | class | `"true"` / `"false"` | Collection emits when the template ends in `/{name}` |
 | `openapi.path_param_sources` | class | comma-separated `name:Class.slot` entries | (required when `path_template` is set) |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
 | `openapi.path_segment` | slot (via `slot_usage`) | URL segment string | Slot name with active path-style applied |

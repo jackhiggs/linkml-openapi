@@ -166,7 +166,7 @@ paths:
   /books/{id}/authors:
     get:
       tags:
-      - Book.authors
+      - Author
       summary: List Author attached to Book.authors
       operationId: list_book_authors
       responses:
@@ -190,7 +190,7 @@ paths:
       deprecated: false
     post:
       tags:
-      - Book.authors
+      - Author
       summary: Attach Author to Book.authors
       operationId: attach_book_authors
       requestBody:
@@ -235,7 +235,7 @@ paths:
   /books/{id}/authors/{author_id}:
     delete:
       tags:
-      - Book.authors
+      - Author
       summary: Detach Author from Book.authors
       operationId: detach_book_authors
       responses:

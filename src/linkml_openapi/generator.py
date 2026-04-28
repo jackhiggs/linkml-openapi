@@ -201,6 +201,12 @@ class OpenAPIGenerator(Generator):
         # Reset the x-rdf-* maps; _build_openapi populates them as it walks the schema.
         self._x_rdf_class: dict[str, str] = {}
         self._x_rdf_property: dict[tuple[str, str], str] = {}
+        # Multi-level composition recursion happens inside
+        # `_add_composition_paths`; the stack tracks which composition
+        # targets are currently being emitted so a cyclic
+        # composition-of-composition chain (`A.bs[B].as[A]`) terminates
+        # cleanly instead of recursing forever.
+        self._composition_emission_stack: set[str] = set()
         # Resolved name of the schema referenced from non-2xx responses, or
         # None when error_schema is off. Cached per-build so each operation
         # builder doesn't re-resolve.
@@ -1334,7 +1340,7 @@ class OpenAPIGenerator(Generator):
         return Operation(
             summary=f"List {_to_path_segment(class_name).replace('_', ' ')}",
             operationId=f"list_{_to_path_segment(class_name)}",
-            tags=[class_name],
+            tags=[self._class_tag(class_name)],
             parameters=self._make_query_params(cls),
             responses={
                 "200": Response(
@@ -1350,7 +1356,7 @@ class OpenAPIGenerator(Generator):
         return Operation(
             summary=f"Create a {class_name}",
             operationId=f"create_{_to_snake_case(class_name)}",
-            tags=[class_name],
+            tags=[self._class_tag(class_name)],
             requestBody=RequestBody(
                 required=True,
                 content=self._content_for(ref, media_types),
@@ -1370,7 +1376,7 @@ class OpenAPIGenerator(Generator):
         return Operation(
             summary=f"Get a {class_name}",
             operationId=f"get_{_to_snake_case(class_name)}",
-            tags=[class_name],
+            tags=[self._class_tag(class_name)],
             responses={
                 "200": Response(
                     description=f"{class_name} details",
@@ -1386,7 +1392,7 @@ class OpenAPIGenerator(Generator):
         return Operation(
             summary=f"Update a {class_name}",
             operationId=f"update_{_to_snake_case(class_name)}",
-            tags=[class_name],
+            tags=[self._class_tag(class_name)],
             requestBody=RequestBody(
                 required=True,
                 content=self._content_for(ref, media_types),
@@ -1405,7 +1411,7 @@ class OpenAPIGenerator(Generator):
         return Operation(
             summary=f"Delete a {class_name}",
             operationId=f"delete_{_to_snake_case(class_name)}",
-            tags=[class_name],
+            tags=[self._class_tag(class_name)],
             responses={
                 "204": Response(description=f"{class_name} deleted"),
                 "404": self._error_response("Not found"),
@@ -1428,7 +1434,7 @@ class OpenAPIGenerator(Generator):
         return Operation(
             summary=f"Patch a {class_name}",
             operationId=f"patch_{_to_snake_case(class_name)}",
-            tags=[class_name],
+            tags=[self._class_tag(class_name)],
             requestBody=RequestBody(
                 required=True,
                 content={
@@ -1560,6 +1566,21 @@ class OpenAPIGenerator(Generator):
         if override:
             return override.strip()
         return f"{_to_snake_case(class_name)}_id"
+
+    def _class_tag(self, class_name: str) -> str:
+        """OpenAPI ``tags`` value to use for a class's operations.
+
+        Defaults to the class name (current behaviour); the
+        ``openapi.tag`` class annotation overrides it. Composition- and
+        reference-derived nested operations call this with the *target*
+        class so all "Dataset" operations end up under one Swagger UI
+        group regardless of where in the URL hierarchy they emit.
+        """
+        cls = self.schemaview.get_class(class_name)
+        override = self._class_annotation(cls, "openapi.tag") if cls else None
+        if override:
+            return override.strip()
+        return class_name
 
     def _resolve_item_path_vars(
         self,
@@ -2082,7 +2103,7 @@ class OpenAPIGenerator(Generator):
         template: str,
         operations: list[str],
     ) -> dict[str, PathItem]:
-        """Emit a deep item path from a literal `openapi.path_template`.
+        """Emit a deep item path (and optional collection) from a literal `openapi.path_template`.
 
         The user-supplied template replaces the auto-derived chain. Each
         ``{name}`` placeholder must have a matching ``name:Class.slot``
@@ -2090,6 +2111,12 @@ class OpenAPIGenerator(Generator):
         the parameter schema (so typed parameters and RDF metadata still
         flow). Validates: placeholder set matches source-key set,
         every ``Class.slot`` resolves, no duplicates.
+
+        When the template ends with a ``/{name}`` segment, the collection
+        path (template minus that tail) is emitted by default with
+        ``list`` / ``create`` operations from ``operations``. Opt out
+        with ``openapi.path_template_collection: "false"`` for legacy
+        item-only URLs.
         """
         sv = self.schemaview
         sources_raw = self._class_annotation(cls, "openapi.path_param_sources") or ""
@@ -2117,7 +2144,9 @@ class OpenAPIGenerator(Generator):
                 f"Extra sources (not in template): {sorted(extra_sources)!r}."
             )
 
-        params: list[Parameter] = []
+        # Build a parameter for each placeholder, indexed by name so the
+        # collection-path emission can drop the leaf-id one.
+        params_by_name: dict[str, Parameter] = {}
         for name in unique_placeholders:
             src_class, src_slot = sources[name]
             if sv.get_class(src_class) is None:
@@ -2133,19 +2162,43 @@ class OpenAPIGenerator(Generator):
                     f"refers to unknown slot {src_class}.{src_slot!r} for "
                     f"parameter {name!r}."
                 )
-            params.append(
-                Parameter(
-                    name=name,
-                    param_in=ParameterLocation.PATH,
-                    required=True,
-                    param_schema=self._slot_to_schema(slot),
-                )
+            params_by_name[name] = Parameter(
+                name=name,
+                param_in=ParameterLocation.PATH,
+                required=True,
+                param_schema=self._slot_to_schema(slot),
             )
 
-        deep_item = PathItem(parameters=params)
+        deep_item = PathItem(parameters=[params_by_name[n] for n in unique_placeholders])
         self._attach_item_operations(deep_item, cls, class_name, operations)
+        deep_paths: dict[str, PathItem] = {template: deep_item}
 
-        deep_paths = {template: deep_item}
+        # Collection path: default-on when the template ends with a
+        # placeholder segment AND the class declares any of `list` /
+        # `create` in its operations. Opt-out with
+        # `openapi.path_template_collection: "false"`.
+        collection_opt_in = self._class_annotation(cls, "openapi.path_template_collection")
+        emit_collection = collection_opt_in is None or _is_truthy(collection_opt_in)
+        if emit_collection and template.endswith("}"):
+            # Strip the trailing `/{name}` segment.
+            tail_open = template.rfind("/{")
+            tail_name = template[tail_open + 2 : -1] if tail_open != -1 else None
+            if tail_name and tail_name in params_by_name:
+                collection_path = template[:tail_open]
+                if collection_path:  # don't emit the empty-prefix degenerate case
+                    collection_params = [
+                        params_by_name[n] for n in unique_placeholders if n != tail_name
+                    ]
+                    collection = PathItem(
+                        parameters=list(collection_params) if collection_params else None
+                    )
+                    if OP_LIST in operations:
+                        collection.get = self._make_list_operation(cls, class_name)
+                    if OP_CREATE in operations:
+                        collection.post = self._make_create_operation(cls, class_name)
+                    if collection.get is not None or collection.post is not None:
+                        deep_paths[collection_path] = collection
+
         self._suffix_operation_ids(deep_paths, "_via_template")
         return deep_paths
 
@@ -2159,11 +2212,20 @@ class OpenAPIGenerator(Generator):
         target_id_slot: SlotDefinition | None,
         parent_path_params: list[Parameter],
     ) -> None:
+        # Cycle protection — must come before any emission. Mutual
+        # composition (`A.bs[B].as[A]`) would otherwise recurse one
+        # extra hop and emit paths whose URL parameters repeat (e.g.
+        # `/as/{id}/bs/{b_id}/as/{a_id}/bs/{b_id}`). The stack is
+        # populated by the recursion below, so the *second* visit to
+        # an already-being-emitted target short-circuits before any
+        # paths are added.
+        if target_class_name in self._composition_emission_stack:
+            return
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)
         target_ref = Reference(ref=f"#/components/schemas/{target_class_name}")
         array_schema = Schema(type=DataType.ARRAY, items=target_ref)
-        op_tag = f"{parent_class_name}.{slot.name}"
+        op_tag = self._class_tag(target_class_name)
         slot_seg = slot.name
 
         collection = PathItem(parameters=list(parent_path_params))
@@ -2252,6 +2314,65 @@ class OpenAPIGenerator(Generator):
         )
         paths[item_path] = item
 
+        # Multi-level composition: when the composed target itself has
+        # `inlined: true` slots, recurse and emit deeper paths under
+        # this item URL. The cycle stack (checked at the top of this
+        # method) terminates mutual-composition graphs; references
+        # aren't recursed into because they already address the target
+        # as its own resource at the top level.
+        self._composition_emission_stack.add(target_class_name)
+        try:
+            self._recurse_composition_children(
+                paths, target_class_name, item_path, item_path_params
+            )
+        finally:
+            self._composition_emission_stack.discard(target_class_name)
+
+    def _recurse_composition_children(
+        self,
+        paths: dict,
+        target_class_name: str,
+        item_path: str,
+        item_path_params: list[Parameter],
+    ) -> None:
+        """Walk a composition target's own composition slots and emit deeper paths.
+
+        Only ``inlined: true`` (composition) children are recursed —
+        reference-shaped children address the target as its own
+        resource at the top level and don't need a deeper URL prefix.
+        Honours ``openapi.nested: "false"`` and profile exclusions.
+        """
+        sv = self.schemaview
+        target_cls = sv.get_class(target_class_name)
+        if target_cls is None:
+            return
+        for child_slot in self._induced_slots_iter(target_class_name):
+            if not child_slot.multivalued:
+                continue
+            if self._is_slot_excluded(child_slot):
+                continue
+            child_target = child_slot.range
+            if not child_target or sv.get_class(child_target) is None:
+                continue
+            nested_ann = self._get_slot_annotation(target_cls, child_slot.name, "openapi.nested")
+            if nested_ann is not None and not _is_truthy(nested_ann):
+                continue
+            if not self._is_composition(child_slot):
+                continue
+            child_target_id = self._identifier_slot(child_target)
+            child_collection_path = (
+                f"{item_path}/{self._render_slot_segment(target_cls, child_slot)}"
+            )
+            self._add_composition_paths(
+                paths,
+                child_collection_path,
+                target_class_name,
+                child_slot,
+                child_target,
+                child_target_id,
+                item_path_params,
+            )
+
     def _add_reference_paths(
         self,
         paths: dict,
@@ -2280,7 +2401,7 @@ class OpenAPIGenerator(Generator):
         link_ref = Reference(ref="#/components/schemas/ResourceLink")
         # Body accepts a single link or a batch — clients prefer batch.
         link_body_schema = Schema(oneOf=[link_ref, Schema(type=DataType.ARRAY, items=link_ref)])
-        op_tag = f"{parent_class_name}.{slot.name}"
+        op_tag = self._class_tag(target_class_name)
         slot_seg = slot.name
 
         collection = PathItem(parameters=list(parent_path_params))

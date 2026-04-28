@@ -6,6 +6,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## Unreleased
+
+### Added
+
+- **`openapi.path_template` now emits a collection path alongside the
+  item path** ([#44](https://github.com/jackhiggs/linkml-openapi/issues/44)).
+  When the template ends with a ``/{name}`` segment the leaf is
+  treated as the item path; the segment is stripped to form the
+  collection path, which gets ``list`` / ``create`` operations from
+  the class's ``openapi.operations``. Operation IDs are still
+  suffixed ``_via_template`` for global uniqueness, and the
+  collection drops the leaf-id parameter from its path-parameter
+  list. Opt out with the new ``openapi.path_template_collection:
+  "false"`` class annotation for genuinely item-only legacy URLs.
+- **Multi-level composition chains.** When an ``inlined: true``
+  composition target itself has ``inlined: true`` slots, the nested
+  paths now chain through every level instead of stopping after one
+  hop. So ``Catalog.datasets[FusionDataset].distributions[FusionDistribution]``
+  emits ``/catalogs/{catalogId}/datasets/{datasetId}/distributions``
+  and ``…/distributions/{distributionId}`` automatically — no need
+  for the intermediate to be a resource in its own right. Mutual
+  composition (``A.bs[B].as[A]``) is cycle-protected; the recursion
+  walks one cycle around then short-circuits.
+- **`openapi.tag` class annotation.** Overrides the ``tags`` value
+  used in OpenAPI operations, controlling how Swagger UI groups
+  endpoints. Default is the class name (current behaviour).
+  **Composition- and reference-derived nested operations now inherit
+  the *target* class's tag** (``Dataset``) rather than the previous
+  ``Parent.slot`` form (``Catalog.datasets``), so all "Dataset"
+  operations appear under one Swagger UI group regardless of where
+  in the URL hierarchy they live. This is a visible change in the
+  committed examples (`bookstore`, `petstore`); schemas without
+  ``openapi.tag`` keep the new target-class-name default.
+
 ## [0.6.1] — 2026-04-28
 
 Internal cleanup release driven by a code-reuse / quality / efficiency
