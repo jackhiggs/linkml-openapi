@@ -1671,6 +1671,142 @@ classes:
         )
 
 
+class TestCompositionAndTagEnhancements:
+    """Coverage for issue #44 — path_template collection ops, multi-level
+    composition chain, and the `openapi.tag` class annotation."""
+
+    # --- Enhancement 5: openapi.tag --------------------------------------
+
+    def test_openapi_tag_overrides_flat_class_name(self):
+        """Flat operations on a tagged class use `openapi.tag`, not the class name."""
+        spec = _generate()
+        # Library declares `openapi.tag: Library` (matches class name) —
+        # use BookEntry indirectly: its composition-derived ops should
+        # carry tag `Book`, not `BookEntry`.
+        list_book_op = spec["paths"]["/libraries/{libraryId}/books"]["get"]
+        assert list_book_op["tags"] == ["Book"]
+
+    def test_openapi_tag_inherits_from_target_in_composition(self):
+        """Composition-derived nested ops use the *target* class's tag, not the parent's."""
+        spec = _generate()
+        # /libraries/{id}/books/{id}/chapters → tagged Chapter (target),
+        # NOT Library (parent) and NOT BookEntry (intermediate class).
+        chapter_coll = spec["paths"]["/libraries/{libraryId}/books/{bookId}/chapters"]["get"]
+        assert chapter_coll["tags"] == ["Chapter"]
+
+    def test_openapi_tag_default_is_class_name(self):
+        """Without the annotation, the tag is still the class name (backward compat)."""
+        spec = _generate()
+        # Person has no `openapi.tag` set; tag stays "Person".
+        list_persons = spec["paths"]["/persons"]["get"]
+        assert list_persons["tags"] == ["Person"]
+
+    # --- Enhancement 2: path_template collection ops ---------------------
+
+    def test_path_template_emits_collection_alongside_item(self):
+        """When the template ends in `/{name}`, the collection path also emits."""
+        spec = _generate()
+        item = "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+        coll = "/v2/catalogs/{cId}/resources/by-doi/{doi}"
+        assert item in spec["paths"]
+        assert coll in spec["paths"]
+
+    def test_path_template_collection_has_list_and_create(self):
+        """The templated collection emits list (GET) + create (POST)."""
+        spec = _generate()
+        coll = spec["paths"]["/v2/catalogs/{cId}/resources/by-doi/{doi}"]
+        assert "get" in coll
+        assert "post" in coll
+        # operationIds are suffixed `_via_template` for global uniqueness.
+        assert coll["get"]["operationId"].endswith("_via_template")
+        assert coll["post"]["operationId"].endswith("_via_template")
+
+    def test_path_template_collection_drops_leaf_id_param(self):
+        """The collection's path-parameter list excludes the stripped placeholder."""
+        spec = _generate()
+        coll = spec["paths"]["/v2/catalogs/{cId}/resources/by-doi/{doi}"]
+        names = {p["name"] for p in coll.get("parameters", [])}
+        assert names == {"cId", "doi"}  # `version` is the stripped tail
+
+    def test_path_template_collection_opt_out(self):
+        """`openapi.path_template_collection: "false"` suppresses the collection."""
+        spec = _generate_from_string("""
+id: https://example.org/template-no-coll
+name: tnc
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+  Item:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/legacy/items/{id}"
+      openapi.path_param_sources: "id:Item.id"
+      openapi.path_template_collection: "false"
+      openapi.nested_only: "true"
+    attributes:
+      id: { identifier: true, required: true }
+""")
+        assert "/legacy/items/{id}" in spec["paths"]
+        assert "/legacy/items" not in spec["paths"]
+
+    # --- Enhancement 3: multi-level composition chain --------------------
+
+    def test_multi_level_composition_emits_full_chain(self):
+        """Composition-of-composition emits collection + item at every level."""
+        spec = _generate()
+        for path in (
+            "/libraries/{libraryId}/books",
+            "/libraries/{libraryId}/books/{bookId}",
+            "/libraries/{libraryId}/books/{bookId}/chapters",
+            "/libraries/{libraryId}/books/{bookId}/chapters/{chapterId}",
+        ):
+            assert path in spec["paths"], f"missing deep composition path: {path}"
+
+    def test_multi_level_composition_intermediate_has_no_flat_path(self):
+        """Composed intermediates without `openapi.resource: true` don't get flat URLs."""
+        spec = _generate()
+        # BookEntry is composed under Library — no `/book_entries` flat path.
+        assert "/book_entries" not in spec["paths"]
+        assert "/books" not in spec["paths"]  # also no auto-pluralised flat
+
+    def test_multi_level_composition_cycle_protection(self):
+        """Mutual composition (`A.bs[B].as[A]`) terminates without infinite recursion."""
+        spec = _generate_from_string("""
+id: https://example.org/cycle
+name: cy
+default_range: string
+classes:
+  A:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      bs:
+        range: B
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+  B:
+    attributes:
+      id: { identifier: true, required: true }
+      as:
+        range: A
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+""")
+        # Generation completes — no stack overflow. The recursion
+        # walks one cycle around (A → B → A) so we get the cycle-back
+        # path /as/{id}/bs/{b_id}/as/{a_id}, but the SECOND cycle is
+        # short-circuited by the stack guard so no /…/bs/{b_id} suffix
+        # appears beyond that depth.
+        assert "/as/{id}/bs/{b_id}/as/{a_id}" in spec["paths"]
+        # No re-emission of B's collection beyond the first cycle.
+        assert not any(p.startswith("/as/{id}/bs/{b_id}/as/{a_id}/bs") for p in spec["paths"])
+
+
 class TestDiscriminator:
     """Coverage for issue #20 — discriminator + polymorphism."""
 

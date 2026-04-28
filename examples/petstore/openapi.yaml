@@ -507,7 +507,7 @@ paths:
   /owners/{id}/pets:
     get:
       tags:
-      - Owner.pets
+      - Pet
       summary: List Pet attached to Owner.pets
       operationId: list_owner_pets
       responses:
@@ -531,7 +531,7 @@ paths:
       deprecated: false
     post:
       tags:
-      - Owner.pets
+      - Pet
       summary: Attach Pet to Owner.pets
       operationId: attach_owner_pets
       requestBody:
@@ -576,7 +576,7 @@ paths:
   /owners/{id}/pets/{pet_id}:
     delete:
       tags:
-      - Owner.pets
+      - Pet
       summary: Detach Pet from Owner.pets
       operationId: detach_owner_pets
       responses:
