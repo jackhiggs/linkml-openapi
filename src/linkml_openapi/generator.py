@@ -192,6 +192,10 @@ class OpenAPIGenerator(Generator):
         # class and slot in the schema (O(resource_classes × all_classes ×
         # max_slots) per build).
         self._synthetic_inverses_index = self._collect_synthetic_inverses()
+        # Pre-compute the parent-chain index so each resource-class
+        # iteration in `_build_openapi` can ask for its canonical chain in
+        # O(1) instead of re-walking the relationship graph.
+        self._parent_chains_index = self._collect_parent_chains()
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
         raw["openapi"] = self.openapi_version
@@ -297,44 +301,121 @@ class OpenAPIGenerator(Generator):
             path_vars = self._get_path_variables(cls)
             path_segment = self._get_path_segment(cls)
             operations = self._get_operations(cls)
+            nested_only = _is_truthy(self._class_annotation(cls, "openapi.nested_only") or False)
+            flat_only = _is_truthy(self._class_annotation(cls, "openapi.flat_only") or False)
+            if nested_only and flat_only:
+                raise ValueError(
+                    f"Class {class_name!r} declares both "
+                    '`openapi.nested_only: "true"` and '
+                    '`openapi.flat_only: "true"`. They are mutually '
+                    "exclusive — pick one. `nested_only` keeps the deep "
+                    "URL only; `flat_only` keeps the flat URL only."
+                )
 
             self._validate_resource_addressability(class_name, path_vars, operations)
 
-            # Collection path
-            collection_path = f"/{path_segment}"
-            collection_item = PathItem()
-            if "list" in operations:
-                collection_item.get = self._make_list_operation(cls, class_name)
-            if "create" in operations:
-                collection_item.post = self._make_create_operation(cls, class_name)
-            paths[collection_path] = collection_item
+            # Collection path. Suppressed when `openapi.nested_only: "true"`
+            # makes the deep-nested URL the only canonical surface.
+            if not nested_only:
+                collection_path = f"/{path_segment}"
+                collection_item = PathItem()
+                if "list" in operations:
+                    collection_item.get = self._make_list_operation(cls, class_name)
+                if "create" in operations:
+                    collection_item.post = self._make_create_operation(cls, class_name)
+                paths[collection_path] = collection_item
 
-            # Item path
+            # Item path. When the class declares `openapi.path_id` *and*
+            # has exactly one path variable, the override renames the URL
+            # parameter (and the matching `Parameter.name`) so the same
+            # identifier shows up consistently in the flat item path, in
+            # nested-paths-from-this-class, and in any deep chain that
+            # passes through this class as an ancestor.
             if path_vars:
-                item_suffix = "/".join(f"{{{s.name}}}" for s, _mode in path_vars)
-                item_path = f"/{path_segment}/{item_suffix}"
+                path_id_override = (
+                    self._class_annotation(cls, "openapi.path_id") if len(path_vars) == 1 else None
+                )
+                resolved_path_vars = [
+                    (
+                        path_id_override.strip() if path_id_override else slot.name,
+                        slot,
+                        mode,
+                    )
+                    for slot, mode in path_vars
+                ]
+                item_suffix = "/".join(f"{{{name}}}" for name, _slot, _mode in resolved_path_vars)
                 path_params = [
                     Parameter(
-                        name=s.name,
+                        name=name,
                         param_in=ParameterLocation.PATH,
                         required=True,
-                        param_schema=self._path_variable_schema(s, mode),
+                        param_schema=self._path_variable_schema(slot, mode),
                     )
-                    for s, mode in path_vars
+                    for name, slot, mode in resolved_path_vars
                 ]
-                item = PathItem(parameters=path_params)
-                if "read" in operations:
-                    item.get = self._make_read_operation(cls, class_name)
-                if "update" in operations:
-                    item.put = self._make_update_operation(cls, class_name)
-                if "patch" in operations:
-                    item.patch = self._make_patch_operation(cls, class_name)
+
+                if not nested_only:
+                    item_path = f"/{path_segment}/{item_suffix}"
+                    item = PathItem(parameters=path_params)
+                    if "read" in operations:
+                        item.get = self._make_read_operation(cls, class_name)
+                    if "update" in operations:
+                        item.put = self._make_update_operation(cls, class_name)
+                    if "patch" in operations:
+                        item.patch = self._make_patch_operation(cls, class_name)
+                    if "delete" in operations:
+                        item.delete = self._make_delete_operation(cls, class_name)
+                    paths[item_path] = item
+
+                # The PATCH body schema is needed whenever `patch` is
+                # listed, regardless of which URL forms emit, so generate
+                # it outside the nested-only branch.
+                if "patch" in operations and f"{class_name}Patch" not in schemas:
                     schemas[f"{class_name}Patch"] = self._build_patch_schema(class_name, cls)
-                if "delete" in operations:
-                    item.delete = self._make_delete_operation(cls, class_name)
-                paths[item_path] = item
 
                 paths.update(self._make_nested_paths(class_name, path_segment, path_vars))
+
+                # Deep nested paths. Three strategies, in priority order:
+                #
+                #   1. `openapi.flat_only: "true"` → skip deep emission
+                #      entirely. Flat collection / flat item already emitted
+                #      above (when `nested_only` is also off, which the
+                #      mutex check guarantees).
+                #
+                #   2. `openapi.path_template` → user-provided URL template
+                #      (Layer 4 escape hatch). Replaces the auto-derived
+                #      chain. Parameters are built from
+                #      `openapi.path_param_sources` so each `{name}` in the
+                #      template binds to a typed `Class.slot` source.
+                #
+                #   3. Auto-derived chain via the relationship graph
+                #      (Layers 1–3). Each ancestor contributes a path
+                #      parameter sourced from its identifier slot — *not*
+                #      from any field on this class — so the leaf
+                #      component schema stays unchanged.
+                #
+                # Deeper children of this class under a deep prefix are
+                # handled naturally as those children's own canonical
+                # chain, so each chain depth gets emitted exactly once.
+                if not flat_only:
+                    template = self._class_annotation(cls, "openapi.path_template")
+                    if template:
+                        deep_paths = self._emit_templated_deep_path(
+                            cls, class_name, template, operations
+                        )
+                        paths.update(deep_paths)
+                    else:
+                        chain = self._canonical_parent_chain(class_name)
+                        if chain:
+                            deep_paths = self._emit_chained_deep_path(
+                                cls,
+                                class_name,
+                                chain,
+                                item_suffix,
+                                path_params,
+                                operations,
+                            )
+                            paths.update(deep_paths)
 
         if self._needs_resource_link and "ResourceLink" not in schemas:
             schemas["ResourceLink"] = self._build_resource_link_schema()
@@ -1318,14 +1399,33 @@ class OpenAPIGenerator(Generator):
         }
         return schema
 
-    @staticmethod
-    def _nested_item_path_var(target_class_name: str) -> str:
+    def _class_path_id_name(self, class_name: str) -> str:
+        """Path-variable name to use whenever ``class_name`` appears in a URL.
+
+        Drives both the leaf ``{<class>_id}`` segment in a single-level nested
+        item path and every ancestor segment in an N-level chain. Default is
+        ``<snake>_id`` so existing specs stay byte-identical; override per
+        class with the ``openapi.path_id`` annotation::
+
+            classes:
+              Catalog:
+                annotations:
+                  openapi.path_id: catalogId   # → {catalogId} in URLs
+        """
+        cls = self.schemaview.get_class(class_name)
+        override = self._class_annotation(cls, "openapi.path_id") if cls else None
+        if override:
+            return override.strip()
+        return f"{_to_snake_case(class_name)}_id"
+
+    def _nested_item_path_var(self, target_class_name: str) -> str:
         """Path-variable name for the linked item under a nested path.
 
         Avoids colliding with the parent's ``{id}`` by namespacing on the
-        target class (e.g. ``/books/{id}/authors/{author_id}``).
+        target class (e.g. ``/books/{id}/authors/{author_id}``). Override
+        per class with ``openapi.path_id``.
         """
-        return f"{_to_snake_case(target_class_name)}_id"
+        return self._class_path_id_name(target_class_name)
 
     def _make_nested_paths(
         self,
@@ -1333,30 +1433,74 @@ class OpenAPIGenerator(Generator):
         parent_path_segment: str,
         parent_path_vars: list,
     ) -> dict[str, PathItem]:
+        """Single-level nested paths under a class's own item path.
+
+        Thin wrapper that renders ``parent_path_segment`` + ``parent_path_vars``
+        into a URL prefix and the matching parameter list, then delegates to
+        :meth:`_make_nested_paths_with_prefix` so single-level and N-level
+        emission share the same code path. Honours the parent's
+        ``openapi.path_id`` so the nested URL and the class's own flat item
+        path use the same parameter name.
+        """
+        parent_cls = self.schemaview.get_class(parent_class_name)
+        path_id_override = (
+            self._class_annotation(parent_cls, "openapi.path_id")
+            if parent_cls and len(parent_path_vars) == 1
+            else None
+        )
+        named_vars = [
+            (
+                path_id_override.strip() if path_id_override else slot.name,
+                slot,
+                mode,
+            )
+            for slot, mode in parent_path_vars
+        ]
+        parent_var_suffix = "/".join(f"{{{name}}}" for name, _slot, _mode in named_vars)
+        prefix = (
+            f"{parent_path_segment}/{parent_var_suffix}"
+            if parent_var_suffix
+            else parent_path_segment
+        )
+        parent_path_params = [
+            Parameter(
+                name=name,
+                param_in=ParameterLocation.PATH,
+                required=True,
+                param_schema=self._path_variable_schema(slot, mode),
+            )
+            for name, slot, mode in named_vars
+        ]
+        return self._make_nested_paths_with_prefix(parent_class_name, prefix, parent_path_params)
+
+    def _make_nested_paths_with_prefix(
+        self,
+        parent_class_name: str,
+        url_prefix: str,
+        path_params: list[Parameter],
+    ) -> dict[str, PathItem]:
         """Generate nested paths for composition and reference relationships.
 
         Walks every multivalued, class-ranged slot on the parent and emits:
 
         - **Composition** (``slot.inlined``): full CRUD nested at
-          ``/{parent}/{id}/{slot}`` (and ``/{slot}/{target_id}`` when the
-          target has an identifier).
+          ``/{prefix}/{slot}`` and ``/{prefix}/{slot}/{target_id}`` when the
+          target has an identifier.
         - **Reference** (target has identifier, ``inlined: false``): GET to
           list, POST with a ``ResourceLink`` body to attach (single or batch
           via ``oneOf``), DELETE on the per-target item path to detach.
+
+        ``url_prefix`` is the already-rendered ancestor portion of the URL
+        without leading or trailing slashes, e.g. ``"catalogs/{id}"`` for a
+        single-level emission or
+        ``"orgs/{org_id}/catalogs/{catalog_id}/datasets/{dataset_id}"`` for an
+        N-level emission. ``path_params`` carries every `Parameter` that
+        prefix references, so the resulting `PathItem` lists them at the
+        path level.
         """
         sv = self.schemaview
         parent_cls = sv.get_class(parent_class_name)
         out: dict[str, PathItem] = {}
-        parent_var_suffix = "/".join(f"{{{s.name}}}" for s, _mode in parent_path_vars)
-        parent_path_params = [
-            Parameter(
-                name=s.name,
-                param_in=ParameterLocation.PATH,
-                required=True,
-                param_schema=self._path_variable_schema(s, mode),
-            )
-            for s, mode in parent_path_vars
-        ]
 
         for slot in sv.class_induced_slots(parent_class_name):
             if not slot.multivalued:
@@ -1374,7 +1518,7 @@ class OpenAPIGenerator(Generator):
             if nested_ann is not None and not _is_truthy(nested_ann):
                 continue
 
-            collection_path = f"/{parent_path_segment}/{parent_var_suffix}/{slot.name}"
+            collection_path = f"/{url_prefix}/{slot.name}"
             target_id_slot = self._identifier_slot(target_name)
 
             if self._is_composition(slot):
@@ -1385,7 +1529,7 @@ class OpenAPIGenerator(Generator):
                     slot,
                     target_name,
                     target_id_slot,
-                    parent_path_params,
+                    path_params,
                 )
             else:
                 self._needs_resource_link = True
@@ -1396,7 +1540,7 @@ class OpenAPIGenerator(Generator):
                     slot,
                     target_name,
                     target_id_slot,
-                    parent_path_params,
+                    path_params,
                 )
 
         # Synthetic inverse paths — emitted for `inverse:` declarations
@@ -1404,7 +1548,7 @@ class OpenAPIGenerator(Generator):
         # reference-shaped (composition can't be inverted: a composed
         # child has no independent identity to put on the wire).
         for synth_name, source_class in self._synthetic_inverses_for(parent_class_name):
-            collection_path = f"/{parent_path_segment}/{parent_var_suffix}/{synth_name}"
+            collection_path = f"/{url_prefix}/{synth_name}"
             target_id_slot = self._identifier_slot(source_class)
             fake_slot = SlotDefinition(name=synth_name, range=source_class, multivalued=True)
             self._needs_resource_link = True
@@ -1415,7 +1559,7 @@ class OpenAPIGenerator(Generator):
                 fake_slot,
                 source_class,
                 target_id_slot,
-                parent_path_params,
+                path_params,
             )
 
         return out
@@ -1465,6 +1609,380 @@ class OpenAPIGenerator(Generator):
                 seen.add(tgt_slot_name)
                 index.setdefault(tgt_class, []).append((tgt_slot_name, src_class_name))
         return index
+
+    # --- Deep nested paths via parent-chain walk -------------------------
+
+    def _collect_parent_chains(self) -> dict[str, list[list[tuple[str, str]]]]:
+        """Index every chain of `(parent_class, slot_name)` leading to each class.
+
+        For a leaf class ``L``, each chain is the ordered list of ancestors
+        from the root parent down to the direct parent — e.g. for
+        ``Org → Catalog → Dataset → Distribution`` walked via
+        ``Org.catalogs``, ``Catalog.datasets``, ``Dataset.distributions``,
+        the chain is::
+
+            [("Org", "catalogs"),
+             ("Catalog", "datasets"),
+             ("Dataset", "distributions")]
+
+        Chains are pruned at slots annotated ``openapi.nested: "false"``
+        and skip excluded classes / slots so the index reflects the active
+        profile. Cycles are detected (the recursion tracks visited classes
+        on the current path) so a graph with ``A.bs: list[B]`` and
+        ``B.as: list[A]`` doesn't blow up. Only ancestors that are
+        themselves resource classes contribute — non-resource intermediates
+        have no addressable URL segment to fold in.
+
+        Result is a dict keyed by leaf class name. A class with no parents
+        in the relationship graph is absent from the dict.
+        """
+        sv = self.schemaview
+        resource_classes = set(self._get_resource_classes())
+
+        direct_parents: dict[str, list[tuple[str, str]]] = {}
+        for parent_name in sv.all_classes():
+            if parent_name in self._excluded_classes:
+                continue
+            if parent_name not in resource_classes:
+                continue
+            parent_cls = sv.get_class(parent_name)
+            for slot in sv.class_induced_slots(parent_name):
+                if not slot.multivalued:
+                    continue
+                if self._is_slot_excluded(slot):
+                    continue
+                target = slot.range
+                if not target or sv.get_class(target) is None:
+                    continue
+                if target == parent_name:
+                    continue  # self-loop, no canonical chain
+                nested_ann = self._get_slot_annotation(parent_cls, slot.name, "openapi.nested")
+                if nested_ann is not None and not _is_truthy(nested_ann):
+                    continue
+                direct_parents.setdefault(target, []).append((parent_name, slot.name))
+
+        index: dict[str, list[list[tuple[str, str]]]] = {}
+
+        def walk(leaf: str, on_path: tuple[str, ...]) -> list[list[tuple[str, str]]]:
+            if leaf in index:
+                # Memoised — but we still need to filter chains that would
+                # introduce a cycle from the caller's perspective.
+                return [c for c in index[leaf] if not any(p in on_path for p, _ in c)]
+            chains: list[list[tuple[str, str]]] = []
+            for parent_name, slot_name in direct_parents.get(leaf, []):
+                if parent_name in on_path:
+                    continue  # would close a cycle
+                upper = walk(parent_name, on_path + (parent_name,))
+                if not upper:
+                    chains.append([(parent_name, slot_name)])
+                else:
+                    for u in upper:
+                        chains.append(u + [(parent_name, slot_name)])
+            index[leaf] = chains
+            return chains
+
+        for cls_name in list(direct_parents.keys()):
+            walk(cls_name, ())
+        # Drop classes with no chains so callers can skip via membership check.
+        return {k: v for k, v in index.items() if v}
+
+    @staticmethod
+    def _suffix_operation_ids(paths: dict[str, PathItem], suffix: str) -> None:
+        """Append ``suffix`` to every ``operationId`` in a paths dict.
+
+        Deep nested paths reuse the flat operation builders, which means
+        their ``operationId`` collides with the same class's flat-item
+        operations and with its own single-level nested walk. OpenAPI
+        requires globally unique operation IDs, so we patch the IDs in
+        place after the deep paths are built.
+        """
+        methods = ("get", "put", "post", "delete", "patch", "options", "head", "trace")
+        for path_item in paths.values():
+            for method in methods:
+                op = getattr(path_item, method, None)
+                if op is None:
+                    continue
+                existing = getattr(op, "operationId", None)
+                if existing:
+                    op.operationId = existing + suffix
+
+    @staticmethod
+    def _parent_path_segments(annotation: str) -> list[tuple[str | None, str]]:
+        """Parse an ``openapi.parent_path`` annotation into per-hop matchers.
+
+        Each dot-separated segment is either ``slot_name`` (match the slot
+        at that hop, parent class implied) or ``ClassName.slot_name``
+        (match both the parent class and the slot — used to disambiguate
+        when multiple parents share a slot name).
+
+        Returns a list of ``(class_name_or_none, slot_name)`` tuples,
+        one per hop.
+        """
+        segments: list[tuple[str | None, str]] = []
+        for raw in annotation.strip().split("/"):
+            raw = raw.strip()
+            if not raw:
+                continue
+            if "." in raw:
+                cls_name, slot_name = raw.split(".", 1)
+                segments.append((cls_name.strip() or None, slot_name.strip()))
+            else:
+                segments.append((None, raw))
+        return segments
+
+    def _canonical_parent_chain(self, class_name: str) -> list[tuple[str, str]]:
+        """Pick the canonical chain for ``class_name``.
+
+        * 0 chains → returns ``[]`` (the class is a root, no deep paths).
+        * 1 chain → returns it.
+        * >1 chains → reads ``openapi.parent_path`` on the leaf and matches.
+
+        Annotation syntax: ``/``-separated hops, each hop ``slot_name`` or
+        ``ClassName.slot_name``. Examples::
+
+            openapi.parent_path: catalogs.datasets        # two hops, slot-only (unambiguous)
+            openapi.parent_path: Folder.tags              # one hop, class-qualified
+            openapi.parent_path: Org.catalogs/Catalog.datasets  # two hops, fully qualified
+
+        Raises with the candidate list when the annotation is missing on
+        an ambiguous leaf or doesn't match any chain.
+        """
+        chains = self._parent_chains_index.get(class_name, [])
+        if not chains:
+            return []
+        if len(chains) == 1:
+            return chains[0]
+
+        cls = self.schemaview.get_class(class_name)
+        annotated = self._class_annotation(cls, "openapi.parent_path") if cls else None
+        # Build human-readable candidate strings: prefer slot-only when it's
+        # unique at every hop, fall back to class-qualified otherwise.
+        candidates_qualified = ["/".join(f"{p}.{s}" for p, s in chain) for chain in chains]
+        if annotated:
+            wanted = self._parent_path_segments(annotated)
+            for chain in chains:
+                if len(chain) != len(wanted):
+                    continue
+                if all(
+                    (cls_q is None or cls_q == p) and slot_q == s
+                    for (cls_q, slot_q), (p, s) in zip(wanted, chain)
+                ):
+                    return chain
+            raise ValueError(
+                f"Class {class_name!r} declares "
+                f"`openapi.parent_path: {annotated!r}` but no matching chain "
+                f"exists. Candidates: {candidates_qualified}."
+            )
+        raise ValueError(
+            f"Class {class_name!r} is reachable via multiple parent chains. "
+            f"Pick one with the `openapi.parent_path` class annotation, "
+            f"e.g. `openapi.parent_path: {candidates_qualified[0]!r}`. "
+            f"Candidates: {candidates_qualified}."
+        )
+
+    def _build_chain_path_params(self, chain: list[tuple[str, str]]) -> tuple[str, list[Parameter]]:
+        """Render a chain as a URL prefix and the matching path-parameter list.
+
+        Given ``[(Org, "catalogs"), (Catalog, "datasets")]`` produces::
+
+            ("orgs/{orgId}/catalogs/{catalogId}/datasets",
+             [<Parameter orgId>, <Parameter catalogId>])
+
+        Only the first hop carries the root class's path segment; subsequent
+        hops skip it because the previous iteration's slot name already
+        identifies the next collection (the slot ``Org.catalogs`` *is* the
+        URL noun for catalogs reached through that org). Each parent's
+        identifier variable uses ``_class_path_id_name`` so ``openapi.path_id``
+        overrides flow through.
+        """
+        if not chain:
+            return "", []
+        sv = self.schemaview
+        prefix_parts: list[str] = []
+        params: list[Parameter] = []
+        for i, (parent_name, slot_name) in enumerate(chain):
+            id_slot = self._identifier_slot(parent_name)
+            if id_slot is None:
+                # Should not happen for a class that's a resource, but guard
+                # so a misconfigured schema fails loudly rather than silently.
+                raise ValueError(
+                    f"Parent class {parent_name!r} in a deep nested chain "
+                    "has no identifier slot — can't synthesise its path "
+                    "parameter."
+                )
+            param_name = self._class_path_id_name(parent_name)
+            if i == 0:
+                parent_cls = sv.get_class(parent_name)
+                parent_segment = self._get_path_segment(parent_cls)
+                prefix_parts.append(f"{parent_segment}/{{{param_name}}}/{slot_name}")
+            else:
+                prefix_parts.append(f"{{{param_name}}}/{slot_name}")
+            params.append(
+                Parameter(
+                    name=param_name,
+                    param_in=ParameterLocation.PATH,
+                    required=True,
+                    param_schema=self._slot_to_schema(id_slot),
+                )
+            )
+        return "/".join(prefix_parts), params
+
+    def _emit_chained_deep_path(
+        self,
+        cls: ClassDefinition,
+        class_name: str,
+        chain: list[tuple[str, str]],
+        item_suffix: str,
+        path_params: list[Parameter],
+        operations: list[str],
+    ) -> dict[str, PathItem]:
+        """Emit the auto-derived deep item path for a class with a parent chain.
+
+        The deep URL is the chain prefix (already ending in the slot that
+        leads to the leaf class) plus the leaf's own ``item_suffix`` —
+        e.g. ``/catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}``.
+        Operation IDs are suffixed ``_via_<chain>`` so they remain globally
+        unique alongside the leaf's flat-path operations.
+        """
+        chain_prefix, chain_params = self._build_chain_path_params(chain)
+        deep_item_path = f"/{chain_prefix}/{item_suffix}"
+        deep_item_params = list(chain_params) + path_params
+        deep_item = PathItem(parameters=deep_item_params)
+        if "read" in operations:
+            deep_item.get = self._make_read_operation(cls, class_name)
+        if "update" in operations:
+            deep_item.put = self._make_update_operation(cls, class_name)
+        if "patch" in operations:
+            deep_item.patch = self._make_patch_operation(cls, class_name)
+        if "delete" in operations:
+            deep_item.delete = self._make_delete_operation(cls, class_name)
+        chain_suffix = "_via_" + "_".join(_to_snake_case(p) for p, _ in chain)
+        deep_paths = {deep_item_path: deep_item}
+        self._suffix_operation_ids(deep_paths, chain_suffix)
+        return deep_paths
+
+    _PATH_TEMPLATE_PLACEHOLDER_RE: ClassVar[re.Pattern[str]] = re.compile(r"\{([^{}]+)\}")
+
+    @staticmethod
+    def _parse_path_param_sources(class_name: str, raw: str) -> dict[str, tuple[str, str]]:
+        """Parse ``openapi.path_param_sources`` into ``{name: (Class, slot)}``.
+
+        Format: comma-separated ``name:Class.slot`` entries. Whitespace
+        around any token is trimmed. Empty / missing raw produces ``{}``.
+        Malformed entries raise with the offending entry quoted.
+        """
+        sources: dict[str, tuple[str, str]] = {}
+        for raw_entry in _parse_csv(raw):
+            if ":" not in raw_entry:
+                raise ValueError(
+                    f"Class {class_name!r} has malformed "
+                    f"`openapi.path_param_sources` entry {raw_entry!r}: "
+                    "expected `name:Class.slot`."
+                )
+            name, source = (s.strip() for s in raw_entry.split(":", 1))
+            if "." not in source:
+                raise ValueError(
+                    f"Class {class_name!r} has malformed source "
+                    f"{source!r} for parameter {name!r}: expected "
+                    "`Class.slot`."
+                )
+            src_class, src_slot = (s.strip() for s in source.split(".", 1))
+            if not name or not src_class or not src_slot:
+                raise ValueError(
+                    f"Class {class_name!r} has empty token in "
+                    f"`openapi.path_param_sources` entry {raw_entry!r}."
+                )
+            if name in sources:
+                raise ValueError(
+                    f"Class {class_name!r} declares duplicate path "
+                    f"parameter {name!r} in `openapi.path_param_sources`."
+                )
+            sources[name] = (src_class, src_slot)
+        return sources
+
+    def _emit_templated_deep_path(
+        self,
+        cls: ClassDefinition,
+        class_name: str,
+        template: str,
+        operations: list[str],
+    ) -> dict[str, PathItem]:
+        """Emit a deep item path from a literal `openapi.path_template`.
+
+        The user-supplied template replaces the auto-derived chain. Each
+        ``{name}`` placeholder must have a matching ``name:Class.slot``
+        entry in ``openapi.path_param_sources``; the slot's range drives
+        the parameter schema (so typed parameters and RDF metadata still
+        flow). Validates: placeholder set matches source-key set,
+        every ``Class.slot`` resolves, no duplicates.
+        """
+        sv = self.schemaview
+        sources_raw = self._class_annotation(cls, "openapi.path_param_sources") or ""
+        sources = self._parse_path_param_sources(class_name, sources_raw)
+        placeholders = list(self._PATH_TEMPLATE_PLACEHOLDER_RE.findall(template))
+        unique_placeholders = list(dict.fromkeys(placeholders))  # preserve order, dedupe
+
+        if len(unique_placeholders) != len(placeholders):
+            duplicates = sorted({p for p in placeholders if placeholders.count(p) > 1})
+            raise ValueError(
+                f"Class {class_name!r} `openapi.path_template` "
+                f"{template!r} repeats placeholder(s) {duplicates}: "
+                "OpenAPI requires unique parameter names per path."
+            )
+
+        missing_sources = set(unique_placeholders) - set(sources)
+        extra_sources = set(sources) - set(unique_placeholders)
+        if missing_sources or extra_sources:
+            raise ValueError(
+                f"Class {class_name!r} `openapi.path_template` placeholders "
+                f"don't match `openapi.path_param_sources`. "
+                f"Template placeholders: {sorted(unique_placeholders)!r}. "
+                f"Source keys: {sorted(sources)!r}. "
+                f"Missing sources: {sorted(missing_sources)!r}. "
+                f"Extra sources (not in template): {sorted(extra_sources)!r}."
+            )
+
+        params: list[Parameter] = []
+        for name in unique_placeholders:
+            src_class, src_slot = sources[name]
+            if sv.get_class(src_class) is None:
+                raise ValueError(
+                    f"Class {class_name!r} `openapi.path_param_sources` "
+                    f"refers to unknown class {src_class!r} for "
+                    f"parameter {name!r}."
+                )
+            slot = next(
+                (s for s in sv.class_induced_slots(src_class) if s.name == src_slot),
+                None,
+            )
+            if slot is None:
+                raise ValueError(
+                    f"Class {class_name!r} `openapi.path_param_sources` "
+                    f"refers to unknown slot {src_class}.{src_slot!r} for "
+                    f"parameter {name!r}."
+                )
+            params.append(
+                Parameter(
+                    name=name,
+                    param_in=ParameterLocation.PATH,
+                    required=True,
+                    param_schema=self._slot_to_schema(slot),
+                )
+            )
+
+        deep_item = PathItem(parameters=params)
+        if "read" in operations:
+            deep_item.get = self._make_read_operation(cls, class_name)
+        if "update" in operations:
+            deep_item.put = self._make_update_operation(cls, class_name)
+        if "patch" in operations:
+            deep_item.patch = self._make_patch_operation(cls, class_name)
+        if "delete" in operations:
+            deep_item.delete = self._make_delete_operation(cls, class_name)
+
+        deep_paths = {template: deep_item}
+        self._suffix_operation_ids(deep_paths, "_via_template")
+        return deep_paths
 
     def _add_composition_paths(
         self,

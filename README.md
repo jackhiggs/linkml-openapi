@@ -556,6 +556,174 @@ signal when one side wants the path without paying for a real slot.
 generator never guesses that `Article.reviewers` implies a path on
 `Reviewer`. That's a parallel-vocabulary trap.
 
+#### Deep nested item paths via parent chains
+
+When a resource class is reachable via one or more ancestor resource
+classes (a chain of multivalued relationship slots), the generator
+emits a deep item path that includes every ancestor's identifier as a
+URL parameter. This is the canonical shape DCAT3, FHIR, and most
+catalog-style APIs use:
+
+```
+/catalogs/{catalogId}/datasets/{datasetId}
+/catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}
+```
+
+Each ancestor's identifier shows up as a path parameter — **not** as a
+field on the leaf component schema. The leaf's URL surface comes from
+the relationship graph, not from any foreign-key slot.
+
+##### `openapi.path_id`
+
+Renames the URL parameter for a class everywhere it appears in a URL —
+its own flat item path, single-level nested item paths pointing to it,
+and ancestor segments in any deep chain that passes through it. Default
+is `<class_snake>_id` (e.g. `{catalog_id}`); set the annotation to
+override.
+
+```yaml
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_id: catalogId         # → /catalogs/{catalogId}
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      datasets:
+        range: Dataset
+        multivalued: true
+
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_id: datasetId
+```
+
+produces:
+
+```
+/catalogs/{catalogId}
+/catalogs/{catalogId}/datasets/{datasetId}
+```
+
+##### `openapi.parent_path`
+
+Picks the canonical chain when a leaf class is reachable via multiple
+ancestor chains. Format: `/`-separated hops, each hop either
+`slot_name` (when unambiguous) or `ClassName.slot_name` (qualifier
+required to disambiguate same-named slots on different parents).
+
+```yaml
+classes:
+  Folder:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      tags:
+        range: Tag
+        multivalued: true
+
+  Bookmark:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      tags:
+        range: Tag
+        multivalued: true
+
+  Tag:
+    annotations:
+      openapi.resource: "true"
+      openapi.parent_path: Folder.tags     # /folders/{id}/tags/{id} only
+```
+
+Without the annotation, the generator fails at generation time with
+both candidate chains listed (`Folder.tags`, `Bookmark.tags`) so the
+schema author can pick deliberately.
+
+##### `openapi.nested_only`
+
+Drops the flat `/<class>` collection and `/<class>/{id}` item paths,
+leaving the deep nested URL as the only canonical surface. Useful for
+sub-resources that don't make sense outside their parent context — a
+`Distribution` is meaningless without the `Dataset` it belongs to.
+
+```yaml
+classes:
+  Distribution:
+    annotations:
+      openapi.resource: "true"
+      openapi.nested_only: "true"
+```
+
+After this, `/distributions` and `/distributions/{id}` no longer emit;
+the only canonical addresses are
+`/catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}` and
+its single-level forms.
+
+##### `openapi.flat_only`
+
+Converse of `openapi.nested_only`. Drops the deep nested item path
+emission for the class while keeping the flat collection + flat item
+paths. Single-level nested paths from a parent still emit (those are
+about this class as a *parent*, not as a leaf).
+
+```yaml
+classes:
+  Tag:
+    annotations:
+      openapi.resource: "true"
+      openapi.flat_only: "true"        # /tags + /tags/{id}; no deep chain
+```
+
+Setting both `openapi.nested_only` and `openapi.flat_only` on the same
+class is a generation error.
+
+##### `openapi.path_template` — Layer 4 escape hatch
+
+When the URL is dictated by an external contract that the relationship
+graph can't express (literal segments, compound keys, version prefixes),
+hand-author the template and tell the generator which class.identifier
+slot backs each placeholder:
+
+```yaml
+classes:
+  ResourceVersion:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+      openapi.path_param_sources: "cId:Catalog.id,doi:ResourceVersion.doi,version:ResourceVersion.version"
+      openapi.nested_only: "true"      # often paired: only the templated URL is canonical
+```
+
+Each `{name}` in the template must have a matching `name:Class.slot`
+entry in `openapi.path_param_sources`. The slot's range drives the
+parameter schema, so typed parameters and any RDF metadata still flow
+through. Validation:
+
+* Placeholder set must equal source-key set; mismatches raise with both
+  lists named.
+* Each `Class.slot` source must resolve; unknown class or slot raises.
+* When `openapi.path_template` is set, `openapi.parent_path` is ignored
+  (template wins).
+
+Operation IDs on templated paths are suffixed `_via_template` to stay
+globally unique alongside any flat-path operations the class still
+emits.
+
+##### Operation IDs on deep paths
+
+Deep paths reuse the leaf's flat-path CRUD builders, so their
+`operationId` collides with the flat versions by default. The
+generator suffixes deep operation IDs with `_via_<chain>` (snake-case
+ancestor classes) so the spec stays globally unique:
+
+```
+get_distribution               # /distributions/{distId}
+get_distribution_via_catalog_dataset
+                               # /catalogs/.../datasets/.../distributions/{distId}
+```
+
 ### Slot-level annotations
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.
@@ -762,6 +930,12 @@ endpoints regardless of any of these annotations.
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
 | `openapi.media_types` | class | comma-separated list | `application/json` |
 | `openapi.auto_query_params` | schema or class | `"true"` / `"false"` | `"true"` (auto-infer scalar slots) |
+| `openapi.path_id` | class | identifier name | `<class_snake>_id` (e.g. `catalog_id`) |
+| `openapi.parent_path` | class | `Class.slot/Class.slot/...` | Auto-derive when chain is unambiguous |
+| `openapi.nested_only` | class | `"true"` / `"false"` | Both flat and deep paths emit |
+| `openapi.flat_only` | class | `"true"` / `"false"` | Both flat and deep paths emit (mutually exclusive with `nested_only`) |
+| `openapi.path_template` | class | URL template with `{name}` placeholders | Auto-derived chain |
+| `openapi.path_param_sources` | class | comma-separated `name:Class.slot` entries | (required when `path_template` is set) |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` / token list / `"false"` | Auto-inferred from slot type |
 | `openapi.format` | slot | format string | derived from slot range |
