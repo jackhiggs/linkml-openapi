@@ -6,6 +6,51 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [0.6.1] — 2026-04-28
+
+Internal cleanup release driven by a code-reuse / quality / efficiency
+review across the v0.4.0..v0.6.0 changeset. No behaviour change —
+generated specs are byte-identical against every committed example —
+but a few internal corners are cleaner and one latent correctness
+issue is fixed.
+
+### Fixed
+
+- **Parent-chain cache was order-dependent.** ``_collect_parent_chains``
+  memoised chains under one walk's ``on_path`` and reused them under
+  another's, so a class reachable through two ancestor sub-graphs could
+  show different chains depending on which leaf the top-level loop
+  reached first. The cache is dropped — the relationship-graph walk is
+  cheap on resource classes and now deterministic.
+
+### Changed
+
+- **Hot-path performance.** A per-build cache of induced slots indexed
+  by ``(class_name, slot_name)`` collapses the previous O(slots²)
+  lookups in ``_get_slot_annotation``, ``_render_slot_segment``, the
+  nested-path emitters, and the chain builder to O(1). The
+  ``_get_resource_classes`` result is now cached too — both
+  ``_collect_parent_chains`` and ``_build_openapi`` need it.
+- **DRY internals.** The triplicated ``openapi.path_id`` rename logic
+  (flat item path, ``_make_nested_paths``, deep-chain emitter) is
+  consolidated into a single ``_resolve_item_path_vars`` helper. The
+  five-line CRUD-attach block (``if "read" in operations: …`` repeated
+  across three emit-methods) is a single ``_attach_item_operations``
+  call. The 15+ test methods that hand-rolled the temp-file +
+  generate + cleanup boilerplate now use module-level
+  ``_generate_from_string`` / ``_generate_from_string_raises``
+  helpers.
+- **Constants over magic strings.** Module-level ``PATH_STYLE_SNAKE``
+  / ``PATH_STYLE_KEBAB`` / ``SUPPORTED_PATH_STYLES`` and
+  ``OP_LIST`` / ``OP_CREATE`` / ``OP_READ`` / ``OP_UPDATE`` /
+  ``OP_PATCH`` / ``OP_DELETE`` (plus ``DEFAULT_OPERATIONS``,
+  ``ITEM_OPERATIONS``) replace the repeated string literals. The CLI
+  ``--path-style`` choices are derived from the same constant so the
+  list can't drift.
+- Stale ``# (issue #N)`` markers removed from in-source section
+  dividers — issue references belong in commit messages and the
+  changelog, not in code that has to stay current.
+
 ## [0.6.0] — 2026-04-28
 
 URL-shape and inheritance-correctness release. The new `openapi.path_style`
@@ -274,6 +319,7 @@ feature; new CLI flags are summarised at the end.
 
 Initial public release.
 
+[0.6.1]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.6.1
 [0.6.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.6.0
 [0.5.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.5.0
 [0.4.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.4.0
