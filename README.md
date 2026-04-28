@@ -163,6 +163,37 @@ a clear error.
 To opt out entirely (today's body-less responses), pass
 `--no-error-schema` on the CLI or `error_schema=False` to the Python API.
 
+#### `openapi.path_style`
+
+URL path-segment convention for the whole spec. Default `snake_case`
+(byte-identical to today). Set to `kebab-case` to render every
+auto-derived class- and slot-driven URL segment with `-` instead of
+`_` — the canonical shape for most public REST APIs.
+
+```yaml
+annotations:
+  openapi.path_style: kebab-case
+```
+
+Applies to:
+
+* Auto-derived class path segments (`DataService` → `data-services`)
+* Slot-driven nested segments (`/catalogs/{id}/data-services`)
+* Chain-prefix slot segments inside deep paths
+  (`/orgs/{orgId}/catalogs/{catalogId}/data-services/{distId}`)
+
+Does **not** apply to:
+
+* Slot identifiers in the OpenAPI body (JSON property keys stay snake)
+* Operation IDs, tags
+* `x-rdf-property` URIs
+* `openapi.path` overrides on a class (taken verbatim)
+* `openapi.path_segment` overrides on a slot (taken verbatim)
+* `openapi.path_template` URLs (taken verbatim)
+
+The Python API and CLI both expose a `path_style` / `--path-style`
+override that wins over the schema annotation.
+
 ### Class-level annotations
 
 Annotations are placed in the `annotations` block of a class definition.
@@ -765,6 +796,27 @@ schema, not the array itself (which has no `format` in OpenAPI).
 The annotation accepts any string; no allow-list is enforced, so vendor
 formats pass through unchanged.
 
+#### `openapi.path_segment`
+
+Per-slot override of the rendered URL segment. Taken verbatim — the
+schema-level `openapi.path_style` doesn't touch a slot that already
+declares its segment explicitly. Useful for literal acronyms, dotted
+segments, or one-off divergences from the global convention.
+
+```yaml
+classes:
+  Hub:
+    slot_usage:
+      web_resources:
+        annotations:
+          openapi.path_segment: "web-resources"
+```
+
+emits `/hubs/{id}/web-resources` while the slot identifier in the
+component schema, operation IDs, query parameters, and
+`x-rdf-property` extensions all keep using `web_resources`. Pair it
+with `openapi.path` on a class for fully-controlled URL shapes.
+
 #### `openapi.path_variable`
 
 Marks a slot as a path variable in the item endpoint URL.
@@ -929,6 +981,7 @@ endpoints regardless of any of these annotations.
 | `openapi.path` | class | path segment string | Auto-pluralized snake_case of class name |
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
 | `openapi.media_types` | class | comma-separated list | `application/json` |
+| `openapi.path_style` | schema | `snake_case` / `kebab-case` | `snake_case` |
 | `openapi.auto_query_params` | schema or class | `"true"` / `"false"` | `"true"` (auto-infer scalar slots) |
 | `openapi.path_id` | class | identifier name | `<class_snake>_id` (e.g. `catalog_id`) |
 | `openapi.parent_path` | class | `Class.slot/Class.slot/...` | Auto-derive when chain is unambiguous |
@@ -937,6 +990,7 @@ endpoints regardless of any of these annotations.
 | `openapi.path_template` | class | URL template with `{name}` placeholders | Auto-derived chain |
 | `openapi.path_param_sources` | class | comma-separated `name:Class.slot` entries | (required when `path_template` is set) |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
+| `openapi.path_segment` | slot (via `slot_usage`) | URL segment string | Slot name with active path-style applied |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` / token list / `"false"` | Auto-inferred from slot type |
 | `openapi.format` | slot | format string | derived from slot range |
 

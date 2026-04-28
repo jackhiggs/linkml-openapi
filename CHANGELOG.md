@@ -6,6 +6,32 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## Unreleased
+
+### Added
+
+- **Kebab-case URL paths**
+  ([#38](https://github.com/jackhiggs/linkml-openapi/issues/38)).
+  LinkML slot names must be valid identifiers (snake_case), but most
+  REST APIs render URL segments in kebab-case. Two new annotations
+  bridge the gap without changing slot identifiers in the OpenAPI body:
+
+  - **Schema-level / CLI** ``openapi.path_style: "kebab-case"`` (or
+    ``--path-style kebab-case``) flips the convention for every
+    auto-derived URL segment in the spec — both class- and
+    slot-driven, including chain-prefix segments inside deep paths.
+    Default ``"snake_case"``.
+  - **Slot-level** ``openapi.path_segment: "<segment>"`` overrides the
+    rendered URL segment for one slot, taken verbatim regardless of
+    the active style. Useful for literal segments like ``data.services``
+    or legacy URL contracts.
+
+  Slot identifiers in the OpenAPI body, operation IDs, tags, JSON
+  property keys, ``x-rdf-property`` URIs, and path-template literals
+  are unaffected — only URL path segments change. Default behaviour
+  unchanged: schemas without the new annotations regenerate
+  byte-identically.
+
 ## [0.5.0] — 2026-04-28
 
 URL-shape and query-surface release: lets a single LinkML schema express

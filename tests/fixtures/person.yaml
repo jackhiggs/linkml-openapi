@@ -404,6 +404,36 @@ classes:
       twelve:
         range: integer
 
+  # --- Per-slot URL segment override (issue #38) ---
+  # `web_resources` is a snake_case slot identifier (LinkML grammar), but the
+  # public URL renders the segment as `web-resources` via the slot-level
+  # `openapi.path_segment` annotation. The body schema, operation IDs, and
+  # tags continue to use the underscore form.
+  Hub:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      web_resources:
+        range: WebResource
+        multivalued: true
+    slot_usage:
+      web_resources:
+        annotations:
+          openapi.path_segment: "web-resources"
+
+  WebResource:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+
   RegularItem:
     description: A class that keeps default auto-inference but opts out of one slot.
     annotations:
