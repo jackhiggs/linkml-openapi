@@ -1711,6 +1711,114 @@ classes:
         assert "web_resources" in spec["components"]["schemas"]["Hub"]["properties"]
 
 
+class TestSlotAnnotationInheritance:
+    """Coverage for issue #40 — slot annotations from parent slot_usage propagate via is_a."""
+
+    def test_inherited_nested_suppression_reaches_subclass(self):
+        """`openapi.nested: "false"` on a parent slot_usage propagates to subclasses."""
+        spec = _generate()
+        # FooResource and BarResource both inherit `classified_by` and the
+        # `openapi.nested: "false"` suppression from BaseResource.slot_usage.
+        # Neither subclass should produce a nested path for that slot.
+        assert "/foo_resources/{id}/classified_by" not in spec["paths"]
+        assert "/bar_resources/{id}/classified_by" not in spec["paths"]
+        # Sanity: the two subclasses themselves are emitted.
+        assert "/foo_resources/{id}" in spec["paths"]
+        assert "/bar_resources/{id}" in spec["paths"]
+
+    def test_subclass_can_override_inherited_annotation(self):
+        """Direct slot_usage on the subclass wins over the inherited value."""
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/override
+name: ov
+default_range: string
+classes:
+  Tag:
+    attributes:
+      id: { identifier: true, required: true }
+  Parent:
+    abstract: true
+    attributes:
+      id: { identifier: true, required: true }
+      tags:
+        range: Tag
+        multivalued: true
+    slot_usage:
+      tags:
+        annotations:
+          openapi.nested: "false"
+  Child:
+    is_a: Parent
+    annotations: { openapi.resource: "true" }
+    slot_usage:
+      tags:
+        annotations:
+          openapi.nested: "true"
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            spec = yaml.safe_load(OpenAPIGenerator(tmp).serialize(format="yaml"))
+            # Child overrides the inherited "false" with "true" → nested path emits.
+            nested = [p for p in spec["paths"] if p.startswith("/childs/{id}/tags")]
+            paths_dump = sorted(spec["paths"])
+            assert nested, (
+                f"expected child override to re-enable nested emission; got: {paths_dump}"
+            )
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_inherited_path_variable_annotation(self):
+        """Other openapi.* slot annotations propagate the same way (path_variable)."""
+        import tempfile
+        from pathlib import Path
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/pv
+name: pv
+default_range: string
+classes:
+  Parent:
+    abstract: true
+    attributes:
+      uri:
+        identifier: true
+        range: uri
+        required: true
+    slot_usage:
+      uri:
+        annotations:
+          openapi.path_variable: slug
+  Child:
+    is_a: Parent
+    annotations: { openapi.resource: "true" }
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            spec = yaml.safe_load(OpenAPIGenerator(tmp).serialize(format="yaml"))
+            # `slug` mode emits `string` regardless of the slot's `uri` range —
+            # confirm the inherited annotation reached the subclass.
+            params = spec["paths"]["/childs/{uri}"]["parameters"]
+            uri_param = next(p for p in params if p["name"] == "uri")
+            assert uri_param["schema"]["type"] == "string"
+            assert "format" not in uri_param["schema"], (
+                "slug mode should drop format=uri; if format is present "
+                "the slot_usage annotation didn't propagate"
+            )
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestDiscriminator:
     """Coverage for issue #20 — discriminator + polymorphism."""
 

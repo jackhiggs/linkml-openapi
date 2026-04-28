@@ -657,8 +657,20 @@ class OpenAPIGenerator(Generator):
         ]
 
     def _get_slot_annotation(self, cls: ClassDefinition, slot_name: str, tag: str) -> str | None:
-        """Read a slot annotation, checking class slot_usage first, then the slot itself."""
-        # Check slot_usage on the class
+        """Read a slot annotation, walking the same inheritance chain LinkML does.
+
+        Resolution order (most specific wins):
+
+        1. The class's direct ``slot_usage`` (fast path; same as today).
+        2. The induced slot's annotations — this is where ``linkml-runtime``
+           deposits the merged result of ``slot_usage`` from every ``is_a``
+           ancestor, so a parent class's ``openapi.nested: "false"`` (and
+           any other ``openapi.*`` annotation) reaches its subclasses
+           automatically. Without this step, an annotation declared on a
+           parent in slot_usage would silently fail to apply to children.
+        3. The top-level slot definition (global default; same as today).
+        """
+        # 1. Direct slot_usage on the class.
         if cls.slot_usage:
             for su in (
                 cls.slot_usage.values() if isinstance(cls.slot_usage, dict) else cls.slot_usage
@@ -672,8 +684,26 @@ class OpenAPIGenerator(Generator):
                         ):
                             if hasattr(ann, "tag") and ann.tag == tag:
                                 return str(ann.value)
-        # Check slot's own annotations via schemaview
         sv = self.schemaview
+        # 2. Induced slot annotations — picks up slot_usage inherited from
+        # ancestor classes through the is_a chain.
+        for induced in sv.class_induced_slots(cls.name):
+            if induced.name != slot_name:
+                continue
+            annotations = getattr(induced, "annotations", None)
+            if annotations:
+                # `class_induced_slots` returns SlotDefinition objects whose
+                # `annotations` is a JsonObj — same dict-like access as a
+                # regular Annotations container. Iterate keys defensively.
+                keys = (
+                    list(annotations.keys()) if hasattr(annotations, "keys") else list(annotations)
+                )
+                for key in keys:
+                    ann = annotations[key]
+                    if getattr(ann, "tag", None) == tag:
+                        return str(ann.value)
+            break
+        # 3. Top-level slot definition (global default).
         slot_def = sv.get_slot(slot_name)
         if slot_def and slot_def.annotations:
             for ann in slot_def.annotations.values():

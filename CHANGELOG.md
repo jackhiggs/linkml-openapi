@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Fixed
+
+- **Slot annotations now propagate through `is_a` inheritance**
+  ([#40](https://github.com/jackhiggs/linkml-openapi/issues/40)).
+  ``openapi.nested: "false"`` (and every other ``openapi.*`` slot
+  annotation) declared on a parent class's ``slot_usage`` now reaches
+  every subclass that induces the slot, instead of silently dropping
+  at the inheritance boundary. ``_get_slot_annotation`` consulted only
+  the class's direct ``slot_usage`` and the top-level slot definition;
+  it now also reads the induced slot's annotations, which is where
+  ``linkml-runtime`` deposits the merged ``slot_usage`` from the
+  ``is_a`` chain. Direct slot_usage on the subclass still wins over
+  inherited values (most-specific override semantics, same as LinkML).
+
 ### Added
 
 - **Kebab-case URL paths**
