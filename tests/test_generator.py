@@ -1322,6 +1322,213 @@ classes:
             Path(tmp).unlink(missing_ok=True)
 
 
+class TestPathTemplateAndFlatOnly:
+    """Coverage for issue #36 — Layer 4 escape hatch + `openapi.flat_only`."""
+
+    def test_path_template_emits_literal_url(self):
+        """`openapi.path_template` produces exactly that URL — no auto chain."""
+        spec = _generate()
+        path = "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+        assert path in spec["paths"]
+
+    def test_path_template_replaces_auto_chain(self):
+        """When a template is set, no chain-derived deep path emits for the class."""
+        spec = _generate()
+        # ResourceVersion has nested_only + path_template, so neither the
+        # flat /resource_versions nor any auto-chain path should appear.
+        assert "/resource_versions" not in spec["paths"]
+        assert "/resource_versions/{id}" not in spec["paths"]
+        assert not any(
+            p.endswith("/resources") and p != "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+            for p in spec["paths"]
+        )
+
+    def test_path_template_carries_typed_params_from_sources(self):
+        """Each placeholder gets its parameter schema from the `Class.slot` source."""
+        spec = _generate()
+        path = "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+        params = {p["name"]: p for p in spec["paths"][path].get("parameters", [])}
+        for name in ("cId", "doi", "version"):
+            assert name in params, f"missing {name}"
+            assert params[name]["in"] == "path"
+            assert params[name]["required"] is True
+            # All three sources have range string in the fixture.
+            assert params[name]["schema"]["type"] == "string"
+
+    def test_path_template_operation_ids_use_via_template_suffix(self):
+        """Templated deep ops are suffixed `_via_template` to stay globally unique."""
+        spec = _generate()
+        path = "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+        item = spec["paths"][path]
+        # ResourceVersion has default operations (list/create/read/update/delete);
+        # the deep item gets read/update/delete only.
+        for method in ("get", "put", "delete"):
+            assert method in item
+            assert item[method]["operationId"].endswith("_via_template")
+
+    def test_path_template_placeholder_mismatch_raises(self):
+        """Source keys must exactly match template placeholders."""
+        import tempfile
+        from pathlib import Path
+
+        import pytest
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/bad-template
+name: bt
+default_range: string
+classes:
+  Item:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/v2/items/{a}/{b}"
+      openapi.path_param_sources: "a:Item.id"
+    attributes:
+      id:
+        identifier: true
+        required: true
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="don't match"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_path_template_unknown_source_raises(self):
+        """A `Class.slot` source must resolve."""
+        import tempfile
+        from pathlib import Path
+
+        import pytest
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/bad-source
+name: bs
+default_range: string
+classes:
+  Item:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/items/{x}"
+      openapi.path_param_sources: "x:Nonexistent.id"
+    attributes:
+      id:
+        identifier: true
+        required: true
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="unknown class"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_path_template_malformed_source_entry_raises(self):
+        """Source format is `name:Class.slot`; missing pieces raise."""
+        import tempfile
+        from pathlib import Path
+
+        import pytest
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/malformed
+name: m
+default_range: string
+classes:
+  Item:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/items/{x}"
+      openapi.path_param_sources: "x:no_dot"
+    attributes:
+      id:
+        identifier: true
+        required: true
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="malformed source"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_flat_only_drops_chain_derived_deep_path(self):
+        """`openapi.flat_only` suppresses the deep chain emission for the class."""
+        spec = _generate()
+        # Note2 chain is [(Folder2, notes)]; without flat_only it would
+        # emit /folder2s/{folder2_id}/notes/{id}. With flat_only, that
+        # specific deep emission is dropped.
+        chain_deep = [
+            p for p in spec["paths"] if p.startswith("/folder2s/{") and p.endswith("/notes/{id}")
+        ]
+        assert chain_deep == []
+
+    def test_flat_only_keeps_flat_collection_and_item(self):
+        """`openapi.flat_only` keeps the leaf's own flat surface."""
+        spec = _generate()
+        assert "/note2s" in spec["paths"]
+        assert "/note2s/{id}" in spec["paths"]
+
+    def test_flat_only_does_not_touch_parent_nested_paths(self):
+        """Single-level nested paths from the parent still emit — they're
+        about the parent's slot, not the child's chain."""
+        spec = _generate()
+        # Folder2.notes still produces /folder2s/{id}/notes (collection)
+        # and /folder2s/{id}/notes/{note2_id} (parent-driven nested item).
+        assert "/folder2s/{id}/notes" in spec["paths"]
+        assert "/folder2s/{id}/notes/{note2_id}" in spec["paths"]
+
+    def test_flat_only_and_nested_only_together_raise(self):
+        """Setting both is a generation error — they're mutually exclusive."""
+        import tempfile
+        from pathlib import Path
+
+        import pytest
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        schema_yaml = """
+id: https://example.org/mutex
+name: mu
+default_range: string
+classes:
+  Item:
+    annotations:
+      openapi.resource: "true"
+      openapi.flat_only: "true"
+      openapi.nested_only: "true"
+    attributes:
+      id:
+        identifier: true
+        required: true
+"""
+        with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            with pytest.raises(ValueError, match="mutually exclusive"):
+                gen.serialize(format="yaml")
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+
 class TestDiscriminator:
     """Coverage for issue #20 — discriminator + polymorphism."""
 

@@ -302,6 +302,15 @@ class OpenAPIGenerator(Generator):
             path_segment = self._get_path_segment(cls)
             operations = self._get_operations(cls)
             nested_only = _is_truthy(self._class_annotation(cls, "openapi.nested_only") or False)
+            flat_only = _is_truthy(self._class_annotation(cls, "openapi.flat_only") or False)
+            if nested_only and flat_only:
+                raise ValueError(
+                    f"Class {class_name!r} declares both "
+                    '`openapi.nested_only: "true"` and '
+                    '`openapi.flat_only: "true"`. They are mutually '
+                    "exclusive — pick one. `nested_only` keeps the deep "
+                    "URL only; `flat_only` keeps the flat URL only."
+                )
 
             self._validate_resource_addressability(class_name, path_vars, operations)
 
@@ -366,51 +375,47 @@ class OpenAPIGenerator(Generator):
 
                 paths.update(self._make_nested_paths(class_name, path_segment, path_vars))
 
-                # Deep nested paths: when this class has a canonical parent
-                # chain, also emit the leaf's item path under the chain
-                # prefix and its children under that path. Each ancestor
-                # contributes a path-parameter sourced from its identifier
-                # slot — *not* from any field on this class — so the leaf
-                # component schema stays unchanged.
-                chain = self._canonical_parent_chain(class_name)
-                if chain:
-                    # `chain_prefix` already ends in the slot name that
-                    # leads to the leaf class (e.g.
-                    # ``catalogs/{catalogId}/datasets/{datasetId}/distributions``).
-                    # The deep item URL just appends the leaf's identifier
-                    # variable — no extra ``/<leaf_segment>`` segment, since
-                    # the slot already carries the noun.
-                    #
-                    # We only emit the leaf's *own* deep item path here.
-                    # Deeper children (Distribution under
-                    # /catalogs/.../datasets/.../distributions) are handled
-                    # naturally as those children's own canonical chain —
-                    # so each chain depth gets emitted exactly once,
-                    # without duplicating paths or risking cycles when
-                    # synthetic inverses fold a relationship back through
-                    # the chain.
-                    chain_prefix, chain_params = self._build_chain_path_params(chain)
-                    deep_item_path = f"/{chain_prefix}/{item_suffix}"
-                    deep_item_params = list(chain_params) + path_params
-                    deep_item = PathItem(parameters=deep_item_params)
-                    if "read" in operations:
-                        deep_item.get = self._make_read_operation(cls, class_name)
-                    if "update" in operations:
-                        deep_item.put = self._make_update_operation(cls, class_name)
-                    if "patch" in operations:
-                        deep_item.patch = self._make_patch_operation(cls, class_name)
-                    if "delete" in operations:
-                        deep_item.delete = self._make_delete_operation(cls, class_name)
-
-                    # OpenAPI requires globally unique `operationId` values.
-                    # The deep item's CRUD operations share IDs with the
-                    # leaf's flat item path. Append a chain-derived suffix
-                    # so each deep operation gets a unique, deterministic
-                    # ID without touching the flat-path operations.
-                    chain_suffix = "_via_" + "_".join(_to_snake_case(p) for p, _ in chain)
-                    deep_paths = {deep_item_path: deep_item}
-                    self._suffix_operation_ids(deep_paths, chain_suffix)
-                    paths.update(deep_paths)
+                # Deep nested paths. Three strategies, in priority order:
+                #
+                #   1. `openapi.flat_only: "true"` → skip deep emission
+                #      entirely. Flat collection / flat item already emitted
+                #      above (when `nested_only` is also off, which the
+                #      mutex check guarantees).
+                #
+                #   2. `openapi.path_template` → user-provided URL template
+                #      (Layer 4 escape hatch). Replaces the auto-derived
+                #      chain. Parameters are built from
+                #      `openapi.path_param_sources` so each `{name}` in the
+                #      template binds to a typed `Class.slot` source.
+                #
+                #   3. Auto-derived chain via the relationship graph
+                #      (Layers 1–3). Each ancestor contributes a path
+                #      parameter sourced from its identifier slot — *not*
+                #      from any field on this class — so the leaf
+                #      component schema stays unchanged.
+                #
+                # Deeper children of this class under a deep prefix are
+                # handled naturally as those children's own canonical
+                # chain, so each chain depth gets emitted exactly once.
+                if not flat_only:
+                    template = self._class_annotation(cls, "openapi.path_template")
+                    if template:
+                        deep_paths = self._emit_templated_deep_path(
+                            cls, class_name, template, operations
+                        )
+                        paths.update(deep_paths)
+                    else:
+                        chain = self._canonical_parent_chain(class_name)
+                        if chain:
+                            deep_paths = self._emit_chained_deep_path(
+                                cls,
+                                class_name,
+                                chain,
+                                item_suffix,
+                                path_params,
+                                operations,
+                            )
+                            paths.update(deep_paths)
 
         if self._needs_resource_link and "ResourceLink" not in schemas:
             schemas["ResourceLink"] = self._build_resource_link_schema()
@@ -1821,6 +1826,163 @@ class OpenAPIGenerator(Generator):
                 )
             )
         return "/".join(prefix_parts), params
+
+    def _emit_chained_deep_path(
+        self,
+        cls: ClassDefinition,
+        class_name: str,
+        chain: list[tuple[str, str]],
+        item_suffix: str,
+        path_params: list[Parameter],
+        operations: list[str],
+    ) -> dict[str, PathItem]:
+        """Emit the auto-derived deep item path for a class with a parent chain.
+
+        The deep URL is the chain prefix (already ending in the slot that
+        leads to the leaf class) plus the leaf's own ``item_suffix`` —
+        e.g. ``/catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}``.
+        Operation IDs are suffixed ``_via_<chain>`` so they remain globally
+        unique alongside the leaf's flat-path operations.
+        """
+        chain_prefix, chain_params = self._build_chain_path_params(chain)
+        deep_item_path = f"/{chain_prefix}/{item_suffix}"
+        deep_item_params = list(chain_params) + path_params
+        deep_item = PathItem(parameters=deep_item_params)
+        if "read" in operations:
+            deep_item.get = self._make_read_operation(cls, class_name)
+        if "update" in operations:
+            deep_item.put = self._make_update_operation(cls, class_name)
+        if "patch" in operations:
+            deep_item.patch = self._make_patch_operation(cls, class_name)
+        if "delete" in operations:
+            deep_item.delete = self._make_delete_operation(cls, class_name)
+        chain_suffix = "_via_" + "_".join(_to_snake_case(p) for p, _ in chain)
+        deep_paths = {deep_item_path: deep_item}
+        self._suffix_operation_ids(deep_paths, chain_suffix)
+        return deep_paths
+
+    _PATH_TEMPLATE_PLACEHOLDER_RE: ClassVar[re.Pattern[str]] = re.compile(r"\{([^{}]+)\}")
+
+    @staticmethod
+    def _parse_path_param_sources(class_name: str, raw: str) -> dict[str, tuple[str, str]]:
+        """Parse ``openapi.path_param_sources`` into ``{name: (Class, slot)}``.
+
+        Format: comma-separated ``name:Class.slot`` entries. Whitespace
+        around any token is trimmed. Empty / missing raw produces ``{}``.
+        Malformed entries raise with the offending entry quoted.
+        """
+        sources: dict[str, tuple[str, str]] = {}
+        for raw_entry in _parse_csv(raw):
+            if ":" not in raw_entry:
+                raise ValueError(
+                    f"Class {class_name!r} has malformed "
+                    f"`openapi.path_param_sources` entry {raw_entry!r}: "
+                    "expected `name:Class.slot`."
+                )
+            name, source = (s.strip() for s in raw_entry.split(":", 1))
+            if "." not in source:
+                raise ValueError(
+                    f"Class {class_name!r} has malformed source "
+                    f"{source!r} for parameter {name!r}: expected "
+                    "`Class.slot`."
+                )
+            src_class, src_slot = (s.strip() for s in source.split(".", 1))
+            if not name or not src_class or not src_slot:
+                raise ValueError(
+                    f"Class {class_name!r} has empty token in "
+                    f"`openapi.path_param_sources` entry {raw_entry!r}."
+                )
+            if name in sources:
+                raise ValueError(
+                    f"Class {class_name!r} declares duplicate path "
+                    f"parameter {name!r} in `openapi.path_param_sources`."
+                )
+            sources[name] = (src_class, src_slot)
+        return sources
+
+    def _emit_templated_deep_path(
+        self,
+        cls: ClassDefinition,
+        class_name: str,
+        template: str,
+        operations: list[str],
+    ) -> dict[str, PathItem]:
+        """Emit a deep item path from a literal `openapi.path_template`.
+
+        The user-supplied template replaces the auto-derived chain. Each
+        ``{name}`` placeholder must have a matching ``name:Class.slot``
+        entry in ``openapi.path_param_sources``; the slot's range drives
+        the parameter schema (so typed parameters and RDF metadata still
+        flow). Validates: placeholder set matches source-key set,
+        every ``Class.slot`` resolves, no duplicates.
+        """
+        sv = self.schemaview
+        sources_raw = self._class_annotation(cls, "openapi.path_param_sources") or ""
+        sources = self._parse_path_param_sources(class_name, sources_raw)
+        placeholders = list(self._PATH_TEMPLATE_PLACEHOLDER_RE.findall(template))
+        unique_placeholders = list(dict.fromkeys(placeholders))  # preserve order, dedupe
+
+        if len(unique_placeholders) != len(placeholders):
+            duplicates = sorted({p for p in placeholders if placeholders.count(p) > 1})
+            raise ValueError(
+                f"Class {class_name!r} `openapi.path_template` "
+                f"{template!r} repeats placeholder(s) {duplicates}: "
+                "OpenAPI requires unique parameter names per path."
+            )
+
+        missing_sources = set(unique_placeholders) - set(sources)
+        extra_sources = set(sources) - set(unique_placeholders)
+        if missing_sources or extra_sources:
+            raise ValueError(
+                f"Class {class_name!r} `openapi.path_template` placeholders "
+                f"don't match `openapi.path_param_sources`. "
+                f"Template placeholders: {sorted(unique_placeholders)!r}. "
+                f"Source keys: {sorted(sources)!r}. "
+                f"Missing sources: {sorted(missing_sources)!r}. "
+                f"Extra sources (not in template): {sorted(extra_sources)!r}."
+            )
+
+        params: list[Parameter] = []
+        for name in unique_placeholders:
+            src_class, src_slot = sources[name]
+            if sv.get_class(src_class) is None:
+                raise ValueError(
+                    f"Class {class_name!r} `openapi.path_param_sources` "
+                    f"refers to unknown class {src_class!r} for "
+                    f"parameter {name!r}."
+                )
+            slot = next(
+                (s for s in sv.class_induced_slots(src_class) if s.name == src_slot),
+                None,
+            )
+            if slot is None:
+                raise ValueError(
+                    f"Class {class_name!r} `openapi.path_param_sources` "
+                    f"refers to unknown slot {src_class}.{src_slot!r} for "
+                    f"parameter {name!r}."
+                )
+            params.append(
+                Parameter(
+                    name=name,
+                    param_in=ParameterLocation.PATH,
+                    required=True,
+                    param_schema=self._slot_to_schema(slot),
+                )
+            )
+
+        deep_item = PathItem(parameters=params)
+        if "read" in operations:
+            deep_item.get = self._make_read_operation(cls, class_name)
+        if "update" in operations:
+            deep_item.put = self._make_update_operation(cls, class_name)
+        if "patch" in operations:
+            deep_item.patch = self._make_patch_operation(cls, class_name)
+        if "delete" in operations:
+            deep_item.delete = self._make_delete_operation(cls, class_name)
+
+        deep_paths = {template: deep_item}
+        self._suffix_operation_ids(deep_paths, "_via_template")
+        return deep_paths
 
     def _add_composition_paths(
         self,

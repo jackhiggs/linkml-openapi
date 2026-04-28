@@ -661,6 +661,56 @@ the only canonical addresses are
 `/catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}` and
 its single-level forms.
 
+##### `openapi.flat_only`
+
+Converse of `openapi.nested_only`. Drops the deep nested item path
+emission for the class while keeping the flat collection + flat item
+paths. Single-level nested paths from a parent still emit (those are
+about this class as a *parent*, not as a leaf).
+
+```yaml
+classes:
+  Tag:
+    annotations:
+      openapi.resource: "true"
+      openapi.flat_only: "true"        # /tags + /tags/{id}; no deep chain
+```
+
+Setting both `openapi.nested_only` and `openapi.flat_only` on the same
+class is a generation error.
+
+##### `openapi.path_template` — Layer 4 escape hatch
+
+When the URL is dictated by an external contract that the relationship
+graph can't express (literal segments, compound keys, version prefixes),
+hand-author the template and tell the generator which class.identifier
+slot backs each placeholder:
+
+```yaml
+classes:
+  ResourceVersion:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+      openapi.path_param_sources: "cId:Catalog.id,doi:ResourceVersion.doi,version:ResourceVersion.version"
+      openapi.nested_only: "true"      # often paired: only the templated URL is canonical
+```
+
+Each `{name}` in the template must have a matching `name:Class.slot`
+entry in `openapi.path_param_sources`. The slot's range drives the
+parameter schema, so typed parameters and any RDF metadata still flow
+through. Validation:
+
+* Placeholder set must equal source-key set; mismatches raise with both
+  lists named.
+* Each `Class.slot` source must resolve; unknown class or slot raises.
+* When `openapi.path_template` is set, `openapi.parent_path` is ignored
+  (template wins).
+
+Operation IDs on templated paths are suffixed `_via_template` to stay
+globally unique alongside any flat-path operations the class still
+emits.
+
 ##### Operation IDs on deep paths
 
 Deep paths reuse the leaf's flat-path CRUD builders, so their
@@ -883,6 +933,9 @@ endpoints regardless of any of these annotations.
 | `openapi.path_id` | class | identifier name | `<class_snake>_id` (e.g. `catalog_id`) |
 | `openapi.parent_path` | class | `Class.slot/Class.slot/...` | Auto-derive when chain is unambiguous |
 | `openapi.nested_only` | class | `"true"` / `"false"` | Both flat and deep paths emit |
+| `openapi.flat_only` | class | `"true"` / `"false"` | Both flat and deep paths emit (mutually exclusive with `nested_only`) |
+| `openapi.path_template` | class | URL template with `{name}` placeholders | Auto-derived chain |
+| `openapi.path_param_sources` | class | comma-separated `name:Class.slot` entries | (required when `path_template` is set) |
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` / token list / `"false"` | Auto-inferred from slot type |
 | `openapi.format` | slot | format string | derived from slot range |

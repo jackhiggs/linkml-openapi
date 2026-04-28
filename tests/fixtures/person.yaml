@@ -308,6 +308,60 @@ classes:
         range: Tag2
         multivalued: true
 
+  # --- openapi.flat_only: drops deep emission, keeps flat (issue #36) ---
+  # Note2 has chain [(Folder2, notes)] but `flat_only` suppresses the deep
+  # /folders2/{id}/notes/{id} emission. The single-level nested form from
+  # Folder2 (/folders2/{id}/notes/{note2_id}) still emits — that's about
+  # Folder2 as a parent, not Note2 as a leaf.
+  Folder2:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      notes:
+        range: Note2
+        multivalued: true
+
+  Note2:
+    annotations:
+      openapi.resource: "true"
+      openapi.flat_only: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      body:
+        range: string
+
+  # --- openapi.path_template: literal URL with name:Class.slot sources (issue #36) ---
+  # The auto-derived chain would give /catalogs2/{c2}/.../distributions2/{...},
+  # but ResourceVersion lives at a hand-authored URL with literal segments
+  # ("by-doi") and a compound key (doi + version) the relationship graph
+  # can't express. The template wins; nested_only drops the flat path so
+  # only the templated URL is canonical.
+  ResourceVersion:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: resource_versions
+      openapi.path_template: "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+      openapi.path_param_sources: "cId:Catalog2.id,doi:ResourceVersion.doi,version:ResourceVersion.version"
+      openapi.nested_only: "true"
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      doi:
+        range: string
+        required: true
+      version:
+        range: string
+        required: true
+
   Tag2:
     annotations:
       openapi.resource: "true"

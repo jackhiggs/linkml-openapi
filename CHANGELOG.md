@@ -61,6 +61,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the only canonical surface for a class. Pairs naturally with
   ``openapi.parent_path`` for sub-resources that don't make sense on
   their own.
+- **`openapi.flat_only` class annotation**
+  ([#36](https://github.com/jackhiggs/linkml-openapi/issues/36))
+  — converse of ``openapi.nested_only``. Drops the deep nested item
+  path emission for the class while keeping the flat collection +
+  flat item paths. Single-level nested paths under a parent (which
+  are about this class as a *parent*, not as a leaf) still emit.
+  Setting both ``openapi.nested_only`` and ``openapi.flat_only`` on
+  the same class is a generation error.
+- **`openapi.path_template` + `openapi.path_param_sources`
+  class annotations** (Layer 4 escape hatch,
+  [#36](https://github.com/jackhiggs/linkml-openapi/issues/36)) —
+  hand-authored URL template that replaces the auto-derived deep
+  chain. Used for legacy contracts the relationship graph can't
+  express (literal segments like ``by-doi``, compound keys,
+  version prefixes). Each ``{name}`` placeholder must be paired
+  with a ``name:Class.slot`` source so parameter schemas remain
+  typed. Validates: placeholder set matches source-key set
+  exactly, every ``Class.slot`` resolves, and operation IDs are
+  suffixed ``_via_template`` to stay globally unique.
 
 ## [0.4.0] — 2026-04-27
 
