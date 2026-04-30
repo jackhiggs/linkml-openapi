@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [0.8.1] — 2026-04-29
+
+### Fixed
+
+- **`type: object` is preserved on discriminator parents under
+  `--flatten-inheritance`**
+  ([#50](https://github.com/jackhiggs/linkml-openapi/issues/50)). The
+  flatten branch added in 0.8.0 stripped ``type``, ``properties``,
+  ``required``, and ``additionalProperties`` on discriminator parents
+  on the rationale that subclasses inline the parent's slots under
+  flatten. That rationale was wrong — the parent is still a concrete
+  schema in its own right, and `openapi-generator`'s Spring server
+  library (and other codegens) skip generating a class when
+  ``type: object`` is missing, breaking the controller compile.
+  Polymorphism is orthogonal to whether the parent is a concrete
+  schema; ``type`` / ``properties`` / ``required`` are now preserved
+  alongside ``oneOf`` / ``discriminator`` regardless of the flatten
+  flag. The flag still affects subclass shapes (no ``allOf``
+  back-reference) — its actual job — but doesn't strip the parent's
+  own emission.
+
 ## [0.8.0] — 2026-04-29
 
 Discriminator-completeness release. Polymorphic parent schemas now
@@ -402,6 +423,7 @@ feature; new CLI flags are summarised at the end.
 
 Initial public release.
 
+[0.8.1]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.8.1
 [0.8.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.8.0
 [0.7.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.7.0
 [0.6.1]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.6.1
