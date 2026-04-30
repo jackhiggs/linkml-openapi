@@ -2002,6 +2002,50 @@ classes:
         oneof_targets = {entry["$ref"] for entry in product["oneOf"]}
         assert mapping_targets == oneof_targets
 
+    # --- Non-abstract discriminator parent (issue #52) -----------------
+
+    def test_non_abstract_parent_excluded_from_oneof(self):
+        """A non-abstract discriminator parent must not self-ref in its `oneOf`."""
+        spec = _generate()
+        vehicle = spec["components"]["schemas"]["Vehicle"]
+        oneof_refs = {entry["$ref"] for entry in vehicle["oneOf"]}
+        assert "#/components/schemas/Vehicle" not in oneof_refs
+        assert oneof_refs == {
+            "#/components/schemas/Car",
+            "#/components/schemas/Truck",
+        }
+
+    def test_non_abstract_parent_excluded_from_mapping(self):
+        """The discriminator mapping must not key on the parent class itself."""
+        spec = _generate()
+        vehicle = spec["components"]["schemas"]["Vehicle"]
+        mapping = vehicle["discriminator"]["mapping"]
+        # The parent's class-name default ("Vehicle") shouldn't be a key.
+        assert "Vehicle" not in mapping
+        # Concrete subclasses are present with their explicit type_values.
+        assert mapping == {
+            "car": "#/components/schemas/Car",
+            "truck": "#/components/schemas/Truck",
+        }
+
+    def test_abstract_parent_unchanged(self):
+        """Abstract parents (Animal, Product) still produce the right group."""
+        spec = _generate()
+        # Animal uses `designates_type: true`; Dog/Cat are auto-mapped.
+        animal = spec["components"]["schemas"]["Animal"]
+        animal_targets = set(animal["discriminator"]["mapping"].values())
+        assert animal_targets == {
+            "#/components/schemas/Dog",
+            "#/components/schemas/Cat",
+        }
+        # Product uses `openapi.discriminator` + per-subclass `openapi.type_value`.
+        product = spec["components"]["schemas"]["Product"]
+        product_targets = set(product["discriminator"]["mapping"].values())
+        assert product_targets == {
+            "#/components/schemas/Book",
+            "#/components/schemas/Vinyl",
+        }
+
 
 class TestProfiles:
     """Coverage for issue #17 — multi-view profile filtering."""

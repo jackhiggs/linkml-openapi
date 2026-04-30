@@ -182,6 +182,36 @@ classes:
       artist:
         range: string
 
+  # --- Discriminator on a NON-abstract parent (issue #52) ---
+  # Vehicle is a concrete LinkML class but is the union root of the
+  # discriminator group. The fix at #52 ensures Vehicle is excluded
+  # from its own oneOf / discriminator.mapping — codegens (Spring
+  # server) read parent self-references as cyclic inheritance.
+  Vehicle:
+    annotations:
+      openapi.discriminator: vehicle_type
+    attributes:
+      vin:
+        identifier: true
+        range: string
+        required: true
+
+  Car:
+    is_a: Vehicle
+    annotations:
+      openapi.type_value: car
+    attributes:
+      doors:
+        range: integer
+
+  Truck:
+    is_a: Vehicle
+    annotations:
+      openapi.type_value: truck
+    attributes:
+      payload_tons:
+        range: float
+
   # --- Inverse-direction nested paths (issue #19) ---
   # Article.reviewers declares `inverse: Reviewer.articles` — Reviewer
   # has no explicit `articles` slot, so the generator synthesises the
