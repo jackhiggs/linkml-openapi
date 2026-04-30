@@ -6,7 +6,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
-## Unreleased
+## [0.8.0] — 2026-04-29
+
+Discriminator-completeness release. Polymorphic parent schemas now
+emit a `oneOf` array of subclass `$ref`s alongside the existing
+`discriminator` block — what Swagger UI and codegen tools (TS / Java /
+Spring) actually need to offer polymorphic selection at the call
+site. Schemas without a discriminator regenerate byte-identically.
 
 ### Added
 
@@ -396,6 +402,7 @@ feature; new CLI flags are summarised at the end.
 
 Initial public release.
 
+[0.8.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.8.0
 [0.7.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.7.0
 [0.6.1]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.6.1
 [0.6.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.6.0
