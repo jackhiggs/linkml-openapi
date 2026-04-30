@@ -1275,6 +1275,31 @@ class OpenAPIGenerator(Generator):
         # any $ref that resolves to this schema.
         schema.discriminator = Discriminator(propertyName=field, mapping=mapping)
 
+        # `oneOf` array of $refs to every concrete subclass — what
+        # Swagger UI and most codegens (openapi-generator's TS / Java /
+        # Spring) need to offer polymorphic selection. The discriminator
+        # tells consumers how to *interpret* a payload; oneOf tells them
+        # which subclasses are *possible*.
+        one_of_refs: list[Schema | Reference] = [Reference(ref=ref) for ref in mapping.values()]
+
+        if self.flatten_inheritance:
+            # Subclasses are self-contained under --flatten-inheritance,
+            # so the parent doesn't need to carry its own type /
+            # properties — the `oneOf` is the schema. Drop everything
+            # that would otherwise constrain shape; consumers walk the
+            # oneOf branches.
+            schema.oneOf = one_of_refs
+            schema.type = None
+            schema.properties = None
+            schema.required = None
+            schema.additionalProperties = None
+            return
+
+        # Default: keep the parent's own properties so subclasses can
+        # continue to use `allOf: [parent_ref, local]` and pick up the
+        # parent's slots through the ref. Add the `oneOf` alongside.
+        schema.oneOf = one_of_refs
+
         # Locate or synthesise the discriminator field. With `is_a`
         # inheritance the local properties live under `allOf[1]`; for
         # standalone classes they're at the top level.

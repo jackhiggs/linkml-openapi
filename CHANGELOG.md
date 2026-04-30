@@ -6,6 +6,41 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## Unreleased
+
+### Added
+
+- **`oneOf` array on discriminator parent schemas**
+  ([#47](https://github.com/jackhiggs/linkml-openapi/issues/47)). When
+  a class declares ``openapi.discriminator`` (or
+  ``designates_type: true``) and concrete subclasses carry
+  ``openapi.type_value``, the parent's component schema now carries
+  a ``oneOf`` array of ``$ref``s to every concrete subclass —
+  alongside the existing ``discriminator`` block. This is what
+  Swagger UI and openapi-generator's TypeScript / Java / Spring
+  outputs need to offer **polymorphic selection** at the call site;
+  the discriminator alone tells consumers how to *interpret* a
+  payload but not which subclasses are *possible*.
+  - Default: parent keeps its own ``properties`` (so subclasses can
+    continue to ``allOf: [parent_ref, local]``) and gains the
+    ``oneOf`` alongside.
+  - With ``--flatten-inheritance``: parent becomes ``oneOf``-only —
+    no ``type``, ``properties``, ``required``, or
+    ``additionalProperties``. Subclasses are already self-contained
+    under flatten, so the parent doesn't need to carry shape itself.
+
+### Fixed
+
+- The OpenAPI 3.1 structural validator
+  (``openapi-spec-validator`` ≤ 0.8.x) can't traverse cyclic
+  discriminator schemas — parent ``oneOf`` of subclasses + subclass
+  ``allOf`` of parent is intrinsically cyclic, and the underlying
+  ``pathable`` walker recurses without cycle detection. Real
+  consumers (Swagger UI, openapi-generator, openapi-typescript)
+  handle this via ``$ref`` resolution; the e2e validator test now
+  documents the limitation and skips for fixtures that exercise the
+  pattern.
+
 ## [0.7.0] — 2026-04-28
 
 DCAT3 1:1-match release. Three composition / tagging enhancements
