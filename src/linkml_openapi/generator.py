@@ -1280,25 +1280,16 @@ class OpenAPIGenerator(Generator):
         # Spring) need to offer polymorphic selection. The discriminator
         # tells consumers how to *interpret* a payload; oneOf tells them
         # which subclasses are *possible*.
-        one_of_refs: list[Schema | Reference] = [Reference(ref=ref) for ref in mapping.values()]
-
-        if self.flatten_inheritance:
-            # Subclasses are self-contained under --flatten-inheritance,
-            # so the parent doesn't need to carry its own type /
-            # properties — the `oneOf` is the schema. Drop everything
-            # that would otherwise constrain shape; consumers walk the
-            # oneOf branches.
-            schema.oneOf = one_of_refs
-            schema.type = None
-            schema.properties = None
-            schema.required = None
-            schema.additionalProperties = None
-            return
-
-        # Default: keep the parent's own properties so subclasses can
-        # continue to use `allOf: [parent_ref, local]` and pick up the
-        # parent's slots through the ref. Add the `oneOf` alongside.
-        schema.oneOf = one_of_refs
+        #
+        # The parent's own shape (`type: object`, properties, required)
+        # is preserved in *both* flatten and non-flatten modes because
+        # the parent is a concrete schema in its own right — codegens
+        # use `type: object` as the signal to generate a class for it,
+        # and dropping it makes openapi-generator (Spring server, in
+        # particular) skip the parent class entirely. The
+        # `flatten_inheritance` flag affects subclass shapes (no
+        # ``allOf`` back-reference), not the parent's own emission.
+        schema.oneOf = [Reference(ref=ref) for ref in mapping.values()]
 
         # Locate or synthesise the discriminator field. With `is_a`
         # inheritance the local properties live under `allOf[1]`; for

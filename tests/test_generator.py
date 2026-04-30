@@ -1972,17 +1972,27 @@ classes:
         assert "sku" in product["properties"]
         assert "kind" in product["required"]
 
-    def test_discriminator_flatten_makes_parent_oneof_only(self):
-        """With --flatten-inheritance, parent is `oneOf` + discriminator only."""
+    def test_discriminator_flatten_preserves_parent_type_and_properties(self):
+        """Flatten mode must keep `type: object` and parent properties (issue #50).
+
+        Codegens (openapi-generator's Spring server in particular) skip
+        generating a class for the parent when `type: object` is missing.
+        Polymorphism is orthogonal to whether the parent is a concrete
+        schema, so `type` / `properties` / `required` are preserved alongside
+        `oneOf` / `discriminator` regardless of the flatten flag.
+        """
         spec = _generate(flatten_inheritance=True)
         product = spec["components"]["schemas"]["Product"]
+        assert product.get("type") == "object"
+        assert "properties" in product
+        # Parent's own identifier slot survives.
+        assert "sku" in product["properties"]
+        # Discriminator field is added by `_inject_subclass_type_value`.
+        assert "kind" in product["properties"]
+        assert "kind" in product.get("required", [])
+        # And the polymorphic union is still emitted.
         assert "oneOf" in product
         assert "discriminator" in product
-        # No type/properties/required/additionalProperties on the parent.
-        assert "type" not in product
-        assert "properties" not in product
-        assert "required" not in product
-        assert "additionalProperties" not in product
 
     def test_discriminator_oneof_targets_match_mapping_targets(self):
         """Every `mapping` target appears as a `oneOf` $ref, no more no less."""
