@@ -335,6 +335,9 @@ when either signal is present:
      properties:
        kind: { type: string, enum: [BOOK, VINYL] }
      required: [sku, kind]
+     oneOf:
+       - $ref: '#/components/schemas/Book'
+       - $ref: '#/components/schemas/Vinyl'
      discriminator:
        propertyName: kind
        mapping:
@@ -347,6 +350,14 @@ when either signal is present:
            kind: { type: string, enum: [BOOK], default: BOOK }
          required: [kind]
    ```
+
+The `oneOf` array is what Swagger UI and openapi-generator's
+TypeScript / Java / Spring outputs need to offer **polymorphic
+selection** — the discriminator alone tells consumers how to interpret
+a payload but not which subclasses are possible. With
+`--flatten-inheritance`, the parent becomes `oneOf`-only (no
+`properties`, `type`, or `required`) since each subclass already
+inlines the parent's slots.
 
 | Annotation | Where | Purpose |
 |------------|-------|---------|

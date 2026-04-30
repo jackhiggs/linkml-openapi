@@ -1937,6 +1937,61 @@ classes:
         finally:
             Path(tmp).unlink(missing_ok=True)
 
+    # --- oneOf alongside discriminator (issue #47) ---------------------
+
+    def test_discriminator_parent_emits_oneof_array(self):
+        """Parent schema with a discriminator gets a `oneOf` $ref array."""
+        spec = _generate()
+        product = spec["components"]["schemas"]["Product"]
+        assert "oneOf" in product
+        refs = {entry["$ref"] for entry in product["oneOf"]}
+        assert refs == {
+            "#/components/schemas/Book",
+            "#/components/schemas/Vinyl",
+        }
+
+    def test_discriminator_oneof_uses_designates_type_signal(self):
+        """`designates_type: true` on a slot also drives oneOf emission."""
+        spec = _generate()
+        animal = spec["components"]["schemas"]["Animal"]
+        assert "oneOf" in animal
+        refs = {entry["$ref"] for entry in animal["oneOf"]}
+        assert refs == {
+            "#/components/schemas/Dog",
+            "#/components/schemas/Cat",
+        }
+
+    def test_discriminator_default_keeps_parent_properties(self):
+        """Without --flatten-inheritance, the parent keeps its own properties."""
+        spec = _generate()
+        product = spec["components"]["schemas"]["Product"]
+        # `kind` is the discriminator field; `sku` is the parent's identifier.
+        assert "type" in product and product["type"] == "object"
+        assert "properties" in product
+        assert "kind" in product["properties"]
+        assert "sku" in product["properties"]
+        assert "kind" in product["required"]
+
+    def test_discriminator_flatten_makes_parent_oneof_only(self):
+        """With --flatten-inheritance, parent is `oneOf` + discriminator only."""
+        spec = _generate(flatten_inheritance=True)
+        product = spec["components"]["schemas"]["Product"]
+        assert "oneOf" in product
+        assert "discriminator" in product
+        # No type/properties/required/additionalProperties on the parent.
+        assert "type" not in product
+        assert "properties" not in product
+        assert "required" not in product
+        assert "additionalProperties" not in product
+
+    def test_discriminator_oneof_targets_match_mapping_targets(self):
+        """Every `mapping` target appears as a `oneOf` $ref, no more no less."""
+        spec = _generate()
+        product = spec["components"]["schemas"]["Product"]
+        mapping_targets = set(product["discriminator"]["mapping"].values())
+        oneof_targets = {entry["$ref"] for entry in product["oneOf"]}
+        assert mapping_targets == oneof_targets
+
 
 class TestProfiles:
     """Coverage for issue #17 — multi-view profile filtering."""
