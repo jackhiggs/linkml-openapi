@@ -12,7 +12,6 @@ from linkml_openapi._chains import (
     parse_path_param_sources,
 )
 
-
 SCHEMA_LINEAR = """\
 id: https://example.org/c
 name: c

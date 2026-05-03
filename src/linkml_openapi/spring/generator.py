@@ -43,7 +43,6 @@ from linkml_runtime.utils.schemaview import SchemaView
 # routes.
 from linkml_openapi._chains import (
     PATH_TEMPLATE_PLACEHOLDER_RE,
-    ChainHop,
     build_parent_chains_index,
     canonical_parent_chain,
     parse_path_param_sources,
@@ -51,7 +50,6 @@ from linkml_openapi._chains import (
 )
 from linkml_openapi._query_params import QueryParamSpec, walk_query_params
 from linkml_openapi.generator import _to_snake_case
-
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 

@@ -820,6 +820,7 @@ class TestParityWithOpenApiSide:
 
     def test_query_param_wire_names_match_openapi_spec(self, tmp_path):
         import re
+
         import yaml as _yaml
 
         gen = SpringServerGenerator(FIXTURE, package="io.example.dcat")
@@ -859,7 +860,8 @@ class TestParityWithOpenApiSide:
 
         # Collect spring {url: set_of_request_param_wire_names}
         getmapping_re = re.compile(
-            r'@GetMapping\(value\s*=\s*"([^"]+)"[^)]*\)\s*\n[^\n]*\n\s*default ResponseEntity[^(]*\([^)]*\)',
+            r'@GetMapping\(value\s*=\s*"([^"]+)"[^)]*\)\s*\n'
+            r"[^\n]*\n\s*default ResponseEntity[^(]*\([^)]*\)",
             re.DOTALL,
         )
         spring_query_params: dict[str, set[str]] = {}
