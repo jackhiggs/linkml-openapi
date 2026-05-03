@@ -22,6 +22,7 @@ dependencies = [
     "openapi-pydantic>=0.5.0",
     "pyyaml>=6.0",
     "click>=8.0",
+    "jinja2>=3.1",
 ]
 
 [project.urls]
@@ -38,6 +39,7 @@ dev = [
 
 [project.scripts]
 gen-openapi = "linkml_openapi.cli:cli"
+gen-spring-server = "linkml_openapi.spring.cli:cli"
 
 [project.entry-points."linkml.generators"]
 openapi = "linkml_openapi.generator:OpenAPIGenerator"
