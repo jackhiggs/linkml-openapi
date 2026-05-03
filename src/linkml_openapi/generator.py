@@ -953,9 +953,14 @@ class OpenAPIGenerator(Generator):
         """Apply the active path-style to an auto-derived URL segment.
 
         ``snake_case`` returns the name unchanged (current behaviour);
-        ``kebab-case`` swaps every ``_`` for ``-``. Only operates on
-        segments derived from snake_case identifiers (slot names,
-        pluralised class names) — explicit overrides like
+        ``kebab-case`` swaps every ``_`` for ``-``. When the schema-level
+        ``openapi.path_split_camel: "true"`` is set, also splits
+        camelCase boundaries before applying the swap — e.g.
+        ``inSeries`` → ``in-series``, ``contactPoint`` → ``contact-point``.
+        Acronym-aware (``XMLParser`` → ``xml-parser``).
+
+        Only operates on segments derived from identifier-shaped names
+        (slot names, pluralised class names) — explicit overrides like
         ``openapi.path`` and ``openapi.path_segment`` are taken verbatim
         and never re-styled.
 
@@ -964,9 +969,14 @@ class OpenAPIGenerator(Generator):
         ``_resolve_path_style`` if a helper method is called before a
         full serialize (keeps test paths safe).
         """
-        if getattr(self, "_effective_path_style", PATH_STYLE_SNAKE) == PATH_STYLE_KEBAB:
-            return name.replace("_", "-")
-        return name
+        if getattr(self, "_effective_path_style", PATH_STYLE_SNAKE) != PATH_STYLE_KEBAB:
+            return name
+        if _is_truthy(self._schema_annotation("openapi.path_split_camel") or "false"):
+            # Acronym-aware: "XMLParser" → "XML-Parser" → "xml-parser"
+            name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1-\2", name)
+            name = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name)
+            return name.replace("_", "-").lower()
+        return name.replace("_", "-")
 
     def _render_slot_segment(self, parent_cls: ClassDefinition | None, slot: SlotDefinition) -> str:
         """Render the URL segment for a slot used in a nested path.

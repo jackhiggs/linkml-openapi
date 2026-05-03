@@ -45,6 +45,10 @@ prefixes:
 default_prefix: dcat
 default_range: string
 
+annotations:
+  openapi.path_style: kebab-case
+  openapi.path_split_camel: "true"
+
 imports:
   - linkml:types
 
@@ -244,9 +248,12 @@ classes:
         slot_uri: dcat:hasVersion
         range: Resource
         multivalued: true
+        annotations:
+          openapi.nested: "false"
         description: |
           A version of the resource. Per dcat:hasVersion; references
-          version-resources by IRI.
+          version-resources by IRI. Browsable via the parent's body
+          payload, not exposed as a nested URL surface.
       hasCurrentVersion:
         slot_uri: dcat:hasCurrentVersion
         range: Resource
@@ -277,17 +284,24 @@ classes:
         slot_uri: dct:relation
         range: Resource
         multivalued: true
+        annotations:
+          openapi.nested: "false"
         description: |
           A resource with an unspecified relationship to the
           cataloged resource. Per dct:relation; use only when no
-          more specific relation is appropriate.
+          more specific relation is appropriate. Browsable via the
+          parent's body payload, not exposed as a nested URL surface.
       hasPart:
         slot_uri: dct:hasPart
         range: Resource
         multivalued: true
+        annotations:
+          openapi.nested: "false"
         description: |
           A related resource that is included either physically or
           logically in the described resource. Per dct:hasPart.
+          Browsable via the parent's body payload, not exposed as a
+          nested URL surface.
 
       # --- Provenance -----------------------------------------------
       qualifiedAttribution:
@@ -433,10 +447,14 @@ classes:
         slot_uri: dcat:catalog
         range: Catalog
         multivalued: true
+        annotations:
+          openapi.nested: "false"
         description: |
           A catalog whose contents are of interest in the context
           of the catalog being described. Per dcat:catalog;
           recursive — sub-catalogs referenced by IRI, not embedded.
+          Self-reference suppressed from the URL surface — the
+          relationship lives in the body payload.
       record:
         slot_uri: dcat:record
         range: CatalogRecord
@@ -470,7 +488,7 @@ classes:
       forward slot here.
     annotations:
       openapi.resource: "true"
-      openapi.path: dataset_series
+      openapi.path: dataset-series
       openapi.type_value: DatasetSeries
       openapi.legacy_type_value: "com.xyz.dcat.DatasetSeries"
       openapi.parent_path: "Catalog.inSeries"
@@ -485,7 +503,7 @@ classes:
       describes its protocol via ``endpointDescription``.
     annotations:
       openapi.resource: "true"
-      openapi.path: data_services
+      openapi.path: data-services
       openapi.type_value: DataService
       openapi.legacy_type_value: "com.xyz.dcat.DataService"
       openapi.parent_path: "Catalog.service"
@@ -592,6 +610,8 @@ classes:
         slot_uri: dcat:accessService
         range: DataService
         multivalued: true
+        annotations:
+          openapi.nested: "false"
         description: |
           A data service that gives access to the distribution of
           the dataset. Per dcat:accessService; values are IRIs of
@@ -701,7 +721,7 @@ classes:
       issued/modified dates.
     annotations:
       openapi.resource: "true"
-      openapi.path: catalog_records
+      openapi.path: catalog-records
       openapi.parent_path: "Catalog.record"
       openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
     slot_usage:

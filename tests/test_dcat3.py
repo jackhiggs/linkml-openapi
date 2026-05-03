@@ -507,7 +507,7 @@ class TestPolymorphicResponses:
         "path",
         [
             "/catalogs/{id}",
-            "/data_services/{id}",
+            "/data-services/{id}",
             # Distribution is `nested_only`: the canonical URL is the deep
             # chained one under its parent Catalog → Dataset, not a flat
             # `/distributions/{id}`.
@@ -535,16 +535,16 @@ class TestPathEmission:
             "/datasets/{id}",
             "/catalogs",
             "/catalogs/{id}",
-            "/dataset_series",
-            "/dataset_series/{id}",
-            "/data_services",
-            "/data_services/{id}",
+            "/dataset-series",
+            "/dataset-series/{id}",
+            "/data-services",
+            "/data-services/{id}",
             # Distribution carries `openapi.nested_only: "true"` — the
             # canonical URL is the deep chain under Catalog → Dataset, and
             # the flat `/distributions[/...]` surface is suppressed.
             "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution/{id}",
-            "/catalog_records",
-            "/catalog_records/{id}",
+            "/catalog-records",
+            "/catalog-records/{id}",
         ],
     )
     def test_concrete_resource_path_exists(self, spec, path):

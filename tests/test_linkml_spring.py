@@ -517,6 +517,97 @@ classes:
         # segment "sub_things" becomes "sub-things" under kebab style.
         assert '@GetMapping(value = "/things/{id}/sub-things",' in src
 
+    def test_path_split_camel_off_by_default_under_kebab(self, tmp_path):
+        """Without `openapi.path_split_camel`, kebab-case only swaps
+        underscores. CamelCase slot names pass through unchanged."""
+        fixture = tmp_path / "no_split.yaml"
+        fixture.write_text("""\
+id: https://example.org/sc
+name: sc
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+classes:
+  Hub:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      contactPoint:
+        range: Agent
+        multivalued: true
+        inlined: true
+  Agent:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.sc").build()
+        src = files["io/example/sc/api/HubApi.java"]
+        assert '"/hubs/{id}/contactPoint"' in src
+
+    def test_path_split_camel_splits_camelcase_under_kebab(self, tmp_path):
+        """`openapi.path_split_camel: "true"` + `kebab-case` splits
+        camelCase boundaries: `contactPoint` → `contact-point`."""
+        fixture = tmp_path / "split.yaml"
+        fixture.write_text("""\
+id: https://example.org/sc2
+name: sc2
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+  openapi.path_split_camel: "true"
+classes:
+  Hub:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      contactPoint:
+        range: Agent
+        multivalued: true
+        inlined: true
+      servesDataset:
+        range: Agent
+        multivalued: true
+        inlined: true
+  Agent:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.sc2").build()
+        src = files["io/example/sc2/api/HubApi.java"]
+        assert '"/hubs/{id}/contact-point"' in src
+        assert '"/hubs/{id}/serves-dataset"' in src
+        assert '"/hubs/{id}/contactPoint"' not in src
+
+    def test_path_split_camel_acronym_aware(self, tmp_path):
+        """Acronym-aware: `XMLParser` → `xml-parser`, not `x-m-l-parser`."""
+        fixture = tmp_path / "acro.yaml"
+        fixture.write_text("""\
+id: https://example.org/acro
+name: acro
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+  openapi.path_split_camel: "true"
+classes:
+  Hub:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      XMLParser:
+        range: Agent
+        multivalued: true
+        inlined: true
+  Agent:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.acro").build()
+        src = files["io/example/acro/api/HubApi.java"]
+        assert '"/hubs/{id}/xml-parser"' in src
+
 
 class TestDeepChainedPaths:
     """Deep nested URL chains land on the leaf class's controller as
