@@ -780,3 +780,33 @@ classes:
 """)
         with pytest.raises(ValueError, match="unknown class"):
             SpringServerGenerator(str(fixture), package="io.example.tpl_u").build()
+
+    def test_template_collection_opt_out(self, tmp_path):
+        fixture = tmp_path / "tpl_no_coll.yaml"
+        fixture.write_text("""\
+id: https://example.org/tpl_nc
+name: tpl_nc
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+  ResourceVersion:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/v2/catalogs/{cId}/resources/{rId}"
+      openapi.path_param_sources: "cId:Catalog.id,rId:ResourceVersion.id"
+      openapi.path_template_collection: "false"
+      openapi.nested_only: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.tpl_nc").build()
+        src = files["io/example/tpl_nc/api/ResourceVersionApi.java"]
+        # Item path emits.
+        assert "/v2/catalogs/{cId}/resources/{rId}" in src
+        # No collection /v2/catalogs/{cId}/resources GET or POST.
+        assert '@GetMapping(value = "/v2/catalogs/{cId}/resources",' not in src
+        assert '@PostMapping(value = "/v2/catalogs/{cId}/resources",' not in src
