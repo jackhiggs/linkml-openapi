@@ -530,6 +530,7 @@ classes:
       openapi.resource: "true"
       openapi.path: distributions
       openapi.parent_path: "Catalog.dataset/Dataset.distribution"
+      openapi.nested_only: "true"
       openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
     slot_usage:
       title:
