@@ -415,3 +415,111 @@ classes:
 """)
         with pytest.raises(ValueError, match="multivalued"):
             SpringServerGenerator(str(fixture), package="io.example.qp_err").build()
+
+
+class TestPathStyle:
+    """openapi.path_style: kebab-case + per-slot openapi.path_segment.
+    Spring's auto-derived class path segments and slot segments respect
+    the active path style; explicit per-class openapi.path values are
+    taken verbatim (no transformation)."""
+
+    def test_kebab_case_class_path_for_camelcase_class(self, tmp_path):
+        fixture = tmp_path / "kebab.yaml"
+        fixture.write_text("""\
+id: https://example.org/k
+name: k
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+classes:
+  DataService:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.k").build()
+        src = files["io/example/k/api/DataServiceApi.java"]
+        assert '@GetMapping(value = "/data-services",' in src
+        assert '@GetMapping(value = "/data-services/{id}",' in src
+
+    def test_explicit_openapi_path_taken_verbatim(self, tmp_path):
+        """openapi.path on a class is verbatim — no path-style transform."""
+        fixture = tmp_path / "verbatim.yaml"
+        fixture.write_text("""\
+id: https://example.org/v
+name: v
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Foo:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: my-custom-path
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.v").build()
+        src = files["io/example/v/api/FooApi.java"]
+        assert '@GetMapping(value = "/my-custom-path",' in src
+
+    def test_slot_path_segment_override(self, tmp_path):
+        """openapi.path_segment on a slot is taken verbatim and lands on
+        nested URLs even when the slot identifier in the model stays
+        snake_case."""
+        fixture = tmp_path / "ps.yaml"
+        fixture.write_text("""\
+id: https://example.org/ps
+name: ps
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Hub:
+    annotations: { openapi.resource: "true", openapi.path: hubs }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      web_resources:
+        range: WebResource
+        multivalued: true
+        inlined: true
+    slot_usage:
+      web_resources:
+        annotations:
+          openapi.path_segment: "web-resources"
+  WebResource:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.ps").build()
+        src = files["io/example/ps/api/HubApi.java"]
+        assert '@GetMapping(value = "/hubs/{id}/web-resources",' in src
+
+    def test_kebab_applied_to_nested_slot_segments(self, tmp_path):
+        """Schema-level kebab-case applies to auto-derived nested slot
+        segments — /things/{id}/sub-things."""
+        fixture = tmp_path / "k_nested.yaml"
+        fixture.write_text("""\
+id: https://example.org/kn
+name: kn
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+classes:
+  Thing:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      sub_things:
+        range: SubThing
+        multivalued: true
+        inlined: true
+  SubThing:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.kn").build()
+        src = files["io/example/kn/api/ThingApi.java"]
+        # Class path "things" stays unchanged (no underscores); slot
+        # segment "sub_things" becomes "sub-things" under kebab style.
+        assert '@GetMapping(value = "/things/{id}/sub-things",' in src

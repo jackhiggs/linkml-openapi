@@ -590,7 +590,7 @@ public class Problem {
                 # via the embedded type; no extra endpoints needed.
                 continue
             target_id_path = "{" + _java_identifier(target.name) + "Id}"
-            slot_seg = slot.name
+            slot_seg = self._render_slot_segment_compat(cls, slot)
             collection = f'"/{path_segment}/{{id}}/{slot_seg}"'
             item = f'"/{path_segment}/{{id}}/{slot_seg}/{target_id_path}"'
 
@@ -913,11 +913,55 @@ public class Problem {
             cur = self._sv.get_class(cur.is_a) if cur.is_a else None
         return ["application/json"]
 
+    def _resolve_path_style(self) -> str:
+        """Active schema-level path style; defaults to snake_case."""
+        sv_schema = self._sv.schema
+        if sv_schema and sv_schema.annotations:
+            for ann in sv_schema.annotations.values():
+                if ann.tag == "openapi.path_style":
+                    value = str(ann.value).strip().lower()
+                    if value in ("snake_case", "kebab-case"):
+                        return value
+        return "snake_case"
+
+    def _apply_path_style(self, name: str) -> str:
+        """Render a name in the active path style.
+
+        snake_case → unchanged. kebab-case → underscores become hyphens.
+        Names with neither convention pass through (no character to swap).
+        """
+        if self._resolve_path_style() == "kebab-case":
+            return name.replace("_", "-")
+        return name
+
     def _path_segment(self, cls: ClassDefinition) -> str:
+        """URL path segment for a class.
+
+        Priority:
+        1. ``openapi.path`` annotation — taken verbatim, no path-style transform.
+        2. Auto-derived ``<class_snake>s`` with active path-style applied.
+        """
         explicit = self._class_annotation(cls, "openapi.path")
         if explicit:
             return explicit.strip()
-        return _to_snake_case(cls.name) + "s"
+        return self._apply_path_style(_to_snake_case(cls.name) + "s")
+
+    def _render_slot_segment_compat(
+        self, parent_cls: ClassDefinition | None, slot: SlotDefinition
+    ) -> str:
+        """Slot segment for chain / nested URLs.
+
+        Priority:
+        1. ``openapi.path_segment`` slot annotation — verbatim.
+        2. Slot name with active path-style applied.
+        """
+        if parent_cls is not None:
+            explicit = self._get_slot_annotation_compat(
+                parent_cls, slot.name, "openapi.path_segment"
+            )
+            if explicit:
+                return explicit.strip()
+        return self._apply_path_style(slot.name)
 
     def _induced_slots(
         self, class_name: str
