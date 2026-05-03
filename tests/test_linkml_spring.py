@@ -810,3 +810,79 @@ classes:
         # No collection /v2/catalogs/{cId}/resources GET or POST.
         assert '@GetMapping(value = "/v2/catalogs/{cId}/resources",' not in src
         assert '@PostMapping(value = "/v2/catalogs/{cId}/resources",' not in src
+
+
+class TestParityWithOpenApiSide:
+    """Belt-and-braces: every list-shaped Spring endpoint's @RequestParam
+    wire-name set must equal the corresponding OpenAPI path's query-
+    parameter name set. Catches future drift if shared helpers are ever
+    bypassed by one renderer."""
+
+    def test_query_param_wire_names_match_openapi_spec(self, tmp_path):
+        import re
+        import yaml as _yaml
+
+        gen = SpringServerGenerator(FIXTURE, package="io.example.dcat")
+        java_dir = tmp_path / "java"
+        gen.emit(java_dir)
+        spec_path = tmp_path / "resources" / "openapi.yaml"
+        spec = _yaml.safe_load(spec_path.read_text())
+
+        # For each spec path with a GET method that has query params,
+        # find the matching Spring controller method and verify the set.
+        request_param_re = re.compile(
+            r'@RequestParam\(name = "([^"]+)"'
+        )
+
+        # Build {spec_path: set_of_query_param_names} for GET.
+        spec_query_params: dict[str, set[str]] = {}
+        for url, item in spec.get("paths", {}).items():
+            get = item.get("get") if isinstance(item, dict) else None
+            if not get:
+                continue
+            params = get.get("parameters") or []
+            qp_names = {
+                p["name"]
+                for p in params
+                if isinstance(p, dict) and p.get("in") == "query"
+            }
+            if qp_names:
+                spec_query_params[url] = qp_names
+
+        # For each Spring controller file, find @GetMapping value=URL and
+        # the @RequestParam names in the same method.
+        java_files = {
+            relpath: source
+            for relpath, source in gen.build().items()
+            if relpath.endswith("Api.java")
+        }
+
+        # Collect spring {url: set_of_request_param_wire_names}
+        getmapping_re = re.compile(
+            r'@GetMapping\(value\s*=\s*"([^"]+)"[^)]*\)\s*\n[^\n]*\n\s*default ResponseEntity[^(]*\([^)]*\)',
+            re.DOTALL,
+        )
+        spring_query_params: dict[str, set[str]] = {}
+        for source in java_files.values():
+            for m in getmapping_re.finditer(source):
+                url = m.group(1)
+                signature = m.group(0)
+                wire_names = set(request_param_re.findall(signature))
+                if wire_names:
+                    spring_query_params.setdefault(url, set()).update(wire_names)
+
+        # Walk every spec list endpoint and verify Spring matches.
+        mismatches = []
+        for url, spec_names in spec_query_params.items():
+            spring_names = spring_query_params.get(url)
+            if spring_names is None:
+                # The Spring side may not emit single-level nested ops on
+                # the leaf controller — OpenAPI emits them on the parent's
+                # path. Skip URLs we couldn't find on the Spring side; the
+                # purpose of this test is drift detection on shared paths.
+                continue
+            if spec_names != spring_names:
+                mismatches.append(
+                    f"{url}: spec={sorted(spec_names)}, spring={sorted(spring_names)}"
+                )
+        assert not mismatches, "Query-param drift detected:\n" + "\n".join(mismatches)
