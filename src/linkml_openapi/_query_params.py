@@ -64,7 +64,7 @@ def _capabilities_from_raw(
             f"Slot {cls_name}.{slot_name!r} declares unknown "
             f"openapi.query_param token(s) {sorted(unknown)!r}; "
             f"expected one or more of {sorted(QUERY_PARAM_TOKENS)!r}. "
-            "Token(s) ignored - fix the typo or remove them.",
+            "Token(s) ignored — fix the typo or remove them.",
             stacklevel=4,
         )
     if "true" in tokens:
@@ -101,7 +101,7 @@ def walk_query_params(
     """
     auto_class = get_class_annotation(cls, "openapi.auto_query_params")
     if auto_class is not None:
-        auto_enabled = auto_class.strip().lower() in ("true", "1", "yes")
+        auto_enabled = str(auto_class).lower() == "true"
     else:
         auto_enabled = schema_auto_default
 
