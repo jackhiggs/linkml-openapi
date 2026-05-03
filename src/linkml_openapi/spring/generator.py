@@ -628,6 +628,7 @@ public class Problem {
                 "params": [
                     _path_param("id"),
                     *_list_query_params(),
+                    *self._query_param_dicts(target, imports),
                 ],
             },
             {

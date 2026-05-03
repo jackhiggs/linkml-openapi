@@ -352,3 +352,14 @@ class TestQueryParams:
         src = qp_files["io/example/qp/api/PersonApi.java"]
         assert 'name = "limit"' in src
         assert 'name = "offset"' in src
+
+    def test_query_params_attached_to_composition_list(self, files):
+        """Dataset.distribution is inlined: true → composition list at
+        /datasets/{id}/distribution. The list endpoint carries Distribution's
+        query params (auto-inferred from Distribution's scalar slots)."""
+        src = files["io/example/dcat/api/DatasetApi.java"]
+        assert "/datasets/{id}/distribution" in src
+        list_method_start = src.find('listDatasetDistribution')
+        list_method_end = src.find(') {', list_method_start)
+        list_method_signature = src[list_method_start:list_method_end]
+        assert list_method_signature.count("@RequestParam") >= 3
