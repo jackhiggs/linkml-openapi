@@ -43,6 +43,7 @@ gen-spring-server = "linkml_openapi.spring.cli:cli"
 
 [project.entry-points."linkml.generators"]
 openapi = "linkml_openapi.generator:OpenAPIGenerator"
+spring = "linkml_openapi.spring.generator:SpringServerGenerator"
 
 [tool.ruff]
 line-length = 100

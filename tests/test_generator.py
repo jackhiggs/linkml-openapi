@@ -198,7 +198,10 @@ class TestComponentSchemas:
         spec = _generate()
         person_props = spec["components"]["schemas"]["Person"]["allOf"][1]["properties"]
         assert person_props["addresses"]["type"] == "array"
-        assert person_props["addresses"]["items"] == {"$ref": "#/components/schemas/Address"}
+        # Address has an identifier and the slot defaults to `inlined: false`
+        # in LinkML, so the on-the-wire shape is a plain IRI string — the
+        # form that survives content negotiation to RDF media types.
+        assert person_props["addresses"]["items"] == {"type": "string", "format": "uri"}
 
     def test_enum_ref(self):
         spec = _generate()
@@ -1773,14 +1776,22 @@ classes:
         assert "/books" not in spec["paths"]  # also no auto-pluralised flat
 
     def test_multi_level_composition_cycle_protection(self):
-        """Mutual composition (`A.bs[B].as[A]`) terminates without infinite recursion."""
+        """Mutual composition (`A.bs[B].as[A]`) terminates without infinite recursion.
+
+        ``openapi.recurse_max_depth`` on either class acknowledges the
+        cycle so the generator's upfront recursion guard lets the build
+        proceed; the path-emission stack guard is what's actually under
+        test here.
+        """
         spec = _generate_from_string("""
 id: https://example.org/cycle
 name: cy
 default_range: string
 classes:
   A:
-    annotations: { openapi.resource: "true" }
+    annotations:
+      openapi.resource: "true"
+      openapi.recurse_max_depth: "1"
     attributes:
       id: { identifier: true, required: true }
       bs:
@@ -1810,42 +1821,51 @@ classes:
 class TestDiscriminator:
     """Coverage for issue #20 — discriminator + polymorphism."""
 
-    def test_explicit_discriminator_field_synthesised(self):
-        """`openapi.discriminator: kind` synthesises the field on the parent."""
+    def test_abstract_parent_does_not_carry_discriminator_field(self):
+        """An abstract parent (Product is abstract) has no wire instances,
+        so the discriminator field is not injected into its properties.
+        Doing so would inherit through ``allOf`` and pollute every
+        subclass's display with the union enum of all siblings."""
         spec = _generate()
         product = spec["components"]["schemas"]["Product"]
-        assert "kind" in product["properties"]
-        assert product["properties"]["kind"]["type"] == "string"
-        assert "kind" in product["required"]
+        assert "kind" not in (product.get("properties") or {})
+        assert "kind" not in (product.get("required") or [])
 
-    def test_explicit_discriminator_mapping_uses_type_value(self):
-        """Type values from `openapi.type_value` flow into the mapping."""
+    def test_subclass_carries_pinned_discriminator_value(self):
+        """Each concrete subclass uses ``allOf [{$ref: parent},
+        {properties: {kind: enum=[<self>], default: <self>}}]`` so
+        codegens emit Java/TS DTOs that extend the parent and wire
+        the discriminator value automatically on construction."""
         spec = _generate()
-        product = spec["components"]["schemas"]["Product"]
-        assert product["discriminator"]["propertyName"] == "kind"
-        assert product["discriminator"]["mapping"] == {
-            "BOOK": "#/components/schemas/Book",
-            "VINYL": "#/components/schemas/Vinyl",
-        }
-        assert set(product["properties"]["kind"]["enum"]) == {"BOOK", "VINYL"}
+        book_local = spec["components"]["schemas"]["Book"]["allOf"][1]
+        vinyl_local = spec["components"]["schemas"]["Vinyl"]["allOf"][1]
+        assert book_local["properties"]["kind"]["enum"] == ["BOOK"]
+        assert book_local["properties"]["kind"]["default"] == "BOOK"
+        assert vinyl_local["properties"]["kind"]["enum"] == ["VINYL"]
+        assert vinyl_local["properties"]["kind"]["default"] == "VINYL"
 
     def test_subclass_redeclares_field_with_single_value_enum(self):
-        """A concrete subclass's local schema pins the discriminator to its value."""
+        """A concrete subclass's local block (``allOf[1]``) pins the
+        discriminator to its single value with a matching default."""
         spec = _generate()
         book_local = spec["components"]["schemas"]["Book"]["allOf"][1]
         assert book_local["properties"]["kind"]["enum"] == ["BOOK"]
         assert book_local["properties"]["kind"]["default"] == "BOOK"
         assert "kind" in book_local["required"]
 
-    def test_designates_type_drives_discriminator(self):
-        """LinkML's `designates_type: true` produces an OpenAPI discriminator block."""
+    def test_designates_type_does_not_pollute_abstract_parent(self):
+        """`designates_type: true` is a discriminator declaration. The
+        abstract parent (Animal) carries no instances, so the
+        synthesised single-value enum lives on each concrete
+        subclass's ``allOf[1]`` local block, not on the parent."""
         spec = _generate()
         animal = spec["components"]["schemas"]["Animal"]
-        assert animal["discriminator"]["propertyName"] == "species"
-        assert animal["discriminator"]["mapping"] == {
-            "Dog": "#/components/schemas/Dog",
-            "Cat": "#/components/schemas/Cat",
-        }
+        assert "discriminator" not in animal
+        assert "oneOf" not in animal
+        dog_local = spec["components"]["schemas"]["Dog"]["allOf"][1]
+        cat_local = spec["components"]["schemas"]["Cat"]["allOf"][1]
+        assert dog_local["properties"]["species"]["enum"] == ["Dog"]
+        assert cat_local["properties"]["species"]["enum"] == ["Cat"]
 
     def test_designates_type_default_value_is_class_name_as_is(self):
         """Without openapi.type_value, the default matches LinkML's `designates_type` behaviour."""
@@ -1937,114 +1957,49 @@ classes:
         finally:
             Path(tmp).unlink(missing_ok=True)
 
-    # --- oneOf alongside discriminator (issue #47) ---------------------
+    # --- Polymorphism at points-of-use (no schema-level oneOf) ---------
 
-    def test_discriminator_parent_emits_oneof_array(self):
-        """Parent schema with a discriminator gets a `oneOf` $ref array."""
+    def test_polymorphic_root_keeps_parent_properties(self):
+        """The polymorphic root remains a concrete schema in its own right
+        (``type: object``, properties, required) so codegens generate a
+        class for it. The discriminator field is not injected on the
+        abstract root — that's handled by each concrete subclass — but
+        the root's own ``sku`` etc. survive."""
         spec = _generate()
         product = spec["components"]["schemas"]["Product"]
-        assert "oneOf" in product
-        refs = {entry["$ref"] for entry in product["oneOf"]}
-        assert refs == {
-            "#/components/schemas/Book",
-            "#/components/schemas/Vinyl",
-        }
-
-    def test_discriminator_oneof_uses_designates_type_signal(self):
-        """`designates_type: true` on a slot also drives oneOf emission."""
-        spec = _generate()
-        animal = spec["components"]["schemas"]["Animal"]
-        assert "oneOf" in animal
-        refs = {entry["$ref"] for entry in animal["oneOf"]}
-        assert refs == {
-            "#/components/schemas/Dog",
-            "#/components/schemas/Cat",
-        }
+        assert product["type"] == "object"
+        assert "sku" in product["properties"]
+        assert "oneOf" not in product
+        assert "discriminator" not in product
 
     def test_discriminator_default_keeps_parent_properties(self):
-        """Without --flatten-inheritance, the parent keeps its own properties."""
+        """Without --flatten-inheritance, the parent keeps its own
+        non-discriminator properties (sku, the identifier slot)."""
         spec = _generate()
         product = spec["components"]["schemas"]["Product"]
-        # `kind` is the discriminator field; `sku` is the parent's identifier.
         assert "type" in product and product["type"] == "object"
         assert "properties" in product
-        assert "kind" in product["properties"]
         assert "sku" in product["properties"]
-        assert "kind" in product["required"]
 
     def test_discriminator_flatten_preserves_parent_type_and_properties(self):
-        """Flatten mode must keep `type: object` and parent properties (issue #50).
-
-        Codegens (openapi-generator's Spring server in particular) skip
-        generating a class for the parent when `type: object` is missing.
-        Polymorphism is orthogonal to whether the parent is a concrete
-        schema, so `type` / `properties` / `required` are preserved alongside
-        `oneOf` / `discriminator` regardless of the flatten flag.
-        """
+        """Flatten mode must keep `type: object` and the parent's own
+        properties (issue #50). Codegens (openapi-generator's Spring
+        server in particular) skip generating a class for the parent
+        when `type: object` is missing."""
         spec = _generate(flatten_inheritance=True)
         product = spec["components"]["schemas"]["Product"]
         assert product.get("type") == "object"
         assert "properties" in product
         # Parent's own identifier slot survives.
         assert "sku" in product["properties"]
-        # Discriminator field is added by `_inject_subclass_type_value`.
-        assert "kind" in product["properties"]
-        assert "kind" in product.get("required", [])
-        # And the polymorphic union is still emitted.
-        assert "oneOf" in product
-        assert "discriminator" in product
 
-    def test_discriminator_oneof_targets_match_mapping_targets(self):
-        """Every `mapping` target appears as a `oneOf` $ref, no more no less."""
-        spec = _generate()
-        product = spec["components"]["schemas"]["Product"]
-        mapping_targets = set(product["discriminator"]["mapping"].values())
-        oneof_targets = {entry["$ref"] for entry in product["oneOf"]}
-        assert mapping_targets == oneof_targets
-
-    # --- Non-abstract discriminator parent (issue #52) -----------------
-
-    def test_non_abstract_parent_excluded_from_oneof(self):
-        """A non-abstract discriminator parent must not self-ref in its `oneOf`."""
-        spec = _generate()
-        vehicle = spec["components"]["schemas"]["Vehicle"]
-        oneof_refs = {entry["$ref"] for entry in vehicle["oneOf"]}
-        assert "#/components/schemas/Vehicle" not in oneof_refs
-        assert oneof_refs == {
-            "#/components/schemas/Car",
-            "#/components/schemas/Truck",
-        }
-
-    def test_non_abstract_parent_excluded_from_mapping(self):
-        """The discriminator mapping must not key on the parent class itself."""
-        spec = _generate()
-        vehicle = spec["components"]["schemas"]["Vehicle"]
-        mapping = vehicle["discriminator"]["mapping"]
-        # The parent's class-name default ("Vehicle") shouldn't be a key.
-        assert "Vehicle" not in mapping
-        # Concrete subclasses are present with their explicit type_values.
-        assert mapping == {
-            "car": "#/components/schemas/Car",
-            "truck": "#/components/schemas/Truck",
-        }
-
-    def test_abstract_parent_unchanged(self):
-        """Abstract parents (Animal, Product) still produce the right group."""
-        spec = _generate()
-        # Animal uses `designates_type: true`; Dog/Cat are auto-mapped.
-        animal = spec["components"]["schemas"]["Animal"]
-        animal_targets = set(animal["discriminator"]["mapping"].values())
-        assert animal_targets == {
-            "#/components/schemas/Dog",
-            "#/components/schemas/Cat",
-        }
-        # Product uses `openapi.discriminator` + per-subclass `openapi.type_value`.
-        product = spec["components"]["schemas"]["Product"]
-        product_targets = set(product["discriminator"]["mapping"].values())
-        assert product_targets == {
-            "#/components/schemas/Book",
-            "#/components/schemas/Vinyl",
-        }
+    # NOTE: Main's "non-abstract parent excluded from oneOf/mapping" tests
+    # (added in 8811dad / PR #52) are not asserted here. This branch's
+    # architecture moves polymorphic dispatch from the parent's component
+    # schema to the *use sites* (path responses via `_class_response_ref`,
+    # slot ranges via `_class_range_ref`), with the union *including* the
+    # root itself. See `test_polymorphic_root_keeps_parent_properties`,
+    # `test_oneof_lists_concrete_descendants_at_property`, and similar.
 
 
 class TestProfiles:
@@ -2236,3 +2191,366 @@ class TestMediaTypes:
                 "application/ld+json",
                 "text/turtle",
             }
+
+
+class TestLegacyTypeField:
+    """``openapi.legacy_type_field`` synthesises a back-compat constant
+    field on every concrete class in a polymorphic chain. The value
+    comes from each concrete class's ``openapi.legacy_type_value`` —
+    no fallback, since the value's format is opaque (Java FQN, custom
+    IRI, anything stable) and silently substituting one form for
+    another would be a footgun."""
+
+    BASE = """
+id: https://example.org/legacy
+name: legacy
+prefixes:
+  linkml: https://w3id.org/linkml/
+default_range: string
+imports:
+  - linkml:types
+classes:
+  Item:
+    abstract: true
+    annotations:
+      openapi.discriminator: kind
+      openapi.legacy_type_field: "#type"
+    attributes:
+      sku:
+        identifier: true
+        required: true
+  Widget:
+    is_a: Item
+    annotations:
+      openapi.type_value: WIDGET
+      openapi.legacy_type_value: "com.acme.Widget"
+  Gadget:
+    is_a: Item
+    annotations:
+      openapi.type_value: GADGET
+      openapi.legacy_type_value: "com.acme.Gadget"
+"""
+
+    def test_legacy_field_pinned_per_concrete_class(self):
+        spec = _generate_from_string(self.BASE)
+        widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
+        gadget_local = spec["components"]["schemas"]["Gadget"]["allOf"][1]
+        assert widget_local["properties"]["#type"]["enum"] == ["com.acme.Widget"]
+        assert widget_local["properties"]["#type"]["default"] == "com.acme.Widget"
+        assert gadget_local["properties"]["#type"]["enum"] == ["com.acme.Gadget"]
+        assert gadget_local["properties"]["#type"]["default"] == "com.acme.Gadget"
+        assert "#type" in widget_local["required"]
+        assert "#type" in gadget_local["required"]
+
+    def test_proper_discriminator_coexists_with_legacy_field(self):
+        """Both ``kind`` (discriminator) and ``#type`` (legacy) appear on
+        every concrete class's local block with their respective
+        pinned values."""
+        spec = _generate_from_string(self.BASE)
+        widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
+        assert widget_local["properties"]["kind"]["enum"] == ["WIDGET"]
+        assert widget_local["properties"]["#type"]["enum"] == ["com.acme.Widget"]
+
+    def test_missing_legacy_value_errors_loudly(self):
+        """Polymorphic root declares the legacy field, but a concrete
+        class doesn't set its value → ValueError naming the class."""
+        broken = self.BASE.replace(
+            'openapi.legacy_type_value: "com.acme.Gadget"', ""
+        )
+        _generate_from_string_raises(
+            broken, match=r"Class 'Gadget'.*openapi.legacy_type_value"
+        )
+
+    def test_no_legacy_field_declared_means_no_synthesis(self):
+        """Without ``openapi.legacy_type_field`` on the root, the
+        ``openapi.legacy_type_value`` annotations on subclasses are
+        ignored — the field doesn't exist on the wire."""
+        no_root = self.BASE.replace(
+            '      openapi.legacy_type_field: "#type"\n', ""
+        )
+        spec = _generate_from_string(no_root)
+        widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
+        gadget_local = spec["components"]["schemas"]["Gadget"]["allOf"][1]
+        assert "#type" not in widget_local.get("properties", {})
+        assert "#type" not in gadget_local.get("properties", {})
+
+    def test_legacy_field_never_carries_x_codegen_name(self):
+        """Even with ``openapi.legacy_type_codegen_name`` declared, the
+        rename does not appear as a vendor extension on the property —
+        openapi-generator's templates don't have a universal property-
+        renaming extension. The value flows through
+        :meth:`emit_name_mappings` instead."""
+        with_codegen = self.BASE.replace(
+            '      openapi.legacy_type_field: "#type"\n',
+            '      openapi.legacy_type_field: "#type"\n'
+            '      openapi.legacy_type_codegen_name: legacyType\n',
+        )
+        spec = _generate_from_string(with_codegen)
+        widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
+        assert "x-codegen-name" not in widget_local["properties"]["#type"]
+
+    def test_emit_name_mappings_returns_wire_to_codegen_pairs(self):
+        """``emit_name_mappings`` returns ``--name-mappings`` file
+        content — one ``wire-name=codegen-name`` per line, sorted."""
+        import tempfile
+
+        with_codegen = self.BASE.replace(
+            '      openapi.legacy_type_field: "#type"\n',
+            '      openapi.legacy_type_field: "#type"\n'
+            '      openapi.legacy_type_codegen_name: legacyType\n',
+        )
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(with_codegen)
+            path = f.name
+        try:
+            gen = OpenAPIGenerator(path)
+            gen.serialize()  # build state populates the mapping
+            assert gen.emit_name_mappings() == "#type=legacyType\n"
+            assert gen.name_mappings() == {"#type": "legacyType"}
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+    def test_emit_name_mappings_empty_when_no_renames(self):
+        """No ``legacy_type_codegen_name`` → empty string, so callers
+        can write the file unconditionally without polluting the repo."""
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(self.BASE)
+            path = f.name
+        try:
+            gen = OpenAPIGenerator(path)
+            gen.serialize()
+            assert gen.emit_name_mappings() == ""
+            assert gen.name_mappings() == {}
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+
+class TestInlinedPolymorphicRange:
+    """When a slot is composition (``inlined: true``) and its range has
+    concrete descendants, the property emits ``oneOf`` at the join point.
+
+    Codegens (notably openapi-generator's Spring template) translate
+    property-level ``oneOf`` + ``discriminator`` into Jackson
+    ``@JsonSubTypes`` — without it, the generated DTO ends up with a
+    bare ``Dataset`` field even when the wire payload is a
+    ``DatasetSeries``. The schema-level ``discriminator`` on the
+    polymorphic root remains; this is the *additional* signal the
+    codegen needs at the slot.
+    """
+
+    SCHEMA = """
+id: https://example.org/poly
+name: poly
+prefixes:
+  linkml: https://w3id.org/linkml/
+default_range: string
+imports:
+  - linkml:types
+classes:
+  Resource:
+    abstract: true
+    annotations:
+      openapi.discriminator: resourceType
+    attributes:
+      id:
+        identifier: true
+        required: true
+  Dataset:
+    is_a: Resource
+    annotations:
+      openapi.type_value: Dataset
+  DatasetSeries:
+    is_a: Dataset
+    annotations:
+      openapi.type_value: DatasetSeries
+  Catalog:
+    is_a: Dataset
+    annotations:
+      openapi.type_value: Catalog
+    attributes:
+      # `inlined: true` forces composition. Range Dataset has 3 concrete
+      # descendants (Dataset, DatasetSeries, Catalog); slot must emit
+      # oneOf + discriminator at the property level.
+      members:
+        range: Dataset
+        multivalued: true
+        inlined: true
+"""
+
+    def test_oneof_lists_concrete_descendants_at_property(self):
+        spec = _generate_from_string(self.SCHEMA)
+        catalog_local = spec["components"]["schemas"]["Catalog"]["allOf"][1]
+        items = catalog_local["properties"]["members"]["items"]
+        refs = {r["$ref"] for r in items["oneOf"]}
+        assert refs == {
+            "#/components/schemas/Dataset",
+            "#/components/schemas/DatasetSeries",
+            "#/components/schemas/Catalog",
+        }
+
+    def test_property_carries_inherited_discriminator(self):
+        spec = _generate_from_string(self.SCHEMA)
+        catalog_local = spec["components"]["schemas"]["Catalog"]["allOf"][1]
+        items = catalog_local["properties"]["members"]["items"]
+        disc = items["discriminator"]
+        assert disc["propertyName"] == "resourceType"
+        assert disc["mapping"] == {
+            "Dataset": "#/components/schemas/Dataset",
+            "DatasetSeries": "#/components/schemas/DatasetSeries",
+            "Catalog": "#/components/schemas/Catalog",
+        }
+
+    def test_inlined_false_still_emits_uri_string_not_oneof(self):
+        """The polymorphic oneOf only fires for composition. Reference slots
+        (the LinkML default) stay as IRI strings regardless of how rich the
+        target hierarchy is — RDF-roundtrippable wins."""
+        schema = self.SCHEMA.replace("inlined: true", "inlined: false")
+        spec = _generate_from_string(schema)
+        catalog_local = spec["components"]["schemas"]["Catalog"]["allOf"][1]
+        items = catalog_local["properties"]["members"]["items"]
+        assert items == {"type": "string", "format": "uri"}
+
+    def test_non_polymorphic_inlined_range_still_uses_plain_ref(self):
+        """No descendants → no oneOf, just `$ref`."""
+        schema = """
+id: https://example.org/plain
+name: plain
+prefixes:
+  linkml: https://w3id.org/linkml/
+default_range: string
+imports:
+  - linkml:types
+classes:
+  Note:
+    attributes:
+      id:
+        identifier: true
+        required: true
+      text:
+        range: string
+  Document:
+    attributes:
+      id:
+        identifier: true
+        required: true
+      annotation:
+        range: Note
+        inlined: true
+"""
+        spec = _generate_from_string(schema)
+        prop = spec["components"]["schemas"]["Document"]["properties"]["annotation"]
+        assert prop == {"$ref": "#/components/schemas/Note"}
+
+    def test_inlined_self_cycle_without_acknowledgement_raises(self):
+        """A class with an ``inlined: true`` slot ranging on itself must
+        either drop the inlining (becoming a reference IRI) or
+        acknowledge the cycle via ``openapi.recurse_max_depth``."""
+        _generate_from_string_raises(
+            """
+id: https://example.org/self-cycle
+name: self_cycle
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+imports: [linkml:types]
+classes:
+  Catalog:
+    attributes:
+      id: { identifier: true, required: true }
+      sub:
+        range: Catalog
+        multivalued: true
+        inlined: true
+""",
+            match=r"Inlined composition cycle",
+        )
+
+    def test_inlined_self_cycle_passes_when_acknowledged(self):
+        """``openapi.recurse_max_depth`` lets the build through; the cycle
+        is the author's explicit choice."""
+        spec = _generate_from_string("""
+id: https://example.org/ack-cycle
+name: ack_cycle
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+imports: [linkml:types]
+classes:
+  Catalog:
+    annotations:
+      openapi.recurse_max_depth: "3"
+    attributes:
+      id: { identifier: true, required: true }
+      sub:
+        range: Catalog
+        multivalued: true
+        inlined: true
+""")
+        local = spec["components"]["schemas"]["Catalog"]
+        # No descendants → plain $ref to self (the recursion is acknowledged
+        # but not bound — the integer is informational for now).
+        assert local["properties"]["sub"]["items"] == {
+            "$ref": "#/components/schemas/Catalog"
+        }
+
+    def test_reference_self_cycle_is_fine(self):
+        """``inlined: false`` cycles are not real cycles on the wire — the
+        target IRI is a string, no expansion happens. No annotation required."""
+        spec = _generate_from_string("""
+id: https://example.org/ref-cycle
+name: ref_cycle
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+imports: [linkml:types]
+classes:
+  Catalog:
+    attributes:
+      id: { identifier: true, required: true }
+      sub:
+        range: Catalog
+        multivalued: true
+        inlined: false
+""")
+        items = spec["components"]["schemas"]["Catalog"]["properties"]["sub"]["items"]
+        assert items == {"type": "string", "format": "uri"}
+
+    def test_no_discriminator_in_chain_still_emits_oneof_without_mapping(self):
+        """If the polymorphic root has no discriminator declared, the
+        property-level ``oneOf`` is still useful for codegen — it just
+        omits the discriminator block. Validation still works (the
+        payload must match exactly one branch); polymorphic
+        deserialization in the codegen needs a manual hint, but at
+        least the spec records the join."""
+        schema = """
+id: https://example.org/no-disc
+name: no_disc
+prefixes:
+  linkml: https://w3id.org/linkml/
+default_range: string
+imports:
+  - linkml:types
+classes:
+  Animal:
+    abstract: true
+    attributes:
+      id:
+        identifier: true
+        required: true
+  Dog:
+    is_a: Animal
+  Cat:
+    is_a: Animal
+  Owner:
+    attributes:
+      id:
+        identifier: true
+        required: true
+      pet:
+        range: Animal
+        inlined: true
+"""
+        spec = _generate_from_string(schema)
+        prop = spec["components"]["schemas"]["Owner"]["properties"]["pet"]
+        refs = {r["$ref"] for r in prop["oneOf"]}
+        assert refs == {"#/components/schemas/Dog", "#/components/schemas/Cat"}
+        assert "discriminator" not in prop

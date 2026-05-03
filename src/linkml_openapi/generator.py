@@ -9,7 +9,7 @@ Converts LinkML schema definitions into OpenAPI 3.1 specifications with:
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 import yaml
@@ -207,12 +207,35 @@ class OpenAPIGenerator(Generator):
     # identifiers in the OpenAPI body, operation IDs, tags, and RDF
     # extensions are unaffected — only the URL segment changes.
     path_style: str | None = None
+    # Names of registered post-processors to apply (in order) after the
+    # canonical spec is built but before serialisation. See
+    # ``linkml_openapi.post_processors`` for the registry. Each
+    # post-processor adapts the spec for a specific consumer
+    # (codegens, validators, JSON-LD adapters) without changing the
+    # generator's authoring-clarity defaults.
+    post_processors: list[str] = field(default_factory=list)
 
     def serialize(self, **kwargs) -> str:
         """Generate and serialize the OpenAPI spec."""
         # Reset the x-rdf-* maps; _build_openapi populates them as it walks the schema.
         self._x_rdf_class: dict[str, str] = {}
         self._x_rdf_property: dict[tuple[str, str], str] = {}
+        # Per-build cache so the schema-walk helpers (descendants,
+        # induced slots, etc.) don't re-traverse the class graph for
+        # every reference site. Reset here to pick up any schema-view
+        # changes between successive ``serialize()`` calls.
+        self._concrete_descendants_cache: dict[str, list[str]] = {}
+        # Codegen field-name overrides — accumulated for the companion
+        # ``name-mappings`` file. openapi-generator does not have a
+        # universal *spec-level* extension that reliably renames a
+        # JSON property to a clean target-language identifier
+        # (``x-codegen-name`` is operation-only on most templates). The
+        # working mechanism is the ``--name-mappings`` CLI flag (or
+        # ``@file`` form). We collect every ``wire-name=codegen-name``
+        # pair the schema declares and let
+        # :meth:`emit_name_mappings` write a sibling file the user
+        # passes to ``openapi-generator-cli``.
+        self._codegen_name_mappings: dict[str, str] = {}
         # Multi-level composition recursion happens inside
         # `_add_composition_paths`; the stack tracks which composition
         # targets are currently being emitted so a cyclic
@@ -262,9 +285,47 @@ class OpenAPIGenerator(Generator):
         self._strip_invalid_parameter_fields(raw)
         self._coerce_numeric_constraints(raw)
         self._inject_rdf_extensions(raw)
+        if self.post_processors:
+            from linkml_openapi.post_processors import apply as _apply_post
+            raw = _apply_post(raw, list(self.post_processors))
         if self.format == "json":
             return json.dumps(raw, indent=2) + "\n"
         return yaml.dump(raw, default_flow_style=False, sort_keys=False)
+
+    def name_mappings(self) -> dict[str, str]:
+        """Return the wire→codegen rename map collected during the build.
+
+        Populated from ``openapi.legacy_type_codegen_name`` (and any
+        future codegen-rename annotations). Empty when the schema
+        declares no overrides — the file emission step then writes
+        nothing rather than an empty stub.
+
+        Must be called after :meth:`serialize` since the build is
+        what populates the underlying state.
+        """
+        return dict(self._codegen_name_mappings)
+
+    def emit_name_mappings(self) -> str:
+        """Render the rename map as ``--name-mappings`` file content.
+
+        Format is openapi-generator's expected layout — one
+        ``wire-name=codegen-name`` pair per line. Pass to
+        ``openapi-generator-cli`` via::
+
+            openapi-generator generate -i spec.yaml -g spring \\
+              --name-mappings @name-mappings.txt
+
+        Returns an empty string when no overrides were declared, so
+        callers can write the file unconditionally without polluting
+        the repo with empty hint files.
+        """
+        if not self._codegen_name_mappings:
+            return ""
+        lines = [
+            f"{wire}={codegen}"
+            for wire, codegen in sorted(self._codegen_name_mappings.items())
+        ]
+        return "\n".join(lines) + "\n"
 
     @staticmethod
     def _strip_invalid_parameter_fields(spec: dict) -> None:
@@ -308,6 +369,7 @@ class OpenAPIGenerator(Generator):
     def _build_openapi(self) -> OpenAPI:
         """Build the complete OpenAPI model."""
         sv = self.schemaview
+        self._validate_inlined_recursion()
         title = self.api_title or str(sv.schema.name) or "API"
 
         info = Info(title=title, version=self.api_version)
@@ -467,8 +529,59 @@ class OpenAPIGenerator(Generator):
 
     # --- Schema generation ---
 
+    def _class_description(self, cls: ClassDefinition) -> str | None:
+        """Compose the OpenAPI ``description`` for a class.
+
+        Combines the LinkML ``description`` with an "RDF class:
+        ``<curie>``" footer when the class declares ``class_uri``.
+        Putting the RDF identity in the description (not just in the
+        ``x-rdf-class`` extension) makes it visible directly in
+        Swagger UI's schema panel — extensions are only shown by
+        scrolling to the small footer area, while ``description`` is
+        the prominent text under the schema title.
+        """
+        parts: list[str] = []
+        if cls.description:
+            parts.append(cls.description.strip())
+        if cls.class_uri:
+            parts.append(f"RDF class: `{cls.class_uri}`")
+        return "\n\n".join(parts) or None
+
+    def _slot_description(self, slot: SlotDefinition) -> str | None:
+        """Compose the OpenAPI ``description`` for a slot, with the
+        RDF predicate footer when ``slot_uri`` is set."""
+        parts: list[str] = []
+        if slot.description:
+            parts.append(slot.description.strip())
+        if slot.slot_uri:
+            parts.append(f"RDF property: `{slot.slot_uri}`")
+        return "\n\n".join(parts) or None
+
     def _class_to_schema(self, cls: ClassDefinition) -> Schema:
-        """Convert a LinkML class to a JSON Schema object."""
+        """Convert a LinkML class to a JSON Schema object.
+
+        Inheritance is emitted via ``allOf: [{$ref: parent},
+        {properties}]`` so codegens (notably openapi-generator's
+        Spring template) produce idiomatic
+        ``Catalog extends Dataset extends Resource`` with proper
+        polymorphic Jackson dispatch — and the round-trip survives
+        when a Spring service re-publishes the spec via springdoc.
+
+        ``flatten_inheritance=True`` overrides this and inlines all
+        inherited properties at every concrete class (no ``allOf``).
+        Useful for codegens that don't handle ``allOf`` well, or for
+        producing a self-contained Swagger-UI-friendly view.
+
+        Note: under standard JSON Schema ``allOf`` is intersection,
+        so per-class enum pins on a discriminator field (Dataset's
+        ``enum: [Dataset]``, Catalog's ``enum: [Catalog]``) intersect
+        to ``∅``. That's a JSON Schema purity vs codegen ergonomics
+        trade-off — Spring/openapi-generator doesn't run JSON Schema
+        validation; it dispatches via the discriminator at the
+        slot/path level and Jackson polymorphism, both of which work
+        correctly. Strict-validator environments should switch to
+        ``flatten_inheritance``.
+        """
         if cls.is_a and not self.flatten_inheritance:
             parent_slot_names = set(self._induced_slots_by_name(cls.is_a))
             local_properties: dict[str, Schema | Reference] = {}
@@ -495,8 +608,7 @@ class OpenAPIGenerator(Generator):
                 ]
             )
             schema.title = cls.name
-            if cls.description:
-                schema.description = cls.description
+            schema.description = self._class_description(cls)
             return schema
 
         # Flat schema: every induced slot (inherited and local) as a
@@ -515,8 +627,7 @@ class OpenAPIGenerator(Generator):
 
         schema = Schema(type=DataType.OBJECT, additionalProperties=False)
         schema.title = cls.name
-        if cls.description:
-            schema.description = cls.description
+        schema.description = self._class_description(cls)
         if properties:
             schema.properties = properties
         if required:
@@ -530,7 +641,7 @@ class OpenAPIGenerator(Generator):
 
         # Determine the base schema/ref
         if sv.get_class(range_name) or sv.get_enum(range_name):
-            ref = Reference(ref=f"#/components/schemas/{range_name}")
+            ref = self._class_range_ref(slot, range_name)
             if slot.multivalued:
                 base = Schema(type=DataType.ARRAY, items=ref)
             else:
@@ -550,16 +661,17 @@ class OpenAPIGenerator(Generator):
             or slot.minimum_value is not None
             or slot.maximum_value is not None
         )
-        if isinstance(base, Reference) and has_extras:
+        slot_description = self._slot_description(slot)
+        if isinstance(base, Reference) and (slot_description or has_extras):
             # Wrap in allOf to add constraints alongside a $ref
             schema = Schema(allOf=[base])
-            if slot.description:
-                schema.description = slot.description
+            if slot_description:
+                schema.description = slot_description
             return schema
 
         if isinstance(base, Schema):
-            if slot.description:
-                base.description = slot.description
+            if slot_description:
+                base.description = slot_description
             if slot.pattern:
                 base.pattern = slot.pattern
             if slot.minimum_value is not None:
@@ -920,12 +1032,21 @@ class OpenAPIGenerator(Generator):
             )
 
     def _inject_rdf_extensions(self, raw: dict) -> None:
-        """Walk the dumped spec and decorate schemas with x-rdf-* extensions."""
+        """Walk the dumped spec and decorate schemas with x-rdf-* extensions.
+
+        Emits both ``x-rdf-class`` (our existing custom name, what the
+        spec-driven serdes runtime reads) and ``x-jsonld-type`` (the
+        IETF draft-polli-restapi-ld-keywords-02 standard name). Both
+        carry the same value — the class's expanded RDF IRI. Any
+        consumer implementing the IETF draft picks up the standard
+        keyword; our existing tooling continues to read the original.
+        """
         schemas = (raw.get("components") or {}).get("schemas") or {}
         for class_name, schema in schemas.items():
             class_uri = self._x_rdf_class.get(class_name)
             if class_uri:
                 schema["x-rdf-class"] = class_uri
+                schema["x-jsonld-type"] = class_uri
             # Properties may live at top level or inside the inline schema half
             # of an `allOf` (used for inheritance).
             holders: list[dict] = []
@@ -936,8 +1057,10 @@ class OpenAPIGenerator(Generator):
                     holders.append(sub["properties"])
             for props in holders:
                 for slot_name, slot_schema in props.items():
+                    if not isinstance(slot_schema, dict):
+                        continue
                     slot_uri = self._x_rdf_property.get((class_name, slot_name))
-                    if slot_uri and isinstance(slot_schema, dict):
+                    if slot_uri:
                         slot_schema["x-rdf-property"] = slot_uri
 
     # --- Operation builders ------------------------------------------------
@@ -1185,6 +1308,160 @@ class OpenAPIGenerator(Generator):
             return designates_slot.name
         return None
 
+    def _class_response_ref(self, class_name: str) -> Schema | Reference:
+        """Schema or ``$ref`` for the ``class_name`` payload in a path op.
+
+        When the class has 2+ concrete descendants (it's polymorphic),
+        emit ``oneOf: [$ref each concrete option]`` plus the inherited
+        ``discriminator`` so a GET on /datasets/{id} can legitimately
+        return a ``DatasetSeries`` and the spec advertises it. This is
+        what openapi-generator's Spring template needs to wire up
+        Jackson polymorphic deserialization on the response side.
+
+        Used uniformly across list, read, create, update, patch, and
+        nested-collection responses — any place a class is the body
+        shape of a path operation.
+        """
+        sv = self.schemaview
+        descendants = self._concrete_descendants_including_self(class_name)
+        if len(descendants) <= 1:
+            return Reference(ref=f"#/components/schemas/{class_name}")
+        oneof = [Reference(ref=f"#/components/schemas/{n}") for n in descendants]
+        schema = Schema(oneOf=oneof)
+        field = self._inherited_discriminator_field(class_name)
+        if field is not None:
+            mapping = {
+                self._type_value(sv.get_class(n)): f"#/components/schemas/{n}"
+                for n in descendants
+            }
+            schema.discriminator = Discriminator(propertyName=field, mapping=mapping)
+        return schema
+
+    def _validate_inlined_recursion(self) -> None:
+        """Reject inlined-composition cycles unless explicitly acknowledged.
+
+        An inlined cycle (e.g., a class with an ``inlined: true`` slot whose
+        range transitively reaches the class itself) inflates JSON payloads
+        infinitely and makes most codegens spin during DTO generation. The
+        author has to make an explicit choice:
+
+          * drop ``inlined: true`` on the offending slot so it becomes a
+            reference (the default for identifier-bearing classes —
+            target's IRI is sent on the wire), OR
+          * annotate any class on the cycle with
+            ``openapi.recurse_max_depth: <int>`` to acknowledge the cycle
+            is intentional. The annotation is opt-in; the integer is
+            currently informational (no depth bound is enforced) — the
+            point is to make the failure loud and deliberate, not silent.
+
+        Reference cycles (``inlined: false``) are fine: they're IRI
+        strings on the wire, no expansion happens.
+        """
+        sv = self.schemaview
+
+        # Build the composition adjacency:  class → [(slot, range), ...]
+        composition: dict[str, list[tuple[str, str]]] = {}
+        for class_name in sv.all_classes():
+            edges: list[tuple[str, str]] = []
+            for slot in self._induced_slots_iter(class_name):
+                if (
+                    slot.range
+                    and sv.get_class(slot.range)
+                    and self._is_composition(slot)
+                ):
+                    edges.append((slot.name, slot.range))
+            if edges:
+                composition[class_name] = edges
+
+        if not composition:
+            return
+
+        # 3-color DFS for back-edge detection. ``stack`` records the chain
+        # of edges (parent, slot, child) currently being visited; on a back
+        # edge to a node already on the stack we extract the cycle for
+        # error reporting.
+        in_stack: dict[str, int] = {}
+        visited: set[str] = set()
+        edge_stack: list[tuple[str, str, str]] = []
+
+        def find_cycle(node: str) -> list[tuple[str, str, str]] | None:
+            in_stack[node] = len(edge_stack)
+            for slot_name, target in composition.get(node, []):
+                if target in in_stack:
+                    return edge_stack[in_stack[target]:] + [(node, slot_name, target)]
+                if target not in visited and target in composition:
+                    edge_stack.append((node, slot_name, target))
+                    cycle = find_cycle(target)
+                    edge_stack.pop()
+                    if cycle is not None:
+                        return cycle
+            del in_stack[node]
+            visited.add(node)
+            return None
+
+        for class_name in composition:
+            if class_name in visited:
+                continue
+            cycle = find_cycle(class_name)
+            if cycle is None:
+                continue
+            cycle_classes = {parent for parent, _, _ in cycle} | {
+                child for _, _, child in cycle
+            }
+            if any(
+                self._class_annotation(sv.get_class(n), "openapi.recurse_max_depth")
+                is not None
+                for n in cycle_classes
+            ):
+                continue
+            path = (
+                " -> ".join(f"{parent}.{slot}" for parent, slot, _ in cycle)
+                + f" -> {cycle[-1][2]}"
+            )
+            raise ValueError(
+                f"Inlined composition cycle detected: {path}. Inlined cycles "
+                f"cause infinite expansion in generated JSON payloads. "
+                f"Resolve by setting `inlined: false` on one of the slots in "
+                f"the cycle (the on-the-wire shape becomes a reference IRI), "
+                f"or by adding `openapi.recurse_max_depth: <N>` as a class "
+                f"annotation on a class in the cycle to acknowledge it is "
+                f"intentional."
+            )
+
+    def _is_in_polymorphic_chain(self, cls: ClassDefinition) -> bool:
+        """True if ``cls`` or any ancestor declares a discriminator.
+
+        Drives the flatten-vs-allOf decision in :meth:`_class_to_schema`:
+        polymorphic chains flatten so each concrete schema can pin its
+        own discriminator without ``allOf`` intersection conflicts.
+        """
+        sv = self.schemaview
+        cur: ClassDefinition | None = cls
+        while cur is not None:
+            if self._discriminator_field(cur) is not None:
+                return True
+            cur = sv.get_class(cur.is_a) if cur.is_a else None
+        return False
+
+    def _inherited_discriminator_field(self, class_name: str) -> str | None:
+        """Walk the ``is_a`` chain looking for a discriminator declaration.
+
+        ``_discriminator_field`` only inspects a single class — it does
+        not see annotations on ancestors. For property-level polymorphism
+        (e.g., a slot ranging on ``Dataset`` when the discriminator is
+        declared on ``Resource``) we need the chain walk so the
+        property's ``oneOf`` can carry the same ``discriminator``
+        block the schema-level emission already uses.
+        """
+        sv = self.schemaview
+        cls = sv.get_class(class_name)
+        while cls is not None:
+            field = self._discriminator_field(cls)
+            if field is not None:
+                return field
+            cls = sv.get_class(cls.is_a) if cls.is_a else None
+        return None
+
     def _is_discriminator_root(self, cls: ClassDefinition, field: str) -> bool:
         """True when ``cls`` is the topmost class declaring ``field`` as discriminator.
 
@@ -1213,7 +1490,18 @@ class OpenAPIGenerator(Generator):
 
         Mixins are excluded entirely from polymorphic mappings — they're
         trait composition, not subtyping.
+
+        Cached per build because ``_class_response_ref`` calls this
+        for every operation on every resource class (5+ calls per
+        class). Without caching, ``sv.class_descendants`` re-walks the
+        full class graph on every call.
         """
+        cache = getattr(self, "_concrete_descendants_cache", None)
+        if cache is None:
+            cache = {}
+            self._concrete_descendants_cache = cache
+        if class_name in cache:
+            return cache[class_name]
         sv = self.schemaview
         out: list[str] = []
         for name in sv.class_descendants(class_name, reflexive=False):
@@ -1221,7 +1509,22 @@ class OpenAPIGenerator(Generator):
             if cls is None or cls.abstract or cls.mixin:
                 continue
             out.append(name)
+        cache[class_name] = out
         return out
+
+    def _concrete_descendants_including_self(self, class_name: str) -> list[str]:
+        """Concrete descendants prepended with the root when concrete.
+
+        Used at *use sites* (path responses, slot ranges) where the
+        polymorphic union must include the root itself as one of the
+        addressable types — opposite of the discriminator-root case
+        handled by :meth:`_concrete_descendants_excluding_self`.
+        """
+        descendants = self._concrete_descendants_excluding_self(class_name)
+        cls = self.schemaview.get_class(class_name)
+        if cls is None or cls.abstract or cls.mixin:
+            return descendants
+        return [class_name] + descendants
 
     def _type_value(self, cls: ClassDefinition) -> str:
         """The discriminator value for a concrete subclass.
@@ -1272,61 +1575,34 @@ class OpenAPIGenerator(Generator):
                 seen[tv] = sub_name
                 mapping[tv] = f"#/components/schemas/{sub_name}"
 
-            self._inject_discriminator_on_parent(
-                schemas, class_name, field, list(mapping.keys()), mapping
-            )
             for tv, sub_name in seen.items():
                 self._inject_subclass_type_value(schemas, sub_name, field, tv)
 
-    def _inject_discriminator_on_parent(
-        self,
-        schemas: dict[str, Schema | Reference],
-        class_name: str,
-        field: str,
-        type_values: list[str],
-        mapping: dict[str, str],
-    ) -> None:
-        schema = schemas.get(class_name)
-        if not isinstance(schema, Schema):
-            return  # Reference — nothing to patch
-
-        # The discriminator goes at the schema-object level so it applies to
-        # any $ref that resolves to this schema.
-        schema.discriminator = Discriminator(propertyName=field, mapping=mapping)
-
-        # `oneOf` array of $refs to every concrete subclass — what
-        # Swagger UI and most codegens (openapi-generator's TS / Java /
-        # Spring) need to offer polymorphic selection. The discriminator
-        # tells consumers how to *interpret* a payload; oneOf tells them
-        # which subclasses are *possible*.
-        #
-        # The parent's own shape (`type: object`, properties, required)
-        # is preserved in *both* flatten and non-flatten modes because
-        # the parent is a concrete schema in its own right — codegens
-        # use `type: object` as the signal to generate a class for it,
-        # and dropping it makes openapi-generator (Spring server, in
-        # particular) skip the parent class entirely. The
-        # `flatten_inheritance` flag affects subclass shapes (no
-        # ``allOf`` back-reference), not the parent's own emission.
-        schema.oneOf = [Reference(ref=ref) for ref in mapping.values()]
-
-        # Locate or synthesise the discriminator field. With `is_a`
-        # inheritance the local properties live under `allOf[1]`; for
-        # standalone classes they're at the top level.
-        local = self._writable_local_schema(schema)
-        properties = local.properties or {}
-        existing = properties.get(field)
-        if existing is None or not isinstance(existing, Schema):
-            properties[field] = Schema(type=DataType.STRING, enum=type_values)
-        else:
-            existing.type = DataType.STRING
-            existing.enum = type_values
-        local.properties = properties
-
-        required = list(local.required or [])
-        if field not in required:
-            required.append(field)
-        local.required = required
+            # Optional back-compat field: `openapi.legacy_type_field` on
+            # the polymorphic root names a per-class constant property
+            # (e.g. `#type` carrying a Java FQN like
+            # `com.xyz.dcat.Catalog`). The value comes from each
+            # concrete class's `openapi.legacy_type_value`. Coexists
+            # with the proper discriminator — codegen uses the latter
+            # for polymorphic dispatch; the former is just a stable
+            # opaque marker for legacy consumers.
+            #
+            # ``openapi.legacy_type_codegen_name`` (optional) — supplies
+            # a clean target-language identifier via ``x-codegen-name``
+            # so openapi-generator's Java/Spring/TS templates produce
+            # ``private String legacyType`` with ``@JsonProperty("#type")``
+            # rather than the auto-mangled ``hashType``/``atType`` form.
+            legacy_field = self._class_annotation(cls, "openapi.legacy_type_field")
+            if legacy_field is not None:
+                legacy_field = legacy_field.strip()
+                codegen_name = self._class_annotation(
+                    cls, "openapi.legacy_type_codegen_name"
+                )
+                codegen_name = codegen_name.strip() if codegen_name else None
+                for sub_name in seen.values():
+                    self._inject_legacy_type_value(
+                        schemas, sub_name, legacy_field, codegen_name
+                    )
 
     @staticmethod
     def _writable_local_schema(schema: Schema) -> Schema:
@@ -1348,29 +1624,122 @@ class OpenAPIGenerator(Generator):
         field: str,
         type_value: str,
     ) -> None:
+        """Pin the discriminator field on a concrete class to its single
+        type value: ``enum: [<self>], default: <self>``.
+
+        Every concrete class — leaf or intermediate — gets the same
+        treatment. A ``Dataset`` payload always carries
+        ``resourceType: "Dataset"``; a ``Catalog`` payload always
+        carries ``resourceType: "Catalog"``. That's what the wire
+        format means in DCAT-3 (and in JSON-LD ``@type`` aliasing
+        generally), and it's what openapi-generator's Spring template
+        wires through Jackson's ``@JsonTypeInfo`` /
+        ``@JsonSubTypes`` so each generated DTO has a final
+        ``resourceType`` constant.
+
+        Trade-off — JSON Schema purity vs codegen ergonomics: under
+        strict ``allOf``-as-intersection semantics, ``Catalog``
+        inherits ``Dataset``'s ``enum: [Dataset]`` via its
+        ``allOf[0] = {$ref: Dataset}`` and intersects with its own
+        ``enum: [Catalog]`` to ``∅``. A pure JSON Schema validator
+        would reject every ``Catalog`` payload. Spring codegen
+        doesn't run JSON Schema validation — it dispatches via the
+        discriminator at the slot/path level (``oneOf`` + ``mapping``)
+        and relies on Jackson polymorphic deserialization, both of
+        which work correctly here. The per-class pin is what makes
+        the DTOs and Swagger UI display say what they should: every
+        concrete class has a fixed ``resourceType``.
+        """
         schema = schemas.get(class_name)
         if not isinstance(schema, Schema):
             return
         local = self._writable_local_schema(schema)
         properties = dict(local.properties or {})
-        # Single-value enum so a hand-written client reading the spec sees
-        # exactly what to send for this concrete subclass.
-        properties[field] = Schema(
+        disc = Schema(
             type=DataType.STRING,
             enum=[type_value],
             default=type_value,
+        )
+        properties[field] = disc
+        local.properties = properties
+        # The discriminator's RDF identity belongs to the *class*, not
+        # to a wire-format field. Class-level ``x-rdf-class`` (graph
+        # emission) and ``x-jsonld-type`` (IETF JSON-LD alignment)
+        # already convey it; attaching ``x-rdf-property: rdf:type`` to
+        # this field would tempt RDF runtimes to emit a malformed
+        # ``<subject> rdf:type "Dataset"`` literal triple.
+        required = list(local.required or [])
+        if field not in required:
+            required.append(field)
+        local.required = required
+
+    def _inject_legacy_type_value(
+        self,
+        schemas: dict[str, Schema | Reference],
+        class_name: str,
+        field: str,
+        codegen_name: str | None = None,
+    ) -> None:
+        """Inject an opaque per-class constant for back-compat consumers.
+
+        The value comes from ``openapi.legacy_type_value`` on the
+        concrete class — required when the polymorphic root declared
+        ``openapi.legacy_type_field``. Format is up to the author
+        (Java FQN, custom IRI, anything stable). No RDF mapping is
+        attached: this is a local convention, not a real predicate.
+        Errors loudly if a concrete class is missing the value, since
+        silent omission would leave gaps in the wire payload.
+
+        ``codegen_name`` (optional) is recorded on the generator
+        instance for :meth:`emit_name_mappings` to dump to a sibling
+        ``name-mappings.txt`` file the user passes to
+        ``openapi-generator-cli --name-mappings @<file>``. That CLI
+        option is the reliable way to rename an awkward JSON property
+        (``#type``) onto a clean target-language identifier
+        (``legacyType``) while preserving the wire name via
+        ``@JsonProperty``. The spec itself stays unannotated —
+        openapi-generator's Java/Spring/TS templates do **not** have
+        a universal property-renaming vendor extension, despite some
+        documentation suggesting otherwise.
+        """
+        sv = self.schemaview
+        cls = sv.get_class(class_name)
+        if cls is None:
+            return
+        value = self._class_annotation(cls, "openapi.legacy_type_value")
+        if value is None:
+            raise ValueError(
+                f"Class {class_name!r} is on a polymorphic chain that declares "
+                f"`openapi.legacy_type_field: {field!r}` but does not set "
+                f"`openapi.legacy_type_value` on this class. Each concrete "
+                f"class in the chain must specify the legacy type value "
+                f"explicitly — the format is up to you (Java FQN, custom "
+                f"IRI, etc.) and there is deliberately no fallback."
+            )
+        value = value.strip()
+        schema = schemas.get(class_name)
+        if not isinstance(schema, Schema):
+            return
+        local = self._writable_local_schema(schema)
+        properties = dict(local.properties or {})
+        properties[field] = Schema(
+            type=DataType.STRING,
+            enum=[value],
+            default=value,
         )
         local.properties = properties
         required = list(local.required or [])
         if field not in required:
             required.append(field)
         local.required = required
+        if codegen_name:
+            self._codegen_name_mappings[field] = codegen_name
 
     def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)
         array_schema = Schema(
             type=DataType.ARRAY,
-            items=Reference(ref=f"#/components/schemas/{class_name}"),
+            items=self._class_response_ref(class_name),
         )
         return Operation(
             summary=f"List {_to_path_segment(class_name).replace('_', ' ')}",
@@ -1387,7 +1756,7 @@ class OpenAPIGenerator(Generator):
 
     def _make_create_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)
-        ref = Reference(ref=f"#/components/schemas/{class_name}")
+        ref = self._class_response_ref(class_name)
         return Operation(
             summary=f"Create a {class_name}",
             operationId=f"create_{_to_snake_case(class_name)}",
@@ -1407,7 +1776,7 @@ class OpenAPIGenerator(Generator):
 
     def _make_read_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)
-        ref = Reference(ref=f"#/components/schemas/{class_name}")
+        ref = self._class_response_ref(class_name)
         return Operation(
             summary=f"Get a {class_name}",
             operationId=f"get_{_to_snake_case(class_name)}",
@@ -1423,7 +1792,7 @@ class OpenAPIGenerator(Generator):
 
     def _make_update_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)
-        ref = Reference(ref=f"#/components/schemas/{class_name}")
+        ref = self._class_response_ref(class_name)
         return Operation(
             summary=f"Update a {class_name}",
             operationId=f"update_{_to_snake_case(class_name)}",
@@ -1464,7 +1833,7 @@ class OpenAPIGenerator(Generator):
         class schema and honours ``openapi.media_types`` as usual.
         """
         media_types = self._get_media_types(cls)
-        full_ref = Reference(ref=f"#/components/schemas/{class_name}")
+        full_ref = self._class_response_ref(class_name)
         patch_ref = Reference(ref=f"#/components/schemas/{class_name}Patch")
         return Operation(
             summary=f"Patch a {class_name}",
@@ -1563,6 +1932,59 @@ class OpenAPIGenerator(Generator):
         (composition is the only option), False when it does (reference).
         """
         return bool(slot.inlined)
+
+    def _class_range_ref(self, slot: SlotDefinition, range_name: str) -> Schema | Reference:
+        """Build the schema or ``$ref`` for a class- or enum-ranged slot.
+
+        Three branches, in priority order:
+
+        1. **Reference** (``inlined: false`` against an identifier-bearing
+           class) → plain IRI string (``type: string, format: uri``).
+           RDF-roundtrippable: the same value is valid when a content
+           negotiation layer renders ``application/ld+json`` or
+           ``text/turtle`` from the same response.
+
+        2. **Polymorphic composition** (``inlined: true``, range has 2+
+           concrete descendants) → ``oneOf: [$ref each concrete option]``
+           at the property level, carrying the inherited
+           ``discriminator`` + ``mapping`` if one exists in the chain.
+           This is the shape openapi-generator's Spring template wires
+           to Jackson ``@JsonSubTypes`` for polymorphic deserialization.
+           The schema-level ``discriminator`` + ``oneOf`` on the
+           polymorphic root remains; this property-level emission gives
+           codegens the join-point information they need at the slot.
+
+        3. **Plain composition** (everything else) → ``$ref <Range>``.
+
+        Enum ranges always go through branch 3.
+        """
+        sv = self.schemaview
+        target_cls = sv.get_class(range_name)
+
+        if (
+            target_cls is not None
+            and not self._is_composition(slot)
+            and self._identifier_slot(range_name) is not None
+        ):
+            return Schema(type=DataType.STRING, schema_format="uri")
+
+        if target_cls is not None and self._is_composition(slot):
+            descendants = self._concrete_descendants_including_self(range_name)
+            if len(descendants) > 1:
+                oneof = [Reference(ref=f"#/components/schemas/{n}") for n in descendants]
+                schema = Schema(oneOf=oneof)
+                field = self._inherited_discriminator_field(range_name)
+                if field is not None:
+                    mapping = {
+                        self._type_value(sv.get_class(n)): f"#/components/schemas/{n}"
+                        for n in descendants
+                    }
+                    schema.discriminator = Discriminator(
+                        propertyName=field, mapping=mapping
+                    )
+                return schema
+
+        return Reference(ref=f"#/components/schemas/{range_name}")
 
     @staticmethod
     def _build_resource_link_schema() -> Schema:
@@ -2090,7 +2512,7 @@ class OpenAPIGenerator(Generator):
             return
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)
-        target_ref = Reference(ref=f"#/components/schemas/{target_class_name}")
+        target_ref = self._class_response_ref(target_class_name)
         array_schema = Schema(type=DataType.ARRAY, items=target_ref)
         op_tag = self._class_tag(target_class_name)
         slot_seg = slot.name
@@ -2262,7 +2684,7 @@ class OpenAPIGenerator(Generator):
 
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)
-        target_ref = Reference(ref=f"#/components/schemas/{target_class_name}")
+        target_ref = self._class_response_ref(target_class_name)
         array_schema = Schema(type=DataType.ARRAY, items=target_ref)
 
         link_ref = Reference(ref="#/components/schemas/ResourceLink")

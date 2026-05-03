@@ -1,5 +1,7 @@
 """CLI for generating OpenAPI specs from LinkML schemas."""
 
+from pathlib import Path
+
 import click
 
 from linkml_openapi import __version__
@@ -79,12 +81,47 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
         "are unaffected."
     ),
 )
+@click.option(
+    "--emit-name-mappings",
+    type=click.Path(dir_okay=False, writable=True, path_type=Path),
+    default=None,
+    metavar="PATH",
+    help=(
+        "Write the wire→codegen rename map to PATH for use with "
+        "`openapi-generator-cli --name-mappings @PATH`. Captures any "
+        "`openapi.legacy_type_codegen_name` (and similar) annotations "
+        "from the schema. No file is written when the schema declares "
+        "no renames."
+    ),
+)
+@click.option(
+    "--post-process",
+    "post_process",
+    default=None,
+    metavar="NAME[,NAME...]",
+    help=(
+        "Comma-separated list of registered post-processors to apply "
+        "to the generated spec, in order. See "
+        "linkml_openapi.post_processors for the registry. Example: "
+        "--post-process extract-inline-oneof"
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
-def cli(yamlfile, resource_filter=(), **kwargs):
+def cli(yamlfile, resource_filter=(), emit_name_mappings=None,
+        post_process=None, **kwargs):
     """Generate an OpenAPI specification from a LinkML schema."""
     resource_filter = list(resource_filter) if resource_filter else None
+    if post_process:
+        kwargs["post_processors"] = [
+            n.strip() for n in post_process.split(",") if n.strip()
+        ]
     gen = OpenAPIGenerator(yamlfile, resource_filter=resource_filter, **kwargs)
-    click.echo(gen.serialize())
+    spec = gen.serialize()
+    click.echo(spec)
+    if emit_name_mappings is not None:
+        content = gen.emit_name_mappings()
+        if content:
+            emit_name_mappings.write_text(content)
 
 
 def main():
