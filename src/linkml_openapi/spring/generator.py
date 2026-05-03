@@ -678,7 +678,8 @@ public class Problem {
             {
                 "javadoc": f"POST /{slot.name} — create a {tn} embedded under a {pn}.",
                 "method_annotations": [
-                    f"@PostMapping(value = {collection}, consumes = {consumes}, produces = {produces})"
+                    f"@PostMapping(value = {collection}, consumes = {consumes},"
+                    f" produces = {produces})"
                 ],
                 "method_name": f"create{pn}{sn}",
                 "return_type": tn,
@@ -815,7 +816,9 @@ public class Problem {
         )
         cn = cls.name
 
-        # Build URL: <hop[0].parent_path>/{<hop[0].id>}/<hop[0].slot>/{<hop[1].id>}/.../<hop[-1].slot>/{id}
+        # Build URL:
+        #   <hop[0].parent_path>/{<hop[0].id>}/<hop[0].slot>/{<hop[1].id>}/...
+        #   .../<hop[-1].slot>/{id}
         #
         # Each ChainHop carries:
         #   - parent_path_segment: the parent class's URL noun (only used for hop[0])
@@ -868,7 +871,8 @@ public class Problem {
             {
                 "javadoc": f"PUT deep — replace a {cn} via its parent chain.",
                 "method_annotations": [
-                    f"@PutMapping(value = {deep_item}, consumes = {consumes}, produces = {produces})"
+                    f"@PutMapping(value = {deep_item}, consumes = {consumes},"
+                    f" produces = {produces})"
                 ],
                 "method_name": f"update{cn}{suffix}",
                 "return_type": cn,
@@ -997,7 +1001,8 @@ public class Problem {
                             {
                                 "javadoc": f"GET {collection_path} — list {cn}s.",
                                 "method_annotations": [
-                                    f'@GetMapping(value = "{collection_path}", produces = {produces})'
+                                    f'@GetMapping(value = "{collection_path}",'
+                                    f" produces = {produces})"
                                 ],
                                 "method_name": f"list{cn}s{suffix}",
                                 "return_type": f"List<{cn}>",
@@ -1010,7 +1015,9 @@ public class Problem {
                             {
                                 "javadoc": f"POST {collection_path} — create a {cn}.",
                                 "method_annotations": [
-                                    f'@PostMapping(value = "{collection_path}", consumes = {consumes}, produces = {produces})'
+                                    f'@PostMapping(value = "{collection_path}",'
+                                    f" consumes = {consumes},"
+                                    f" produces = {produces})"
                                 ],
                                 "method_name": f"create{cn}{suffix}",
                                 "return_type": cn,
