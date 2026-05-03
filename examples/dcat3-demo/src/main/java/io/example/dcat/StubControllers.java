@@ -11,9 +11,9 @@ import io.example.dcat.model.Agent;
 import io.example.dcat.model.Catalog;
 import io.example.dcat.model.CatalogRecord;
 import io.example.dcat.model.DataService;
+import io.example.dcat.model.Distribution;
 import io.example.dcat.model.Dataset;
 import io.example.dcat.model.DatasetSeries;
-import io.example.dcat.model.Distribution;
 import io.example.dcat.store.InMemoryStore;
 import io.example.dcat.store.Stores;
 import java.util.List;
@@ -78,7 +78,19 @@ public class StubControllers {
 
         @Override
         public ResponseEntity<List<Catalog>> listCatalogs(
-                Integer limit, Integer offset) {
+                Integer limit, Integer offset,
+                String title,
+                java.time.OffsetDateTime issued,
+                java.time.OffsetDateTime issuedGte,
+                java.time.OffsetDateTime issuedLte,
+                java.time.OffsetDateTime issuedGt,
+                java.time.OffsetDateTime issuedLt,
+                java.time.OffsetDateTime modified,
+                java.time.OffsetDateTime modifiedGte,
+                java.time.OffsetDateTime modifiedLte,
+                java.time.OffsetDateTime modifiedGt,
+                java.time.OffsetDateTime modifiedLt,
+                java.util.List<String> sort) {
             return ResponseEntity.ok(stores.catalogs.list(limit, offset));
         }
 
@@ -112,7 +124,19 @@ public class StubControllers {
 
         @Override
         public ResponseEntity<List<Dataset>> listDatasets(
-                Integer limit, Integer offset) {
+                Integer limit, Integer offset,
+                String title,
+                java.time.OffsetDateTime issued,
+                java.time.OffsetDateTime issuedGte,
+                java.time.OffsetDateTime issuedLte,
+                java.time.OffsetDateTime issuedGt,
+                java.time.OffsetDateTime issuedLt,
+                java.time.OffsetDateTime modified,
+                java.time.OffsetDateTime modifiedGte,
+                java.time.OffsetDateTime modifiedLte,
+                java.time.OffsetDateTime modifiedGt,
+                java.time.OffsetDateTime modifiedLt,
+                java.util.List<String> sort) {
             return ResponseEntity.ok(stores.datasets.list(limit, offset));
         }
 
@@ -146,7 +170,13 @@ public class StubControllers {
 
         @Override
         public ResponseEntity<List<DatasetSeries>> listDatasetSeriess(
-                Integer limit, Integer offset) {
+                Integer limit, Integer offset,
+                String temporalResolution,
+                String title,
+                String description,
+                String rights,
+                String version,
+                String versionNotes) {
             return ResponseEntity.ok(
                     stores.datasetSeries.list(limit, offset));
         }
@@ -182,7 +212,12 @@ public class StubControllers {
 
         @Override
         public ResponseEntity<List<DataService>> listDataServices(
-                Integer limit, Integer offset) {
+                Integer limit, Integer offset,
+                String title,
+                String description,
+                String rights,
+                String version,
+                String versionNotes) {
             return ResponseEntity.ok(
                     stores.dataServices.list(limit, offset));
         }
@@ -213,48 +248,19 @@ public class StubControllers {
     }
 
     @RestController
-    public static class DistributionController implements DistributionApi {
-        @Autowired private Stores stores;
-
-        @Override
-        public ResponseEntity<List<Distribution>> listDistributions(
-                Integer limit, Integer offset) {
-            return ResponseEntity.ok(
-                    stores.distributions.list(limit, offset));
-        }
-
-        @Override
-        public ResponseEntity<Distribution> getDistribution(String id) {
-            return readOr404(stores.distributions, iri("distributions", id));
-        }
-
-        @Override
-        public ResponseEntity<Distribution> createDistribution(
-                Distribution body) {
-            return ResponseEntity.status(HttpStatus.CREATED)
-                    .body(stores.distributions.put(body));
-        }
-
-        @Override
-        public ResponseEntity<Distribution> updateDistribution(
-                String id, Distribution body) {
-            body.setId(iri("distributions", id));
-            return ResponseEntity.ok(stores.distributions.put(body));
-        }
-
-        @Override
-        public ResponseEntity<Void> deleteDistribution(String id) {
-            return deleteOr404(stores.distributions, iri("distributions", id));
-        }
-    }
-
-    @RestController
     public static class CatalogRecordController implements CatalogRecordApi {
         @Autowired private Stores stores;
 
         @Override
         public ResponseEntity<List<CatalogRecord>> listCatalogRecords(
-                Integer limit, Integer offset) {
+                Integer limit, Integer offset,
+                String title,
+                java.time.OffsetDateTime listingDate,
+                java.time.OffsetDateTime listingDateGte,
+                java.time.OffsetDateTime listingDateLte,
+                java.time.OffsetDateTime listingDateGt,
+                java.time.OffsetDateTime listingDateLt,
+                java.util.List<String> sort) {
             return ResponseEntity.ok(
                     stores.catalogRecords.list(limit, offset));
         }
@@ -290,7 +296,8 @@ public class StubControllers {
 
         @Override
         public ResponseEntity<List<Agent>> listAgents(
-                Integer limit, Integer offset) {
+                Integer limit, Integer offset,
+                String name) {
             return ResponseEntity.ok(stores.agents.list(limit, offset));
         }
 
@@ -315,6 +322,35 @@ public class StubControllers {
         @Override
         public ResponseEntity<Void> deleteAgent(String id) {
             return deleteOr404(stores.agents, iri("agents", id));
+        }
+    }
+
+    /**
+     * Distribution is `nested_only` — its only canonical URLs are the
+     * deep chain `/catalogs/{cat}/dataset/{ds}/distribution/{id}`.
+     * Wires through to the same in-memory store as the parent paths.
+     */
+    @RestController
+    public static class DistributionController implements DistributionApi {
+        @Autowired private Stores stores;
+
+        @Override
+        public ResponseEntity<Distribution> getDistributionViaCatalogDataset(
+                String catalog_id, String dataset_id, String id) {
+            return readOr404(stores.distributions, iri("distributions", id));
+        }
+
+        @Override
+        public ResponseEntity<Distribution> updateDistributionViaCatalogDataset(
+                String catalog_id, String dataset_id, String id, Distribution body) {
+            body.setId(iri("distributions", id));
+            return ResponseEntity.ok(stores.distributions.put(body));
+        }
+
+        @Override
+        public ResponseEntity<Void> deleteDistributionViaCatalogDataset(
+                String catalog_id, String dataset_id, String id) {
+            return deleteOr404(stores.distributions, iri("distributions", id));
         }
     }
 }
