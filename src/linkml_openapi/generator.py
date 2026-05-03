@@ -40,6 +40,15 @@ from linkml_openapi._query_params import (
     QUERY_PARAM_TOKENS as _QUERY_PARAM_TOKENS,
     COMPARABLE_RANGES as _COMPARABLE_RANGES,
 )
+from linkml_openapi._chains import (
+    build_parent_chains_index,
+    canonical_parent_chain,
+    parent_path_segments as _parent_path_segments_helper,
+    parse_path_param_sources as _parse_path_param_sources_helper,
+    render_chain_hops,
+    PATH_TEMPLATE_PLACEHOLDER_RE,
+    ChainHop,
+)
 
 # LinkML range → OpenAPI DataType mapping
 RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
@@ -1838,80 +1847,14 @@ class OpenAPIGenerator(Generator):
     # --- Deep nested paths via parent-chain walk -------------------------
 
     def _collect_parent_chains(self) -> dict[str, list[list[tuple[str, str]]]]:
-        """Index every chain of `(parent_class, slot_name)` leading to each class.
-
-        For a leaf class ``L``, each chain is the ordered list of ancestors
-        from the root parent down to the direct parent — e.g. for
-        ``Org → Catalog → Dataset → Distribution`` walked via
-        ``Org.catalogs``, ``Catalog.datasets``, ``Dataset.distributions``,
-        the chain is::
-
-            [("Org", "catalogs"),
-             ("Catalog", "datasets"),
-             ("Dataset", "distributions")]
-
-        Chains are pruned at slots annotated ``openapi.nested: "false"``
-        and skip excluded classes / slots so the index reflects the active
-        profile. Cycles are detected (the recursion tracks visited classes
-        on the current path) so a graph with ``A.bs: list[B]`` and
-        ``B.as: list[A]`` doesn't blow up. Only ancestors that are
-        themselves resource classes contribute — non-resource intermediates
-        have no addressable URL segment to fold in.
-
-        Result is a dict keyed by leaf class name. A class with no parents
-        in the relationship graph is absent from the dict.
-        """
-        sv = self.schemaview
-        resource_classes = set(self._get_resource_classes())
-
-        direct_parents: dict[str, list[tuple[str, str]]] = {}
-        for parent_name in sv.all_classes():
-            if parent_name in self._excluded_classes:
-                continue
-            if parent_name not in resource_classes:
-                continue
-            parent_cls = sv.get_class(parent_name)
-            for slot in self._induced_slots_iter(parent_name):
-                if not slot.multivalued:
-                    continue
-                if self._is_slot_excluded(slot):
-                    continue
-                target = slot.range
-                if not target or sv.get_class(target) is None:
-                    continue
-                if target == parent_name:
-                    continue  # self-loop, no canonical chain
-                nested_ann = self._get_slot_annotation(parent_cls, slot.name, "openapi.nested")
-                if nested_ann is not None and not _is_truthy(nested_ann):
-                    continue
-                direct_parents.setdefault(target, []).append((parent_name, slot.name))
-
-        index: dict[str, list[list[tuple[str, str]]]] = {}
-
-        def walk(leaf: str, on_path: tuple[str, ...]) -> list[list[tuple[str, str]]]:
-            # Memoisation here is unsound: chains computed under one
-            # `on_path` can prune ancestors that a different caller's
-            # `on_path` would have allowed, so the cached result depends
-            # on which leaf's walk reaches a given subgraph first. The
-            # graph is small (resource classes only) so a fresh walk per
-            # leaf is cheap and deterministic.
-            chains: list[list[tuple[str, str]]] = []
-            for parent_name, slot_name in direct_parents.get(leaf, []):
-                if parent_name in on_path:
-                    continue  # would close a cycle
-                upper = walk(parent_name, on_path + (parent_name,))
-                if not upper:
-                    chains.append([(parent_name, slot_name)])
-                else:
-                    for u in upper:
-                        chains.append(u + [(parent_name, slot_name)])
-            return chains
-
-        for cls_name in list(direct_parents.keys()):
-            chains = walk(cls_name, (cls_name,))
-            if chains:
-                index[cls_name] = chains
-        return index
+        return build_parent_chains_index(
+            self.schemaview,
+            resource_classes=set(self._get_resource_classes()),
+            excluded_classes=self._excluded_classes,
+            is_slot_excluded=self._is_slot_excluded,
+            get_slot_annotation=self._get_slot_annotation,
+            induced_slots=lambda name: list(self._induced_slots_iter(name)),
+        )
 
     @staticmethod
     def _suffix_operation_ids(paths: dict[str, PathItem], suffix: str) -> None:
@@ -1933,78 +1876,13 @@ class OpenAPIGenerator(Generator):
                 if existing:
                     op.operationId = existing + suffix
 
-    @staticmethod
-    def _parent_path_segments(annotation: str) -> list[tuple[str | None, str]]:
-        """Parse an ``openapi.parent_path`` annotation into per-hop matchers.
-
-        Each dot-separated segment is either ``slot_name`` (match the slot
-        at that hop, parent class implied) or ``ClassName.slot_name``
-        (match both the parent class and the slot — used to disambiguate
-        when multiple parents share a slot name).
-
-        Returns a list of ``(class_name_or_none, slot_name)`` tuples,
-        one per hop.
-        """
-        segments: list[tuple[str | None, str]] = []
-        for raw in annotation.strip().split("/"):
-            raw = raw.strip()
-            if not raw:
-                continue
-            if "." in raw:
-                cls_name, slot_name = raw.split(".", 1)
-                segments.append((cls_name.strip() or None, slot_name.strip()))
-            else:
-                segments.append((None, raw))
-        return segments
-
     def _canonical_parent_chain(self, class_name: str) -> list[tuple[str, str]]:
-        """Pick the canonical chain for ``class_name``.
-
-        * 0 chains → returns ``[]`` (the class is a root, no deep paths).
-        * 1 chain → returns it.
-        * >1 chains → reads ``openapi.parent_path`` on the leaf and matches.
-
-        Annotation syntax: ``/``-separated hops, each hop ``slot_name`` or
-        ``ClassName.slot_name``. Examples::
-
-            openapi.parent_path: catalogs.datasets        # two hops, slot-only (unambiguous)
-            openapi.parent_path: Folder.tags              # one hop, class-qualified
-            openapi.parent_path: Org.catalogs/Catalog.datasets  # two hops, fully qualified
-
-        Raises with the candidate list when the annotation is missing on
-        an ambiguous leaf or doesn't match any chain.
-        """
-        chains = self._parent_chains_index.get(class_name, [])
-        if not chains:
-            return []
-        if len(chains) == 1:
-            return chains[0]
-
         cls = self.schemaview.get_class(class_name)
-        annotated = self._class_annotation(cls, "openapi.parent_path") if cls else None
-        # Build human-readable candidate strings: prefer slot-only when it's
-        # unique at every hop, fall back to class-qualified otherwise.
-        candidates_qualified = ["/".join(f"{p}.{s}" for p, s in chain) for chain in chains]
-        if annotated:
-            wanted = self._parent_path_segments(annotated)
-            for chain in chains:
-                if len(chain) != len(wanted):
-                    continue
-                if all(
-                    (cls_q is None or cls_q == p) and slot_q == s
-                    for (cls_q, slot_q), (p, s) in zip(wanted, chain)
-                ):
-                    return chain
-            raise ValueError(
-                f"Class {class_name!r} declares "
-                f"`openapi.parent_path: {annotated!r}` but no matching chain "
-                f"exists. Candidates: {candidates_qualified}."
-            )
-        raise ValueError(
-            f"Class {class_name!r} is reachable via multiple parent chains. "
-            f"Pick one with the `openapi.parent_path` class annotation, "
-            f"e.g. `openapi.parent_path: {candidates_qualified[0]!r}`. "
-            f"Candidates: {candidates_qualified}."
+        annotated = (
+            self._class_annotation(cls, "openapi.parent_path") if cls else None
+        )
+        return canonical_parent_chain(
+            class_name, self._parent_chains_index, annotated
         )
 
     def _build_chain_path_params(self, chain: list[tuple[str, str]]) -> tuple[str, list[Parameter]]:
@@ -2086,44 +1964,11 @@ class OpenAPIGenerator(Generator):
         self._suffix_operation_ids(deep_paths, chain_suffix)
         return deep_paths
 
-    _PATH_TEMPLATE_PLACEHOLDER_RE: ClassVar[re.Pattern[str]] = re.compile(r"\{([^{}]+)\}")
+    _PATH_TEMPLATE_PLACEHOLDER_RE = PATH_TEMPLATE_PLACEHOLDER_RE
 
     @staticmethod
     def _parse_path_param_sources(class_name: str, raw: str) -> dict[str, tuple[str, str]]:
-        """Parse ``openapi.path_param_sources`` into ``{name: (Class, slot)}``.
-
-        Format: comma-separated ``name:Class.slot`` entries. Whitespace
-        around any token is trimmed. Empty / missing raw produces ``{}``.
-        Malformed entries raise with the offending entry quoted.
-        """
-        sources: dict[str, tuple[str, str]] = {}
-        for raw_entry in _parse_csv(raw):
-            if ":" not in raw_entry:
-                raise ValueError(
-                    f"Class {class_name!r} has malformed "
-                    f"`openapi.path_param_sources` entry {raw_entry!r}: "
-                    "expected `name:Class.slot`."
-                )
-            name, source = (s.strip() for s in raw_entry.split(":", 1))
-            if "." not in source:
-                raise ValueError(
-                    f"Class {class_name!r} has malformed source "
-                    f"{source!r} for parameter {name!r}: expected "
-                    "`Class.slot`."
-                )
-            src_class, src_slot = (s.strip() for s in source.split(".", 1))
-            if not name or not src_class or not src_slot:
-                raise ValueError(
-                    f"Class {class_name!r} has empty token in "
-                    f"`openapi.path_param_sources` entry {raw_entry!r}."
-                )
-            if name in sources:
-                raise ValueError(
-                    f"Class {class_name!r} declares duplicate path "
-                    f"parameter {name!r} in `openapi.path_param_sources`."
-                )
-            sources[name] = (src_class, src_slot)
-        return sources
+        return _parse_path_param_sources_helper(class_name, raw)
 
     def _emit_templated_deep_path(
         self,
