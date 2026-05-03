@@ -6,6 +6,152 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [0.9.0] — 2026-05-04
+
+The ship-it release for the **LinkML → Spring server emitter** —
+generates Spring Boot DTOs and `@RestController` interfaces directly
+from a LinkML schema, with a runtime sidecar OpenAPI spec carrying
+every `x-rdf-class` / `x-rdf-property` extension. Pairs with the new
+[`spring-rdf-runtime`](examples/spring-rdf-runtime/) library and the
+end-to-end DCAT-3 demo at [`examples/dcat3-demo/`](examples/dcat3-demo/)
+to prove the LinkML → OpenAPI → Spring → JSON+RDF round-trip on a
+real W3C standard.
+
+### Added — Spring server emitter
+
+- **`gen-spring-server` CLI** + `linkml_openapi.spring.SpringServerGenerator`
+  Python API. Walks the LinkML schema, writes
+  `<package>/model/*.java` (DTOs with Jackson polymorphism, Bean
+  Validation, `@Schema` extensions for RDF metadata) and
+  `<package>/api/*Api.java` (controller interfaces with default 501
+  bodies). Sidecar OpenAPI spec lands at `resources/openapi.yaml` for
+  the runtime serdes layer to read.
+- **Polymorphism via `is_a` chains.** LinkML inheritance becomes Java
+  `extends`; the polymorphic root carries `@JsonTypeInfo` +
+  `@JsonSubTypes`; concrete subclasses pin their discriminator value.
+  ([#54](https://github.com/jackhiggs/linkml-openapi/pull/54))
+- **Slot-driven query parameters** on every list endpoint, with the
+  same capability tokens as the OpenAPI side: `equality`,
+  `comparable` (emits `__gte`/`__lte`/`__gt`/`__lt`), `sortable`
+  (single `?sort=` array). Auto-inference from scalar slots; opt-out
+  via `openapi.auto_query_params: "false"` (schema/class) or
+  `openapi.query_param: "false"` (slot).
+  ([#54](https://github.com/jackhiggs/linkml-openapi/pull/54))
+- **Deep-chained URLs** for leaf classes reachable through a chain of
+  multivalued slots: `/catalogs/{cat}/dataset/{ds}/distribution/{id}`.
+  Honours `openapi.path_id`, `openapi.parent_path`,
+  `openapi.nested_only` / `openapi.flat_only`.
+  ([#54](https://github.com/jackhiggs/linkml-openapi/pull/54))
+- **Templated paths** via `openapi.path_template` +
+  `openapi.path_param_sources` for URL shapes the relationship graph
+  can't express (literal segments, compound keys, version prefixes).
+  ([#54](https://github.com/jackhiggs/linkml-openapi/pull/54))
+- **Path-style + per-slot path-segment overrides.** Schema-level
+  `openapi.path_style: kebab-case` renders auto-derived URL nouns
+  (`/data-services`, `/contact-point`); slot-level
+  `openapi.path_segment` is verbatim.
+  ([#54](https://github.com/jackhiggs/linkml-openapi/pull/54))
+- **Opt-in camelCase → kebab splitting.** Schema-level
+  `openapi.path_split_camel: "true"` (paired with `kebab-case`)
+  splits camelCase boundaries (`inSeries` → `in-series`,
+  `XMLParser` → `xml-parser`, acronym-aware).
+  ([#57](https://github.com/jackhiggs/linkml-openapi/pull/57))
+- **Body validation.** `@Valid` on every `@RequestBody` parameter
+  triggers Spring's bean-validation pass at request-binding time;
+  `@NotNull` / `@Pattern` / `@Min` / `@Max` constraints (already
+  emitted on DTOs from LinkML) now actually run.
+  ([#59](https://github.com/jackhiggs/linkml-openapi/pull/59))
+
+### Added — Post-processors framework
+
+- **`linkml_openapi.post_processors`** registry + the first concrete
+  pass, **`extract-inline-oneof`**, which hoists every inline
+  polymorphic `oneOf` in path operations to a named component schema
+  so openapi-generator's Spring template preserves discriminator
+  dispatch instead of flattening the union.
+  ([#55](https://github.com/jackhiggs/linkml-openapi/pull/55))
+- **`OpenAPIGenerator.post_processors: list[str]`** field threaded
+  through `serialize()` after the canonical spec is built but before
+  serialisation. New `--post-process NAME` CLI flag.
+  ([#55](https://github.com/jackhiggs/linkml-openapi/pull/55))
+
+### Added — Codegen name-mappings
+
+- **`name_mappings()` / `emit_name_mappings()`** on the generator,
+  populated during the build.
+- **`openapi.legacy_type_codegen_name`** annotation on a polymorphic
+  root: when paired with `openapi.legacy_type_field`, supplies a
+  clean target-language identifier (e.g. `legacyType`) for
+  openapi-generator's `--name-mappings @file` mechanism. Avoids the
+  auto-mangled `hashType` / `atType` names that Java/Spring/TS
+  templates produce for awkward wire names like `#type`.
+- **`--emit-name-mappings PATH`** CLI flag writes the rename map to
+  disk for direct consumption by `openapi-generator-cli`.
+  ([#55](https://github.com/jackhiggs/linkml-openapi/pull/55))
+
+### Added — Examples
+
+- **`examples/dcat3-demo/`** — Spring Boot service that runs
+  `gen-spring-server` against `tests/fixtures/dcat3.yaml` during
+  Maven's `generate-sources` phase, then boots Spring Boot with
+  springdoc serving `/v3/api-docs` and `/swagger-ui/index.html`.
+  Hand-written `StubControllers.java` delegates to in-memory stores
+  with seed data so every endpoint actually responds. Includes
+  [README.md](examples/dcat3-demo/README.md) with the run command
+  and curl one-liners for the four content-negotiation surfaces.
+  ([#55](https://github.com/jackhiggs/linkml-openapi/pull/55),
+  [#58](https://github.com/jackhiggs/linkml-openapi/pull/58))
+- **`examples/spring-rdf-runtime/`** — Spring Boot library that
+  registers an `HttpMessageConverter` for the RDF media types
+  (`text/turtle`, `application/ld+json`, `application/rdf+xml`,
+  `application/n-triples`). Reads `classpath:openapi.yaml`, indexes
+  `x-rdf-class` / `x-rdf-property` extensions at startup, and
+  marshals DTOs to RDF graphs via Apache Jena. Drop-in via Spring
+  Boot's META-INF AutoConfiguration. dcat3-demo consumes it to show
+  end-to-end LinkML → OpenAPI → Spring → JSON / Turtle / JSON-LD /
+  RDF/XML round-tripping with no per-class marshaling code.
+  ([#55](https://github.com/jackhiggs/linkml-openapi/pull/55))
+
+### Added — Architectural
+
+- **Use-site polymorphic dispatch.** `oneOf` moves from parent
+  component schemas to *use sites* — path responses
+  (`_class_response_ref`) and slot ranges (`_class_range_ref`) — with
+  the union *including* the root itself when concrete. Avoids
+  openapi-generator's Spring template choking on a parent that
+  self-references in its own `oneOf` (cyclic inheritance).
+  Companion methods `_concrete_descendants_excluding_self` (for the
+  discriminator-mapping case) and `_concrete_descendants_including_self`
+  (for use-site dispatch) make the two requirements explicit.
+  ([#55](https://github.com/jackhiggs/linkml-openapi/pull/55))
+- **Shared helpers** for the two emitters:
+  - `linkml_openapi/_query_params.py` — `walk_query_params()`,
+    capability tokens, frozen dataclasses.
+  - `linkml_openapi/_chains.py` — `build_parent_chains_index()`,
+    `canonical_parent_chain()`, `parse_path_param_sources()`,
+    `render_chain_hops()`.
+
+  Both generators consume the same helpers; validation messages stay
+  in sync; `tests/test_linkml_spring.py::TestParityWithOpenApiSide`
+  catches drift.
+  ([#54](https://github.com/jackhiggs/linkml-openapi/pull/54))
+
+### Fixed
+
+- **Spring `_nested_ops` now honors `openapi.nested: "false"`** and
+  skips single-valued class-ranged slots (matching the OpenAPI
+  generator's behaviour). The bug surfaced live when the dcat3-demo's
+  springdoc-generated `/v3/api-docs` advertised 137 paths against a
+  62-path sidecar — single-valued slots like `hasCurrentVersion`,
+  `replaces` etc. were emitting nested URLs they shouldn't have.
+  ([#58](https://github.com/jackhiggs/linkml-openapi/pull/58))
+
+### Distribution
+
+- New runtime dependency: `jinja2>=3.1` (Spring template renderer).
+- New project script: `gen-spring-server`.
+- New `linkml.generators` entry point: `spring`.
+
 ## [0.8.2] — 2026-04-29
 
 ### Fixed
