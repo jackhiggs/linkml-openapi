@@ -523,3 +523,101 @@ classes:
         # Class path "things" stays unchanged (no underscores); slot
         # segment "sub_things" becomes "sub-things" under kebab style.
         assert '@GetMapping(value = "/things/{id}/sub-things",' in src
+
+
+class TestDeepChainedPaths:
+    """Deep nested URL chains land on the leaf class's controller as
+    item-only operations (read/update/delete) on the deep item path.
+    Mirrors the OpenAPI generator's _emit_chained_deep_path which calls
+    only _attach_item_operations."""
+
+    def test_deep_path_emits_on_distribution_api(self, files):
+        """Distribution's chain is [(Catalog, dataset), (Dataset, distribution)].
+        Singular slot names per dcat3; default <class_snake>_id ancestors;
+        leaf is {id}."""
+        src = files["io/example/dcat/api/DistributionApi.java"]
+        assert (
+            '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution/{id}"'
+            in src
+        )
+
+    def test_deep_method_name_via_chain_suffix(self, files):
+        src = files["io/example/dcat/api/DistributionApi.java"]
+        assert "getDistributionViaCatalogDataset" in src
+        assert "updateDistributionViaCatalogDataset" in src
+        assert "deleteDistributionViaCatalogDataset" in src
+
+    def test_dataset_chain_depth_one(self, files):
+        """Dataset's parent chain is just [(Catalog, dataset)] — a single
+        hop. The deep URL is /catalogs/{catalog_id}/dataset/{id}."""
+        src = files["io/example/dcat/api/DatasetApi.java"]
+        assert (
+            '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{id}"'
+            in src
+        )
+        assert "getDatasetViaCatalog" in src
+
+    def test_deep_path_params_in_order(self, files):
+        """Path parameters declared root → leaf in the method signature."""
+        src = files["io/example/dcat/api/DistributionApi.java"]
+        get_idx = src.find("getDistributionViaCatalogDataset")
+        sig_end = src.find(") {", get_idx)
+        signature = src[get_idx:sig_end]
+        assert (
+            signature.index('"catalog_id"')
+            < signature.index('"dataset_id"')
+            < signature.index('"id"')
+        )
+
+    def test_deep_chained_url_is_item_only(self, files):
+        """No collection-level GET/POST on the deep chained URL."""
+        src = files["io/example/dcat/api/DistributionApi.java"]
+        assert (
+            '@PostMapping(value = "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution",'
+            not in src
+        )
+        assert (
+            '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution",'
+            not in src
+        )
+
+    def test_no_method_name_collision_between_flat_and_deep_ops(self, files):
+        """Within DistributionApi, all method names must be unique."""
+        src = files["io/example/dcat/api/DistributionApi.java"]
+        import re
+        method_names = re.findall(r"default ResponseEntity<[^>]*> (\w+)\(", src)
+        assert len(method_names) == len(set(method_names)), (
+            f"duplicate methods: {[m for m in method_names if method_names.count(m) > 1]}"
+        )
+
+    def test_ancestor_path_id_annotation_honored(self, tmp_path):
+        """When an ancestor class declares openapi.path_id, the chain
+        URL uses that value instead of the <class_snake>_id default."""
+        fixture = tmp_path / "path_id.yaml"
+        fixture.write_text("""\
+id: https://example.org/pid
+name: pid
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+      openapi.path_id: catId
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      datasets:
+        range: Dataset
+        multivalued: true
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        files = SpringServerGenerator(str(fixture), package="io.example.pid").build()
+        src = files["io/example/pid/api/DatasetApi.java"]
+        assert '@GetMapping(value = "/catalogs/{catId}/datasets/{id}"' in src
+        assert '@PathVariable("catId")' in src

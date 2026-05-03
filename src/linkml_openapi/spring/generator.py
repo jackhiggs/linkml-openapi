@@ -41,6 +41,12 @@ from linkml_runtime.utils.schemaview import SchemaView
 # class names — divergent regexes (e.g. for ``HTMLParser``) here
 # would silently produce mismatched URLs between the spec and Spring
 # routes.
+from linkml_openapi._chains import (
+    ChainHop,
+    build_parent_chains_index,
+    canonical_parent_chain,
+    render_chain_hops,
+)
 from linkml_openapi._query_params import QueryParamSpec, walk_query_params
 from linkml_openapi.generator import _to_snake_case
 
@@ -95,6 +101,14 @@ class SpringServerGenerator:
             trim_blocks=False,
             lstrip_blocks=False,
             keep_trailing_newline=True,
+        )
+        self._chains_index = build_parent_chains_index(
+            self._sv,
+            resource_classes=self._resource_class_names(),
+            excluded_classes=set(),
+            is_slot_excluded=lambda s: False,
+            get_slot_annotation=self._get_slot_annotation_compat,
+            induced_slots=self._induced_slots,
         )
 
     # --- Public API ---------------------------------------------------
@@ -471,6 +485,11 @@ public class Problem {
         }
         ops.extend(self._top_level_ops(cls, path_segment, imports, media_types))
         ops.extend(self._nested_ops(cls, path_segment, imports, media_types))
+        # Deep nested chain (auto-derived). Item-only CRUD on the deep URL.
+        parent_path_ann = self._class_annotation(cls, "openapi.parent_path")
+        chain = canonical_parent_chain(cls.name, self._chains_index, parent_path_ann)
+        if chain:
+            ops.extend(self._deep_chained_ops(cls, chain, imports, media_types))
         # Decorate every op with explicit success + RFC 7807 error
         # responses. The success block fans out one ``@Content`` per
         # advertised media type so the live spec advertises
@@ -746,6 +765,103 @@ public class Problem {
             },
         ]
 
+    def _deep_chained_ops(
+        self,
+        cls: ClassDefinition,
+        chain: list[tuple[str, str]],
+        imports: set[str],
+        media_types: list[str],
+    ) -> list[dict]:
+        """Item-only CRUD on the deep chained URL.
+
+        Parity with OpenAPI's _emit_chained_deep_path: only read / update /
+        delete attach to the deep item path. The deep collection list is
+        NOT emitted — that surface lives on the parent controller's
+        single-level nested list (already emitted by _nested_ops on the
+        parent's controller)."""
+        hops = render_chain_hops(
+            self._sv,
+            chain,
+            class_path_id_name=self._class_path_id_name,
+            get_path_segment=self._path_segment_for_class,
+            render_slot_segment=self._render_slot_segment_compat,
+            identifier_slot=self._identifier_slot_for,
+            induced_slots_by_name=self._induced_slots_by_name,
+        )
+        cn = cls.name
+
+        # Build URL: <hop[0].parent_path>/{<hop[0].id>}/<hop[0].slot>/{<hop[1].id>}/.../<hop[-1].slot>/{id}
+        #
+        # Each ChainHop carries:
+        #   - parent_path_segment: the parent class's URL noun (only used for hop[0])
+        #   - parent_id_param_name: snake_case path_id for this parent (or
+        #     openapi.path_id override)
+        #   - slot_segment: the slot from this parent leading to the next hop
+        #
+        # Leaf id stays {id} to match Spring's existing flat-URL convention
+        # in _top_level_ops (which uses /{path_segment}/{{id}}). Ancestor
+        # segments DO honor openapi.path_id.
+        parts: list[str] = [
+            f"{hops[0].parent_path_segment}/{{{hops[0].parent_id_param_name}}}"
+        ]
+        for i in range(len(hops) - 1):
+            parts.append(
+                f"{hops[i].slot_segment}/{{{hops[i + 1].parent_id_param_name}}}"
+            )
+        parts.append(f"{hops[-1].slot_segment}/{{id}}")
+        chain_url = "/".join(parts)
+        deep_item = f'"/{chain_url}"'
+
+        suffix = "Via" + "".join(_camel(p) for p, _ in chain)
+        produces = _produces_arg(media_types)
+        consumes = produces
+
+        chain_path_params = [
+            {
+                "annotation": f'@PathVariable("{h.parent_id_param_name}")',
+                "java_type": "String",
+                "java_name": _java_identifier(h.parent_id_param_name),
+            }
+            for h in hops
+        ]
+        leaf_path_param = {
+            "annotation": '@PathVariable("id")',
+            "java_type": "String",
+            "java_name": "id",
+        }
+
+        return [
+            {
+                "javadoc": f"GET deep — read a {cn} via its parent chain.",
+                "method_annotations": [
+                    f"@GetMapping(value = {deep_item}, produces = {produces})"
+                ],
+                "method_name": f"get{cn}{suffix}",
+                "return_type": cn,
+                "params": [*chain_path_params, leaf_path_param],
+            },
+            {
+                "javadoc": f"PUT deep — replace a {cn} via its parent chain.",
+                "method_annotations": [
+                    f"@PutMapping(value = {deep_item}, consumes = {consumes}, produces = {produces})"
+                ],
+                "method_name": f"update{cn}{suffix}",
+                "return_type": cn,
+                "params": [
+                    *chain_path_params,
+                    leaf_path_param,
+                    {"annotation": "@RequestBody", "java_type": cn, "java_name": "body"},
+                ],
+            },
+            {
+                "javadoc": f"DELETE deep — delete a {cn} via its parent chain.",
+                "method_annotations": [f"@DeleteMapping({deep_item})"],
+                "method_name": f"delete{cn}{suffix}",
+                "return_type": "Void",
+                "params": [*chain_path_params, leaf_path_param],
+            },
+        ]
+
     # --- Query-param surface -------------------------------------------
 
     def _query_param_dicts(
@@ -1005,6 +1121,35 @@ public class Problem {
             if ann.tag == tag:
                 return str(ann.value)
         return None
+
+    def _resource_class_names(self) -> set[str]:
+        out: set[str] = set()
+        for name in self._sv.all_classes():
+            cls = self._sv.get_class(name)
+            if cls and self._is_resource(cls):
+                out.add(name)
+        return out
+
+    def _class_path_id_name(self, class_name: str) -> str:
+        """Honor openapi.path_id; fall back to <class_snake>_id."""
+        cls = self._sv.get_class(class_name)
+        if cls is not None:
+            explicit = self._class_annotation(cls, "openapi.path_id")
+            if explicit:
+                return explicit.strip()
+        return f"{_to_snake_case(class_name)}_id"
+
+    def _path_segment_for_class(self, cls: ClassDefinition) -> str:
+        return self._path_segment(cls)
+
+    def _identifier_slot_for(self, class_name: str) -> SlotDefinition | None:
+        for s in self._induced_slots(class_name):
+            if s.identifier:
+                return s
+        return None
+
+    def _induced_slots_by_name(self, class_name: str) -> dict[str, SlotDefinition]:
+        return {s.name: s for s in self._induced_slots(class_name)}
 
     def _expand_curie(self, curie: str) -> str:
         try:
