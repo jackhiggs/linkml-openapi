@@ -483,13 +483,34 @@ public class Problem {
             f"{self.package}.model.{cls.name}",
             f"{self.package}.model.Problem",
         }
-        ops.extend(self._top_level_ops(cls, path_segment, imports, media_types))
+        # Mutex check: nested_only and flat_only contradict.
+        nested_only_raw = self._class_annotation(cls, "openapi.nested_only")
+        flat_only_raw = self._class_annotation(cls, "openapi.flat_only")
+        nested_only = (
+            nested_only_raw is not None
+            and nested_only_raw.strip().lower() == "true"
+        )
+        flat_only = (
+            flat_only_raw is not None
+            and flat_only_raw.strip().lower() == "true"
+        )
+        if nested_only and flat_only:
+            raise ValueError(
+                f"Class {cls.name!r} declares both `openapi.nested_only: \"true\"` "
+                f"and `openapi.flat_only: \"true\"`. They are mutually exclusive — "
+                "pick one. `nested_only` keeps the deep URL only; `flat_only` keeps "
+                "the flat URL only."
+            )
+
+        if not nested_only:
+            ops.extend(self._top_level_ops(cls, path_segment, imports, media_types))
         ops.extend(self._nested_ops(cls, path_segment, imports, media_types))
         # Deep nested chain (auto-derived). Item-only CRUD on the deep URL.
-        parent_path_ann = self._class_annotation(cls, "openapi.parent_path")
-        chain = canonical_parent_chain(cls.name, self._chains_index, parent_path_ann)
-        if chain:
-            ops.extend(self._deep_chained_ops(cls, chain, imports, media_types))
+        if not flat_only:
+            parent_path_ann = self._class_annotation(cls, "openapi.parent_path")
+            chain = canonical_parent_chain(cls.name, self._chains_index, parent_path_ann)
+            if chain:
+                ops.extend(self._deep_chained_ops(cls, chain, imports, media_types))
         # Decorate every op with explicit success + RFC 7807 error
         # responses. The success block fans out one ``@Content`` per
         # advertised media type so the live spec advertises

@@ -621,3 +621,49 @@ classes:
         src = files["io/example/pid/api/DatasetApi.java"]
         assert '@GetMapping(value = "/catalogs/{catId}/datasets/{id}"' in src
         assert '@PathVariable("catId")' in src
+
+
+NO_FIXTURE = str(Path(__file__).parent / "fixtures" / "spring_nested_only.yaml")
+
+
+@pytest.fixture(scope="module")
+def no_files() -> dict:
+    return SpringServerGenerator(NO_FIXTURE, package="io.example.no_").build()
+
+
+class TestNestedOnlyAndFlatOnly:
+    def test_nested_only_suppresses_flat_ops(self, no_files):
+        src = no_files["io/example/no_/api/DatasetApi.java"]
+        # No flat /datasets endpoints.
+        assert '@GetMapping(value = "/datasets",' not in src
+        assert '@GetMapping(value = "/datasets/{id}",' not in src
+        # Deep chain endpoint IS present (slot `datasets` plural in this
+        # fixture; ancestor uses default snake_case path_id; leaf is {id}).
+        assert '/catalogs/{catalog_id}/datasets/{id}' in src
+
+    def test_flat_only_suppresses_deep_ops(self, no_files):
+        src = no_files["io/example/no_/api/TagApi.java"]
+        # Flat endpoints present.
+        assert '@GetMapping(value = "/tags",' in src
+        assert '@GetMapping(value = "/tags/{id}",' in src
+        # Deep chain endpoint NOT present.
+        assert '/catalogs/{catalog_id}/tags/{id}' not in src
+
+    def test_nested_only_and_flat_only_together_raises(self, tmp_path):
+        fixture = tmp_path / "bad.yaml"
+        fixture.write_text("""\
+id: https://example.org/bad
+name: bad
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Foo:
+    annotations:
+      openapi.resource: "true"
+      openapi.nested_only: "true"
+      openapi.flat_only: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            SpringServerGenerator(str(fixture), package="io.example.bad").build()

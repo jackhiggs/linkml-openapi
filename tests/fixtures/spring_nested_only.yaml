@@ -1,0 +1,34 @@
+id: https://example.org/spring_no
+name: spring_no
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      datasets:
+        range: Dataset
+        multivalued: true
+      tags:
+        range: Tag
+        multivalued: true
+
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+      openapi.nested_only: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+
+  Tag:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: tags
+      openapi.flat_only: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
