@@ -1,0 +1,65 @@
+{# Java DTO template. Polymorphic roots get @JsonTypeInfo + @JsonSubTypes;
+   subclasses extend their direct parent. Concrete classes carry pinned
+   discriminator/legacy fields as final defaults so DTOs construct with
+   the right tags without manual setting. -#}
+package {{ package }}.model;
+
+{# imports — collected by the generator and passed in -#}
+{% for imp in imports -%}
+import {{ imp }};
+{% endfor %}
+{%- if class_uri or doc %}
+/**
+{%- if doc %}
+{% for line in doc.splitlines() %} * {{ line }}
+{% endfor -%}
+{%- endif %}
+{%- if class_uri %}
+ *
+ * <p>RDF class: {@code {{ class_uri }}}
+{%- endif %}
+ */
+{%- endif %}
+{%- if class_schema_annotation %}
+{{ class_schema_annotation }}
+{%- endif %}
+{%- if json_type_info %}
+@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "{{ json_type_info.property }}")
+@JsonSubTypes({
+{%- for sub in json_type_info.subtypes %}
+    @JsonSubTypes.Type(value = {{ sub.class_name }}.class, name = "{{ sub.tag }}"){{ "," if not loop.last else "" }}
+{%- endfor %}
+})
+{%- endif %}
+public {% if abstract %}abstract {% endif %}class {{ class_name }}{% if extends %} extends {{ extends }}{% endif %} {
+
+{%- for prop in properties %}
+{%- if prop.javadoc %}
+    /** {{ prop.javadoc }} */
+{%- endif %}
+{%- if prop.json_property %}
+    @JsonProperty("{{ prop.json_property }}")
+{%- endif %}
+{%- if prop.schema_annotation %}
+    {{ prop.schema_annotation }}
+{%- endif %}
+{%- for ann in prop.validation_annotations or [] %}
+    {{ ann }}
+{%- endfor %}
+{%- if prop.required %}
+    @NotNull
+{%- endif %}
+    private {{ prop.java_type }} {{ prop.java_name }}{% if prop.default is not none %} = {{ prop.default }}{% endif %};
+{% endfor %}
+
+{%- for prop in properties %}
+
+    public {{ prop.java_type }} get{{ prop.getter_name }}() {
+        return {{ prop.java_name }};
+    }
+
+    public void set{{ prop.getter_name }}({{ prop.java_type }} {{ prop.java_name }}) {
+        this.{{ prop.java_name }} = {{ prop.java_name }};
+    }
+{%- endfor %}
+}

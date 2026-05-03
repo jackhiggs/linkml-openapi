@@ -1,0 +1,22 @@
+id: https://example.org/spring_tpl
+name: spring_tpl
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id: { identifier: true, range: string, required: true }
+
+  ResourceVersion:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"
+      openapi.path_param_sources: "cId:Catalog.id,doi:ResourceVersion.doi,version:ResourceVersion.version"
+      openapi.nested_only: "true"
+    attributes:
+      doi:     { identifier: true, range: string, required: true }
+      version: { range: string, required: true }

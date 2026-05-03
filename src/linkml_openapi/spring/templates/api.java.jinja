@@ -1,0 +1,35 @@
+{# Spring @RestController interface template. The generator builds an
+   ordered list of operation specs (top-level CRUD plus nested
+   composition CRUD and reference attach/detach) and the template
+   renders each one identically. New operation patterns are a generator
+   change, not a template change. -#}
+package {{ package }}.api;
+
+{% for imp in imports -%}
+import {{ imp }};
+{% endfor %}
+
+/**
+ * Spring REST endpoints for {@link {{ package }}.model.{{ resource_class }}}.
+{%- if class_uri %}
+ *
+ * <p>Covers the {@code {{ class_uri }}} resource and its relationships.
+{%- endif %}
+ */
+public interface {{ resource_class }}Api {
+
+{%- for op in operations %}
+
+    /** {{ op.javadoc }} */
+{%- for ann in op.method_annotations %}
+    {{ ann }}
+{%- endfor %}
+    default ResponseEntity<{{ op.return_type }}> {{ op.method_name }}(
+{%- for param in op.params %}
+        {{ param.annotation }} {{ param.java_type }} {{ param.java_name }}{{ "," if not loop.last else "" }}
+{%- endfor -%}
+    ) {
+        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build();
+    }
+{% endfor %}
+}

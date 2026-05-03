@@ -34,6 +34,18 @@ from openapi_pydantic import (
 
 from linkml_openapi import __version__
 from linkml_openapi._base import Generator
+from linkml_openapi._chains import (
+    PATH_TEMPLATE_PLACEHOLDER_RE,
+    build_parent_chains_index,
+    canonical_parent_chain,
+)
+from linkml_openapi._chains import (
+    parse_path_param_sources as _parse_path_param_sources_helper,
+)
+from linkml_openapi._query_params import (
+    QueryParamSpec,
+    walk_query_params,
+)
 
 # LinkML range → OpenAPI DataType mapping
 RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
@@ -1832,80 +1844,14 @@ class OpenAPIGenerator(Generator):
     # --- Deep nested paths via parent-chain walk -------------------------
 
     def _collect_parent_chains(self) -> dict[str, list[list[tuple[str, str]]]]:
-        """Index every chain of `(parent_class, slot_name)` leading to each class.
-
-        For a leaf class ``L``, each chain is the ordered list of ancestors
-        from the root parent down to the direct parent — e.g. for
-        ``Org → Catalog → Dataset → Distribution`` walked via
-        ``Org.catalogs``, ``Catalog.datasets``, ``Dataset.distributions``,
-        the chain is::
-
-            [("Org", "catalogs"),
-             ("Catalog", "datasets"),
-             ("Dataset", "distributions")]
-
-        Chains are pruned at slots annotated ``openapi.nested: "false"``
-        and skip excluded classes / slots so the index reflects the active
-        profile. Cycles are detected (the recursion tracks visited classes
-        on the current path) so a graph with ``A.bs: list[B]`` and
-        ``B.as: list[A]`` doesn't blow up. Only ancestors that are
-        themselves resource classes contribute — non-resource intermediates
-        have no addressable URL segment to fold in.
-
-        Result is a dict keyed by leaf class name. A class with no parents
-        in the relationship graph is absent from the dict.
-        """
-        sv = self.schemaview
-        resource_classes = set(self._get_resource_classes())
-
-        direct_parents: dict[str, list[tuple[str, str]]] = {}
-        for parent_name in sv.all_classes():
-            if parent_name in self._excluded_classes:
-                continue
-            if parent_name not in resource_classes:
-                continue
-            parent_cls = sv.get_class(parent_name)
-            for slot in self._induced_slots_iter(parent_name):
-                if not slot.multivalued:
-                    continue
-                if self._is_slot_excluded(slot):
-                    continue
-                target = slot.range
-                if not target or sv.get_class(target) is None:
-                    continue
-                if target == parent_name:
-                    continue  # self-loop, no canonical chain
-                nested_ann = self._get_slot_annotation(parent_cls, slot.name, "openapi.nested")
-                if nested_ann is not None and not _is_truthy(nested_ann):
-                    continue
-                direct_parents.setdefault(target, []).append((parent_name, slot.name))
-
-        index: dict[str, list[list[tuple[str, str]]]] = {}
-
-        def walk(leaf: str, on_path: tuple[str, ...]) -> list[list[tuple[str, str]]]:
-            # Memoisation here is unsound: chains computed under one
-            # `on_path` can prune ancestors that a different caller's
-            # `on_path` would have allowed, so the cached result depends
-            # on which leaf's walk reaches a given subgraph first. The
-            # graph is small (resource classes only) so a fresh walk per
-            # leaf is cheap and deterministic.
-            chains: list[list[tuple[str, str]]] = []
-            for parent_name, slot_name in direct_parents.get(leaf, []):
-                if parent_name in on_path:
-                    continue  # would close a cycle
-                upper = walk(parent_name, on_path + (parent_name,))
-                if not upper:
-                    chains.append([(parent_name, slot_name)])
-                else:
-                    for u in upper:
-                        chains.append(u + [(parent_name, slot_name)])
-            return chains
-
-        for cls_name in list(direct_parents.keys()):
-            chains = walk(cls_name, (cls_name,))
-            if chains:
-                index[cls_name] = chains
-        return index
+        return build_parent_chains_index(
+            self.schemaview,
+            resource_classes=set(self._get_resource_classes()),
+            excluded_classes=self._excluded_classes,
+            is_slot_excluded=self._is_slot_excluded,
+            get_slot_annotation=self._get_slot_annotation,
+            induced_slots=lambda name: list(self._induced_slots_iter(name)),
+        )
 
     @staticmethod
     def _suffix_operation_ids(paths: dict[str, PathItem], suffix: str) -> None:
@@ -1927,79 +1873,10 @@ class OpenAPIGenerator(Generator):
                 if existing:
                     op.operationId = existing + suffix
 
-    @staticmethod
-    def _parent_path_segments(annotation: str) -> list[tuple[str | None, str]]:
-        """Parse an ``openapi.parent_path`` annotation into per-hop matchers.
-
-        Each dot-separated segment is either ``slot_name`` (match the slot
-        at that hop, parent class implied) or ``ClassName.slot_name``
-        (match both the parent class and the slot — used to disambiguate
-        when multiple parents share a slot name).
-
-        Returns a list of ``(class_name_or_none, slot_name)`` tuples,
-        one per hop.
-        """
-        segments: list[tuple[str | None, str]] = []
-        for raw in annotation.strip().split("/"):
-            raw = raw.strip()
-            if not raw:
-                continue
-            if "." in raw:
-                cls_name, slot_name = raw.split(".", 1)
-                segments.append((cls_name.strip() or None, slot_name.strip()))
-            else:
-                segments.append((None, raw))
-        return segments
-
     def _canonical_parent_chain(self, class_name: str) -> list[tuple[str, str]]:
-        """Pick the canonical chain for ``class_name``.
-
-        * 0 chains → returns ``[]`` (the class is a root, no deep paths).
-        * 1 chain → returns it.
-        * >1 chains → reads ``openapi.parent_path`` on the leaf and matches.
-
-        Annotation syntax: ``/``-separated hops, each hop ``slot_name`` or
-        ``ClassName.slot_name``. Examples::
-
-            openapi.parent_path: catalogs.datasets        # two hops, slot-only (unambiguous)
-            openapi.parent_path: Folder.tags              # one hop, class-qualified
-            openapi.parent_path: Org.catalogs/Catalog.datasets  # two hops, fully qualified
-
-        Raises with the candidate list when the annotation is missing on
-        an ambiguous leaf or doesn't match any chain.
-        """
-        chains = self._parent_chains_index.get(class_name, [])
-        if not chains:
-            return []
-        if len(chains) == 1:
-            return chains[0]
-
         cls = self.schemaview.get_class(class_name)
         annotated = self._class_annotation(cls, "openapi.parent_path") if cls else None
-        # Build human-readable candidate strings: prefer slot-only when it's
-        # unique at every hop, fall back to class-qualified otherwise.
-        candidates_qualified = ["/".join(f"{p}.{s}" for p, s in chain) for chain in chains]
-        if annotated:
-            wanted = self._parent_path_segments(annotated)
-            for chain in chains:
-                if len(chain) != len(wanted):
-                    continue
-                if all(
-                    (cls_q is None or cls_q == p) and slot_q == s
-                    for (cls_q, slot_q), (p, s) in zip(wanted, chain)
-                ):
-                    return chain
-            raise ValueError(
-                f"Class {class_name!r} declares "
-                f"`openapi.parent_path: {annotated!r}` but no matching chain "
-                f"exists. Candidates: {candidates_qualified}."
-            )
-        raise ValueError(
-            f"Class {class_name!r} is reachable via multiple parent chains. "
-            f"Pick one with the `openapi.parent_path` class annotation, "
-            f"e.g. `openapi.parent_path: {candidates_qualified[0]!r}`. "
-            f"Candidates: {candidates_qualified}."
-        )
+        return canonical_parent_chain(class_name, self._parent_chains_index, annotated)
 
     def _build_chain_path_params(self, chain: list[tuple[str, str]]) -> tuple[str, list[Parameter]]:
         """Render a chain as a URL prefix and the matching path-parameter list.
@@ -2080,44 +1957,11 @@ class OpenAPIGenerator(Generator):
         self._suffix_operation_ids(deep_paths, chain_suffix)
         return deep_paths
 
-    _PATH_TEMPLATE_PLACEHOLDER_RE: ClassVar[re.Pattern[str]] = re.compile(r"\{([^{}]+)\}")
+    _PATH_TEMPLATE_PLACEHOLDER_RE = PATH_TEMPLATE_PLACEHOLDER_RE
 
     @staticmethod
     def _parse_path_param_sources(class_name: str, raw: str) -> dict[str, tuple[str, str]]:
-        """Parse ``openapi.path_param_sources`` into ``{name: (Class, slot)}``.
-
-        Format: comma-separated ``name:Class.slot`` entries. Whitespace
-        around any token is trimmed. Empty / missing raw produces ``{}``.
-        Malformed entries raise with the offending entry quoted.
-        """
-        sources: dict[str, tuple[str, str]] = {}
-        for raw_entry in _parse_csv(raw):
-            if ":" not in raw_entry:
-                raise ValueError(
-                    f"Class {class_name!r} has malformed "
-                    f"`openapi.path_param_sources` entry {raw_entry!r}: "
-                    "expected `name:Class.slot`."
-                )
-            name, source = (s.strip() for s in raw_entry.split(":", 1))
-            if "." not in source:
-                raise ValueError(
-                    f"Class {class_name!r} has malformed source "
-                    f"{source!r} for parameter {name!r}: expected "
-                    "`Class.slot`."
-                )
-            src_class, src_slot = (s.strip() for s in source.split(".", 1))
-            if not name or not src_class or not src_slot:
-                raise ValueError(
-                    f"Class {class_name!r} has empty token in "
-                    f"`openapi.path_param_sources` entry {raw_entry!r}."
-                )
-            if name in sources:
-                raise ValueError(
-                    f"Class {class_name!r} declares duplicate path "
-                    f"parameter {name!r} in `openapi.path_param_sources`."
-                )
-            sources[name] = (src_class, src_slot)
-        return sources
+        return _parse_path_param_sources_helper(class_name, raw)
 
     def _emit_templated_deep_path(
         self,
@@ -2478,80 +2322,13 @@ class OpenAPIGenerator(Generator):
         )
         paths[item_path] = item
 
-    # Slot ranges over which `comparable` operators (>=, <=, >, <) are
-    # well-defined. String ranges are technically lex-comparable but the
-    # intent is almost always "numeric / temporal range" — warn if asked.
-    _COMPARABLE_RANGES = frozenset({"integer", "float", "double", "decimal", "date", "datetime"})
-
-    _QUERY_PARAM_TOKENS = frozenset({"equality", "comparable", "sortable"})
-
-    def _query_param_capabilities(self, cls: ClassDefinition, slot_name: str) -> set[str] | None:
-        """Parse the slot's `openapi.query_param` annotation into a capability set.
-
-        Accepted tokens (comma-separated):
-
-          ``"true"`` / ``"equality"``  — exact-match query param
-          ``"comparable"``             — equality + ``__gte`` / ``__lte`` / ``__gt`` / ``__lt``
-          ``"sortable"``               — equality + token in ``?sort=`` array
-
-        ``comparable`` and ``sortable`` imply ``equality`` (most APIs that filter
-        by range also filter by exact match). Returns ``None`` when the
-        annotation is absent or explicitly false. Unknown tokens are warned
-        about so typos like ``"sorteable"`` don't silently disable filtering.
-        """
-        raw = self._get_slot_annotation(cls, slot_name, "openapi.query_param")
-        if raw is None:
-            return None
-        tokens = set(_parse_csv(raw, lowercase=True))
-        if not tokens or tokens == {"false"}:
-            return None
-        unknown = tokens - {"true", "false"} - self._QUERY_PARAM_TOKENS
-        if unknown:
-            import warnings
-
-            warnings.warn(
-                f"Slot {cls.name}.{slot_name!r} declares unknown "
-                f"openapi.query_param token(s) {sorted(unknown)!r}; "
-                f"expected one or more of {sorted(self._QUERY_PARAM_TOKENS)!r}. "
-                "Token(s) ignored — fix the typo or remove them.",
-                stacklevel=3,
-            )
-        if "true" in tokens:
-            tokens.add("equality")
-            tokens.discard("true")
-        if "comparable" in tokens or "sortable" in tokens:
-            tokens.add("equality")
-        valid = tokens & self._QUERY_PARAM_TOKENS
-        return valid or None
-
-    def _auto_query_params_enabled(self, cls: ClassDefinition) -> bool:
-        """Whether auto-inferred query parameters are emitted for this class.
-
-        Class-level ``openapi.auto_query_params`` wins over the schema-level
-        annotation; default is ``True`` so existing schemas keep their
-        current behaviour. Set to ``"false"`` at either level to suppress
-        the auto-inferred filter parameters on a class with many slots.
-        """
-        class_value = self._class_annotation(cls, "openapi.auto_query_params")
-        if class_value is not None:
-            return _is_truthy(class_value)
-        schema_value = self._schema_annotation("openapi.auto_query_params")
-        if schema_value is not None:
-            return _is_truthy(schema_value)
-        return True
-
     def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
         """Generate query parameters for the list endpoint.
 
-        Annotated slots win when any are present on the class; otherwise
-        the auto-inference path picks scalar non-identifier slots — unless
-        ``openapi.auto_query_params: "false"`` is set at the class or
-        schema level, in which case only ``limit`` / ``offset`` emit.
-        Slots annotated ``openapi.query_param: "false"`` are excluded from
-        auto-inference even when it is enabled. Both paths walk induced
-        slots once.
+        Delegates capability parsing, auto-inference, and validation to
+        `_query_params.walk_query_params`. This method only renders
+        Parameter objects — wire shape stays unchanged.
         """
-        sv = self.schemaview
         params: list[Parameter] = [
             Parameter(
                 name="limit",
@@ -2564,101 +2341,52 @@ class OpenAPIGenerator(Generator):
                 param_schema=Schema(type=DataType.INTEGER, default=0),
             ),
         ]
-
-        auto_enabled = self._auto_query_params_enabled(cls)
-
-        annotated_params: list[Parameter] = []
-        inferred_params: list[Parameter] = []
-        sort_tokens: list[str] = []
-
-        for slot in self._induced_slots_iter(cls.name):
-            if self._is_slot_excluded(slot):
-                continue
-            caps = self._query_param_capabilities(cls, slot.name)
-            if caps is not None:
-                self._add_annotated_query_params(cls, slot, caps, annotated_params, sort_tokens)
-                continue
-            if not auto_enabled:
-                continue
-            # Slot-level explicit opt-out: `openapi.query_param: "false"`
-            # makes ``_query_param_capabilities`` return ``None``, but the
-            # raw annotation tells us the user explicitly removed this slot
-            # from auto-inference (vs. being silent about it).
-            raw = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
-            if raw is not None and set(_parse_csv(raw, lowercase=True)) == {"false"}:
-                continue
-            if (
-                not slot.multivalued
-                and not slot.identifier
-                and (
-                    (slot.range or "string") in ("string", "integer", "boolean")
-                    or sv.get_enum(slot.range or "string")
-                )
-            ):
-                inferred_params.append(
-                    Parameter(
-                        name=slot.name,
-                        param_in=ParameterLocation.QUERY,
-                        required=False,
-                        param_schema=self._slot_to_schema(slot),
-                    )
-                )
-
-        if annotated_params or sort_tokens:
-            params.extend(annotated_params)
-            if sort_tokens:
-                params.append(self._make_sort_param(sort_tokens))
-            return params
-
-        params.extend(inferred_params)
+        surface = walk_query_params(
+            self.schemaview,
+            cls,
+            schema_auto_default=_is_truthy(
+                self._schema_annotation("openapi.auto_query_params") or "true"
+            ),
+            is_slot_excluded=self._is_slot_excluded,
+            induced_slots=lambda name: list(self._induced_slots_iter(name)),
+            get_slot_annotation=self._get_slot_annotation,
+            get_class_annotation=self._class_annotation,
+        )
+        for spec in surface.params:
+            params.extend(self._render_query_param_for_spec(spec))
+        if surface.sort_tokens:
+            params.append(self._make_sort_param(surface.sort_tokens))
         return params
 
-    def _add_annotated_query_params(
-        self,
-        cls: ClassDefinition,
-        slot: SlotDefinition,
-        caps: set[str],
-        out: list[Parameter],
-        sort_tokens: list[str],
-    ) -> None:
-        """Emit equality / comparison / sort entries for one annotated slot."""
-        range_name = slot.range or "string"
-        if "equality" in caps:
+    def _render_query_param_for_spec(self, spec: QueryParamSpec) -> list[Parameter]:
+        """Render one QueryParamSpec into one or more Parameter objects.
+
+        `equality` → single param. `comparable` → four `__gte`/`__lte`/
+        `__gt`/`__lt` params. `sortable` doesn't produce a per-slot
+        Parameter (it contributes to the shared `?sort=` array param built
+        by _make_sort_param).
+        """
+        out: list[Parameter] = []
+        if "equality" in spec.capabilities:
             out.append(
                 Parameter(
-                    name=slot.name,
+                    name=spec.slot.name,
                     param_in=ParameterLocation.QUERY,
                     required=False,
-                    param_schema=self._slot_to_schema(slot),
+                    param_schema=self._slot_to_schema(spec.slot),
                 )
             )
-        if "comparable" in caps:
-            if range_name not in self._COMPARABLE_RANGES:
-                import warnings
-
-                warnings.warn(
-                    f"Slot {cls.name}.{slot.name!r} marked `comparable` but "
-                    f"range {range_name!r} is not a numeric or temporal type; "
-                    "comparison operators may behave unexpectedly.",
-                    stacklevel=3,
-                )
+        if "comparable" in spec.capabilities:
             for op in ("gte", "lte", "gt", "lt"):
                 out.append(
                     Parameter(
-                        name=f"{slot.name}__{op}",
+                        name=f"{spec.slot.name}__{op}",
                         param_in=ParameterLocation.QUERY,
                         required=False,
-                        param_schema=self._slot_to_schema(slot),
+                        param_schema=self._slot_to_schema(spec.slot),
                     )
                 )
-        if "sortable" in caps:
-            if slot.multivalued:
-                raise ValueError(
-                    f"Slot {cls.name}.{slot.name!r} is multivalued; sort "
-                    "order over a set is not well-defined. Remove `sortable` "
-                    "or change the slot to single-valued."
-                )
-            sort_tokens.extend([slot.name, f"-{slot.name}"])
+        return out
 
     @staticmethod
     def _make_sort_param(sort_tokens: list[str]) -> Parameter:
