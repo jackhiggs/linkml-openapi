@@ -1,0 +1,843 @@
+id: https://example.org/dcat3
+name: dcat3
+title: DCAT 3 (W3C) — full vocabulary
+description: |
+  Faithful LinkML rendering of the W3C DCAT-3 core vocabulary
+  (https://www.w3.org/TR/vocab-dcat-3/) covering the principal classes
+  and slots. Class and slot descriptions follow the wording of the
+  W3C Recommendation; ``class_uri`` and ``slot_uri`` carry the
+  canonical RDF identities and are exposed as ``x-rdf-class`` /
+  ``x-rdf-property`` extensions on the OpenAPI spec for spec-driven
+  serdes layers.
+
+  Polymorphism: ``Resource`` is the abstract supertype of ``Dataset``,
+  ``Catalog`` (a Dataset), ``DatasetSeries`` (a Dataset), and
+  ``DataService``. Each concrete class pins ``resourceType`` to its
+  own value and carries ``#type`` as a back-compat opaque marker.
+
+  Discriminator field is ``resourceType`` (not ``@type``) for
+  openapi-generator Spring template compatibility — ``@type`` is
+  not a valid Java identifier. JSON-LD aliasing of ``resourceType``
+  ↔ ``@type`` is an application-layer concern.
+
+  Reference vs composition:
+    * ``inlined: false`` (LinkML default for identifier-bearing
+      ranges) → wire shape is an IRI string. Survives
+      ``application/ld+json`` / ``text/turtle`` content negotiation.
+    * ``inlined: true`` (set explicitly where the entity is owned by
+      the parent) — currently ``Dataset.distribution`` and the
+      embedded value classes (``Location``, ``PeriodOfTime``,
+      ``Checksum``).
+
+prefixes:
+  linkml: https://w3id.org/linkml/
+  dcat: http://www.w3.org/ns/dcat#
+  dct: http://purl.org/dc/terms/
+  foaf: http://xmlns.com/foaf/0.1/
+  skos: http://www.w3.org/2004/02/skos/core#
+  adms: http://www.w3.org/ns/adms#
+  prov: http://www.w3.org/ns/prov#
+  locn: http://www.w3.org/ns/locn#
+  odrl: http://www.w3.org/ns/odrl/2/
+  time: http://www.w3.org/2006/time#
+  spdx: http://spdx.org/rdf/terms#
+
+default_prefix: dcat
+default_range: string
+
+imports:
+  - linkml:types
+
+classes:
+
+  # ====================================================================
+  # POLYMORPHIC ROOT
+  # ====================================================================
+
+  Resource:
+    class_uri: dcat:Resource
+    abstract: true
+    description: |
+      Resource published or curated by a single agent. The DCAT-3
+      Resource class is the root of the catalogable-entity
+      hierarchy: every Dataset, DataService, Catalog, and
+      DatasetSeries is a Resource and carries the common
+      title/description/issued/modified/keyword/theme metadata.
+
+      No instances of bare ``dcat:Resource`` exist on the wire —
+      every payload is a concrete subclass and carries
+      ``resourceType`` to identify which.
+    annotations:
+      openapi.discriminator: resourceType
+      openapi.legacy_type_field: "#type"
+      openapi.legacy_type_codegen_name: legacyType
+      openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
+    attributes:
+      id:
+        identifier: true
+        slot_uri: dct:identifier
+        required: true
+        description: |
+          A unique identifier of the resource, expressed as an IRI
+          per dct:identifier. In RDF this is the subject IRI of the
+          resource; on the wire it is the absolute URL clients use
+          to retrieve the resource.
+      title:
+        slot_uri: dct:title
+        description: |
+          A name given to the resource. Per dct:title; commonly
+          rendered as the human-readable label for the resource in
+          listings and detail views.
+      description:
+        slot_uri: dct:description
+        description: |
+          A free-text account of the resource. Per dct:description;
+          intended for catalog consumers to read, may contain
+          markdown but not HTML.
+      issued:
+        slot_uri: dct:issued
+        range: datetime
+        description: |
+          Date of formal issuance (e.g. publication) of the
+          resource. Per dct:issued.
+      modified:
+        slot_uri: dct:modified
+        range: datetime
+        description: |
+          Most recent date on which the resource was changed,
+          updated, or modified. Per dct:modified.
+
+      # --- Keywords / themes / typing -------------------------------
+      keyword:
+        slot_uri: dcat:keyword
+        multivalued: true
+        description: |
+          A keyword or tag describing the resource. Per
+          dcat:keyword; free-text strings, no controlled vocabulary
+          implied (use ``theme`` for that).
+      theme:
+        slot_uri: dcat:theme
+        range: uri
+        multivalued: true
+        description: |
+          A main category of the resource. Per dcat:theme; values
+          are SKOS concept IRIs categorising the resource within a
+          theme taxonomy advertised on the parent Catalog via
+          ``themeTaxonomy``.
+      type:
+        slot_uri: dct:type
+        range: uri
+        description: |
+          The nature or genre of the resource. Per dct:type;
+          typically a SKOS concept IRI from a controlled type
+          vocabulary.
+      conformsTo:
+        slot_uri: dct:conformsTo
+        multivalued: true
+        range: uri
+        description: |
+          An established standard to which the described resource
+          conforms. Per dct:conformsTo; values are IRIs of
+          specifications.
+      language:
+        slot_uri: dct:language
+        multivalued: true
+        range: uri
+        description: |
+          A language of the resource. Per dct:language; values
+          should be ISO 639-1 / 639-2 / 639-3 language IRIs (use
+          a registered URI scheme such as
+          http://id.loc.gov/vocabulary/iso639-1/).
+
+      # --- Linked / landing -----------------------------------------
+      landingPage:
+        slot_uri: dcat:landingPage
+        range: uri
+        description: |
+          A web page that provides access to the resource and/or
+          additional information about it. Per dcat:landingPage;
+          intended for human consumption rather than direct data
+          access — see ``Distribution.accessURL`` for that.
+      isReferencedBy:
+        slot_uri: dct:isReferencedBy
+        multivalued: true
+        range: uri
+        description: |
+          A related resource that references, cites, or otherwise
+          points to the described resource. Per dct:isReferencedBy.
+
+      # --- Rights / licensing ---------------------------------------
+      license:
+        slot_uri: dct:license
+        range: uri
+        description: |
+          A legal document under which the resource is made
+          available. Per dct:license; values are IRIs of license
+          documents.
+      rights:
+        slot_uri: dct:rights
+        description: |
+          A statement that concerns all rights not addressed with
+          ``license`` or ``accessRights``. Per dct:rights; free
+          text or an IRI.
+      accessRights:
+        slot_uri: dct:accessRights
+        range: uri
+        description: |
+          Information about who can access the resource or an
+          indication of its security status. Per dct:accessRights;
+          values are typically IRIs from a controlled vocabulary
+          (e.g. PUBLIC, RESTRICTED, NON_PUBLIC).
+
+      # --- Agents (referenced by IRI) -------------------------------
+      publisher:
+        slot_uri: dct:publisher
+        range: Agent
+        description: |
+          The entity responsible for making the resource available.
+          Per dct:publisher; references a foaf:Agent instance by
+          IRI.
+      creator:
+        slot_uri: dct:creator
+        range: Agent
+        multivalued: true
+        description: |
+          The entity primarily responsible for producing the
+          resource. Per dct:creator; references foaf:Agent
+          instances by IRI.
+      contributor:
+        slot_uri: dct:contributor
+        range: Agent
+        multivalued: true
+        description: |
+          An entity responsible for making contributions to the
+          resource. Per dct:contributor.
+      contactPoint:
+        slot_uri: dcat:contactPoint
+        range: Agent
+        multivalued: true
+        description: |
+          Relevant contact information for the cataloged resource.
+          Per dcat:contactPoint; references vcard:Kind instances
+          (modelled here as Agent for simplicity).
+
+      # --- Versioning -----------------------------------------------
+      version:
+        slot_uri: adms:version
+        description: |
+          The version indicator (name or number) of a resource. Per
+          adms:version.
+      versionNotes:
+        slot_uri: adms:versionNotes
+        description: |
+          A description of the differences between this version and
+          a previous version of the resource. Per
+          adms:versionNotes.
+      isVersionOf:
+        slot_uri: dct:isVersionOf
+        range: Resource
+        description: |
+          A related resource of which the described resource is a
+          version. Per dct:isVersionOf; references the original
+          resource by IRI.
+      hasVersion:
+        slot_uri: dcat:hasVersion
+        range: Resource
+        multivalued: true
+        description: |
+          A version of the resource. Per dcat:hasVersion; references
+          version-resources by IRI.
+      hasCurrentVersion:
+        slot_uri: dcat:hasCurrentVersion
+        range: Resource
+        description: |
+          The version that is currently the most recent or
+          authoritative. Per dcat:hasCurrentVersion.
+      previousVersion:
+        slot_uri: dcat:previousVersion
+        range: Resource
+        description: |
+          The previous version of a resource in a lineage. Per
+          dcat:previousVersion.
+      replaces:
+        slot_uri: dct:replaces
+        range: Resource
+        description: |
+          A related resource that is supplanted, displaced, or
+          superseded by the described resource. Per dct:replaces.
+      isReplacedBy:
+        slot_uri: dct:isReplacedBy
+        range: Resource
+        description: |
+          A related resource that supplants, displaces, or
+          supersedes the described resource. Per dct:isReplacedBy.
+
+      # --- Relations / parts ----------------------------------------
+      relation:
+        slot_uri: dct:relation
+        range: Resource
+        multivalued: true
+        description: |
+          A resource with an unspecified relationship to the
+          cataloged resource. Per dct:relation; use only when no
+          more specific relation is appropriate.
+      hasPart:
+        slot_uri: dct:hasPart
+        range: Resource
+        multivalued: true
+        description: |
+          A related resource that is included either physically or
+          logically in the described resource. Per dct:hasPart.
+
+      # --- Provenance -----------------------------------------------
+      qualifiedAttribution:
+        slot_uri: prov:qualifiedAttribution
+        multivalued: true
+        range: uri
+        description: |
+          Link to an Agent having some form of responsibility for
+          the resource. Per prov:qualifiedAttribution; reifies the
+          attribution so a ``prov:agent`` and ``dcat:hadRole`` can
+          be attached.
+
+  # ====================================================================
+  # CONCRETE POLYMORPHIC CLASSES
+  # ====================================================================
+
+  Dataset:
+    class_uri: dcat:Dataset
+    is_a: Resource
+    description: |
+      A collection of data, published or curated by a single
+      agent, and available for access or download in one or more
+      representations. Per DCAT-3 §6.5; the central class of DCAT,
+      with one or more ``Distribution``s providing access to the
+      actual data.
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+      openapi.type_value: Dataset
+      openapi.legacy_type_value: "com.xyz.dcat.Dataset"
+      openapi.parent_path: "Catalog.dataset"
+    attributes:
+      distribution:
+        slot_uri: dcat:distribution
+        range: Distribution
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+        description: |
+          An available distribution of the dataset. Per
+          dcat:distribution; each Distribution is a specific
+          representation of the data, owned by the parent Dataset
+          (composition).
+      accrualPeriodicity:
+        slot_uri: dct:accrualPeriodicity
+        range: uri
+        description: |
+          The frequency at which the dataset is updated. Per
+          dct:accrualPeriodicity; values are IRIs from the
+          dct:Frequency vocabulary (annual, monthly, daily, …).
+      spatial:
+        slot_uri: dct:spatial
+        range: Location
+        description: |
+          The geographic region(s) the dataset describes. Per
+          dct:spatial; an embedded ``dct:Location`` value with
+          geometry / bounding box / centroid.
+      temporal:
+        slot_uri: dct:temporal
+        range: PeriodOfTime
+        description: |
+          The temporal period the dataset describes. Per
+          dct:temporal; an embedded ``dct:PeriodOfTime`` with start
+          and end instants.
+      spatialResolutionInMeters:
+        slot_uri: dcat:spatialResolutionInMeters
+        range: float
+        description: |
+          Minimum spatial separation resolvable in the dataset,
+          measured in metres. Per dcat:spatialResolutionInMeters.
+      temporalResolution:
+        slot_uri: dcat:temporalResolution
+        description: |
+          Minimum time period resolvable in the dataset. Per
+          dcat:temporalResolution; xsd:duration literal (e.g.
+          "P1D" for one day, "PT1H" for one hour).
+      wasGeneratedBy:
+        slot_uri: prov:wasGeneratedBy
+        range: uri
+        description: |
+          An activity that produced the dataset. Per
+          prov:wasGeneratedBy; references a prov:Activity by IRI.
+      inSeries:
+        slot_uri: dcat:inSeries
+        range: DatasetSeries
+        multivalued: true
+        description: |
+          A dataset series of which the dataset is part. Per
+          dcat:inSeries; the link lives on the dataset side per
+          the DCAT-3 specification — there is no inverse
+          ``seriesMember`` slot on DatasetSeries.
+
+  Catalog:
+    class_uri: dcat:Catalog
+    is_a: Dataset
+    description: |
+      A curated collection of metadata about resources (e.g.,
+      datasets and data services in the context of a data catalog).
+      Per DCAT-3 §6.2; a Catalog is itself a Dataset (its data is
+      the catalog records), giving the three-level polymorphic
+      chain ``Resource → Dataset → Catalog``.
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+      openapi.type_value: Catalog
+      openapi.legacy_type_value: "com.xyz.dcat.Catalog"
+    attributes:
+      dataset:
+        slot_uri: dcat:dataset
+        range: Dataset
+        multivalued: true
+        description: |
+          A dataset that is part of the catalog. Per dcat:dataset;
+          values are IRIs of Dataset resources.
+      service:
+        slot_uri: dcat:service
+        range: DataService
+        multivalued: true
+        description: |
+          A site or end-point that is part of the catalog. Per
+          dcat:service; values are IRIs of DataService resources.
+      catalog:
+        slot_uri: dcat:catalog
+        range: Catalog
+        multivalued: true
+        description: |
+          A catalog whose contents are of interest in the context
+          of the catalog being described. Per dcat:catalog;
+          recursive — sub-catalogs referenced by IRI, not embedded.
+      record:
+        slot_uri: dcat:record
+        range: CatalogRecord
+        multivalued: true
+        description: |
+          A record describing the registration of a single dataset
+          or data service in the catalog. Per dcat:record.
+      themeTaxonomy:
+        slot_uri: dcat:themeTaxonomy
+        range: uri
+        multivalued: true
+        description: |
+          A taxonomy or knowledge organization system used to
+          classify resources in the catalog. Per
+          dcat:themeTaxonomy; values are IRIs of
+          ``skos:ConceptScheme`` resources.
+      homepage:
+        slot_uri: foaf:homepage
+        range: uri
+        description: |
+          A homepage of the catalog (a web page that describes
+          this catalog). Per foaf:homepage.
+
+  DatasetSeries:
+    class_uri: dcat:DatasetSeries
+    is_a: Dataset
+    description: |
+      A collection of datasets that are published separately, but
+      share some characteristics that group them. Per DCAT-3 §6.5;
+      members link in via ``Dataset.inSeries`` rather than a
+      forward slot here.
+    annotations:
+      openapi.resource: "true"
+      openapi.path: dataset_series
+      openapi.type_value: DatasetSeries
+      openapi.legacy_type_value: "com.xyz.dcat.DatasetSeries"
+      openapi.parent_path: "Catalog.inSeries"
+
+  DataService:
+    class_uri: dcat:DataService
+    is_a: Resource
+    description: |
+      A collection of operations that provides access to one or
+      more datasets or data processing functions. Per DCAT-3 §6.3;
+      a DataService is identified by its ``endpointURL`` and
+      describes its protocol via ``endpointDescription``.
+    annotations:
+      openapi.resource: "true"
+      openapi.path: data_services
+      openapi.type_value: DataService
+      openapi.legacy_type_value: "com.xyz.dcat.DataService"
+      openapi.parent_path: "Catalog.service"
+    attributes:
+      endpointURL:
+        slot_uri: dcat:endpointURL
+        range: uri
+        required: true
+        description: |
+          The root location or primary endpoint of the service (an
+          IRI). Per dcat:endpointURL.
+      endpointDescription:
+        slot_uri: dcat:endpointDescription
+        range: uri
+        description: |
+          A description of the services available via the
+          end-points, including their operations, parameters etc.
+          Per dcat:endpointDescription; typically references an
+          OpenAPI / Swagger / WSDL document by IRI.
+      servesDataset:
+        slot_uri: dcat:servesDataset
+        range: Dataset
+        multivalued: true
+        description: |
+          A collection of data that this DataService can distribute.
+          Per dcat:servesDataset; values are IRIs of Dataset
+          resources.
+
+  # ====================================================================
+  # SUPPORTING CLASSES (not in the polymorphic chain)
+  # ====================================================================
+
+  Distribution:
+    class_uri: dcat:Distribution
+    description: |
+      A specific representation of a dataset. A dataset might be
+      available in multiple serializations that may differ in
+      various ways including natural language, media-type or
+      format, schematic organization, or temporal and spatial
+      resolution. Per DCAT-3 §6.6.
+    annotations:
+      openapi.resource: "true"
+      openapi.path: distributions
+      openapi.parent_path: "Catalog.dataset/Dataset.distribution"
+      openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
+    attributes:
+      id:
+        identifier: true
+        slot_uri: dct:identifier
+        required: true
+        description: |
+          The IRI of the distribution. In RDF this is the subject
+          IRI; on the wire the absolute URL the distribution is
+          retrieved from.
+      title:
+        slot_uri: dct:title
+        description: A name given to the distribution. Per dct:title.
+      description:
+        slot_uri: dct:description
+        description: |
+          A free-text account of the distribution. Per
+          dct:description.
+      issued:
+        slot_uri: dct:issued
+        range: datetime
+        description: |
+          Date of formal issuance of the distribution. Per
+          dct:issued.
+      modified:
+        slot_uri: dct:modified
+        range: datetime
+        description: |
+          Most recent date on which the distribution was changed,
+          updated, or modified. Per dct:modified.
+
+      # --- Access ---------------------------------------------------
+      accessURL:
+        slot_uri: dcat:accessURL
+        range: uri
+        description: |
+          A URL that gives access to a distribution of the dataset.
+          Per dcat:accessURL; the resource at this URL may be a
+          landing page, a feed, a SPARQL endpoint, etc. — not
+          necessarily a direct download.
+      downloadURL:
+        slot_uri: dcat:downloadURL
+        range: uri
+        description: |
+          The URL of the downloadable file in the given format. Per
+          dcat:downloadURL; the resource at this URL is the actual
+          payload of the distribution.
+      accessService:
+        slot_uri: dcat:accessService
+        range: DataService
+        multivalued: true
+        description: |
+          A data service that gives access to the distribution of
+          the dataset. Per dcat:accessService; values are IRIs of
+          DataService resources.
+
+      # --- Format / payload -----------------------------------------
+      mediaType:
+        slot_uri: dcat:mediaType
+        range: uri
+        description: |
+          The media type of the distribution as defined by IANA.
+          Per dcat:mediaType; values are IRIs from the IANA media
+          types registry (e.g.
+          https://www.iana.org/assignments/media-types/text/csv).
+      format:
+        slot_uri: dct:format
+        range: uri
+        description: |
+          The file format, physical medium, or dimensions of the
+          distribution. Per dct:format; for digital resources prefer
+          ``mediaType``.
+      compressFormat:
+        slot_uri: dcat:compressFormat
+        range: uri
+        description: |
+          The compression format of the distribution in which the
+          data is contained in a compressed form, e.g. to reduce
+          download size. Per dcat:compressFormat.
+      packageFormat:
+        slot_uri: dcat:packageFormat
+        range: uri
+        description: |
+          The package format of the distribution in which one or
+          more data files are grouped together, e.g. to enable a
+          set of related files to be downloaded together. Per
+          dcat:packageFormat.
+      byteSize:
+        slot_uri: dcat:byteSize
+        range: integer
+        description: |
+          The size of the distribution in bytes. Per dcat:byteSize.
+
+      # --- Resolution -----------------------------------------------
+      spatialResolutionInMeters:
+        slot_uri: dcat:spatialResolutionInMeters
+        range: float
+        description: |
+          Minimum spatial separation resolvable in the
+          distribution, in metres. Per
+          dcat:spatialResolutionInMeters.
+      temporalResolution:
+        slot_uri: dcat:temporalResolution
+        description: |
+          Minimum time period resolvable in the distribution. Per
+          dcat:temporalResolution; xsd:duration literal.
+
+      # --- Rights ---------------------------------------------------
+      license:
+        slot_uri: dct:license
+        range: uri
+        description: |
+          A legal document under which the distribution is made
+          available. Per dct:license.
+      rights:
+        slot_uri: dct:rights
+        description: |
+          A statement that concerns all rights not addressed with
+          ``license`` or ``accessRights``. Per dct:rights.
+      accessRights:
+        slot_uri: dct:accessRights
+        range: uri
+        description: |
+          Information about who can access the distribution or an
+          indication of its security status. Per dct:accessRights.
+      hasPolicy:
+        slot_uri: odrl:hasPolicy
+        range: uri
+        description: |
+          The policy expressing the rights associated with the
+          distribution. Per odrl:hasPolicy; values are IRIs of
+          ODRL policy documents.
+      conformsTo:
+        slot_uri: dct:conformsTo
+        multivalued: true
+        range: uri
+        description: |
+          An established standard to which the distribution
+          conforms. Per dct:conformsTo.
+
+      # --- Integrity ------------------------------------------------
+      checksum:
+        slot_uri: spdx:checksum
+        range: Checksum
+        description: |
+          The checksum of the distribution. Per spdx:checksum;
+          embedded structured value with algorithm + hex-encoded
+          digest, used to verify the integrity of the downloaded
+          payload.
+
+  CatalogRecord:
+    class_uri: dcat:CatalogRecord
+    description: |
+      A record describing the registration of a single dataset or
+      data service in a catalog. Per DCAT-3 §6.4; a metadata layer
+      *about* the catalogued resource (when it was added to the
+      catalog, by whom) distinct from the resource's own
+      issued/modified dates.
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalog_records
+      openapi.parent_path: "Catalog.record"
+      openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
+    attributes:
+      id:
+        identifier: true
+        slot_uri: dct:identifier
+        required: true
+        description: |
+          The IRI of the catalog record. Distinct from the IRI of
+          the resource the record describes (carried in
+          ``primaryTopic``).
+      title:
+        slot_uri: dct:title
+        description: A name given to the catalog record. Per dct:title.
+      description:
+        slot_uri: dct:description
+        description: |
+          A free-text account of the catalog record. Per
+          dct:description.
+      primaryTopic:
+        slot_uri: foaf:primaryTopic
+        range: Resource
+        required: true
+        description: |
+          The Resource (Dataset, DataService, etc.) described by
+          this catalog record. Per foaf:primaryTopic; reference
+          (IRI) only — even though Resource is the polymorphic
+          root, the relationship here is "this record points at
+          that resource", not embedded.
+      listingDate:
+        slot_uri: dct:issued
+        range: datetime
+        description: |
+          The date on which the resource described by this catalog
+          record was first listed in the catalog. Per dct:issued
+          on the catalog record.
+      modificationDate:
+        slot_uri: dct:modified
+        range: datetime
+        description: |
+          The date on which the catalog record itself (not the
+          described resource) was most recently modified. Per
+          dct:modified on the catalog record.
+      conformsTo:
+        slot_uri: dct:conformsTo
+        multivalued: true
+        range: uri
+        description: |
+          The metadata profile(s) the catalog record conforms to.
+          Per dct:conformsTo.
+
+  Agent:
+    class_uri: foaf:Agent
+    description: |
+      A person, organisation, or software agent. Per foaf:Agent;
+      used as the range of ``publisher``, ``creator``,
+      ``contributor``, and ``contactPoint`` slots.
+    annotations:
+      openapi.resource: "true"
+      openapi.path: agents
+      openapi.parent_path: "Catalog.creator"
+      openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
+    attributes:
+      id:
+        identifier: true
+        slot_uri: dct:identifier
+        required: true
+        description: The IRI of the agent.
+      name:
+        slot_uri: foaf:name
+        description: A name for the agent. Per foaf:name.
+      mbox:
+        slot_uri: foaf:mbox
+        range: uri
+        description: |
+          A personal mailbox of the agent. Per foaf:mbox; typically
+          a ``mailto:`` URI.
+      homepage:
+        slot_uri: foaf:homepage
+        range: uri
+        description: A homepage of the agent. Per foaf:homepage.
+      type:
+        slot_uri: dct:type
+        range: uri
+        description: |
+          The kind of agent (Organization, Person, Software, …).
+          Per dct:type; values are IRIs from a controlled
+          vocabulary.
+
+  # ====================================================================
+  # EMBEDDED VALUE OBJECTS (no identifier → inlined by default)
+  # ====================================================================
+
+  Location:
+    class_uri: dct:Location
+    description: |
+      A spatial region or named place. Per dct:Location; embedded
+      structured value (no identifier slot, so the LinkML default
+      is composition — the value travels embedded in the parent
+      payload, not as an IRI reference).
+    attributes:
+      geometry:
+        slot_uri: locn:geometry
+        description: |
+          A geometry associated with the location. Per
+          locn:geometry; serialised as a WKT or GeoJSON literal.
+      bbox:
+        slot_uri: dcat:bbox
+        description: |
+          The bounding box of the location. Per dcat:bbox; WKT
+          POLYGON or GeoJSON.
+      centroid:
+        slot_uri: dcat:centroid
+        description: |
+          The centroid of the location. Per dcat:centroid; WKT
+          POINT or GeoJSON.
+
+  PeriodOfTime:
+    class_uri: dct:PeriodOfTime
+    description: |
+      An interval of time that is named or defined by its start
+      and end dates. Per dct:PeriodOfTime; embedded structured
+      value (no identifier slot — composition, not reference).
+    attributes:
+      startDate:
+        slot_uri: dcat:startDate
+        range: datetime
+        description: |
+          The start of the period. Per dcat:startDate (xsd:date,
+          xsd:dateTime, xsd:gYear, etc.).
+      endDate:
+        slot_uri: dcat:endDate
+        range: datetime
+        description: |
+          The end of the period. Per dcat:endDate.
+      beginning:
+        slot_uri: time:hasBeginning
+        range: datetime
+        description: |
+          The beginning of the temporal entity. Per
+          time:hasBeginning; alternative to ``startDate`` for OWL-
+          Time alignment.
+      end:
+        slot_uri: time:hasEnd
+        range: datetime
+        description: |
+          The end of the temporal entity. Per time:hasEnd;
+          alternative to ``endDate`` for OWL-Time alignment.
+
+  Checksum:
+    class_uri: spdx:Checksum
+    description: |
+      A value that confirms the identity of a piece of software, a
+      file, etc., used to ensure no transmission errors or
+      tampering. Per spdx:Checksum; embedded structured value (no
+      identifier).
+    attributes:
+      algorithm:
+        slot_uri: spdx:algorithm
+        range: uri
+        description: |
+          The cryptographic hash function used to compute the
+          checksum value. Per spdx:algorithm; values are IRIs from
+          the spdx:checksumAlgorithm vocabulary
+          (spdx:checksumAlgorithm_sha256 et al.).
+      checksumValue:
+        slot_uri: spdx:checksumValue
+        description: |
+          The hex-encoded value of the checksum. Per
+          spdx:checksumValue.
