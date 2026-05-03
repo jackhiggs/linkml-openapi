@@ -363,3 +363,13 @@ class TestQueryParams:
         list_method_end = src.find(') {', list_method_start)
         list_method_signature = src[list_method_start:list_method_end]
         assert list_method_signature.count("@RequestParam") >= 3
+
+    def test_query_params_attached_to_reference_list(self, files):
+        """Catalog.dataset is inlined: false → reference list at
+        /catalogs/{id}/dataset. The list of attached IRIs carries Dataset's
+        query params."""
+        src = files["io/example/dcat/api/CatalogApi.java"]
+        list_method_start = src.find('listCatalogDatasetRefs')
+        list_method_end = src.find(') {', list_method_start)
+        list_method_signature = src[list_method_start:list_method_end]
+        assert list_method_signature.count("@RequestParam") >= 3
