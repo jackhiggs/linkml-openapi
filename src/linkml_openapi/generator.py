@@ -37,17 +37,12 @@ from linkml_openapi._base import Generator
 from linkml_openapi._query_params import (
     QueryParamSpec,
     walk_query_params,
-    QUERY_PARAM_TOKENS as _QUERY_PARAM_TOKENS,
-    COMPARABLE_RANGES as _COMPARABLE_RANGES,
 )
 from linkml_openapi._chains import (
     build_parent_chains_index,
     canonical_parent_chain,
-    parent_path_segments as _parent_path_segments_helper,
     parse_path_param_sources as _parse_path_param_sources_helper,
-    render_chain_hops,
     PATH_TEMPLATE_PLACEHOLDER_RE,
-    ChainHop,
 )
 
 # LinkML range → OpenAPI DataType mapping
