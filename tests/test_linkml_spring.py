@@ -622,6 +622,32 @@ classes:
         assert '@GetMapping(value = "/catalogs/{catId}/datasets/{id}"' in src
         assert '@PathVariable("catId")' in src
 
+    def test_ambiguous_chain_without_parent_path_raises(self, tmp_path):
+        fixture = tmp_path / "ambig.yaml"
+        fixture.write_text("""\
+id: https://example.org/amb
+name: amb
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Folder:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      tags: { range: Tag, multivalued: true }
+  Bookmark:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      tags: { range: Tag, multivalued: true }
+  Tag:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        with pytest.raises(ValueError, match="multiple parent chains"):
+            SpringServerGenerator(str(fixture), package="io.example.amb").build()
+
 
 NO_FIXTURE = str(Path(__file__).parent / "fixtures" / "spring_nested_only.yaml")
 
