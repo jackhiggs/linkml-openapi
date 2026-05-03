@@ -6,6 +6,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [0.8.2] — 2026-04-29
+
+### Fixed
+
+- **Discriminator parent excluded from its own `oneOf` and
+  `discriminator.mapping`**
+  ([#52](https://github.com/jackhiggs/linkml-openapi/issues/52)). The
+  0.8.0 emission included the discriminator-root class itself in its
+  own `oneOf` array (and `discriminator.mapping`) whenever the root
+  wasn't marked ``abstract: true`` in LinkML. openapi-generator's
+  Spring server library reads that self-reference as cyclic
+  inheritance and fails the build. The discriminator parent is the
+  union *category*, never an *instance* of the union; the `oneOf`
+  array now contains only descendant `$ref`s, regardless of whether
+  the parent is `abstract: true` (LinkML's annotation) or just
+  conceptually-but-not-flagged-abstract (DCAT3-style schemas).
+  Behaviour for genuinely abstract parents (Animal / Product in the
+  fixture) is unchanged — they were already excluded by the existing
+  `cls.abstract` filter.
+
 ## [0.8.1] — 2026-04-29
 
 ### Fixed
@@ -423,6 +443,7 @@ feature; new CLI flags are summarised at the end.
 
 Initial public release.
 
+[0.8.2]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.8.2
 [0.8.1]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.8.1
 [0.8.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.8.0
 [0.7.0]: https://github.com/jackhiggs/linkml-openapi/releases/tag/v0.7.0

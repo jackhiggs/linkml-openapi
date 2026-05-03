@@ -1189,15 +1189,22 @@ class OpenAPIGenerator(Generator):
         parent_field = self._discriminator_field(parent_cls)
         return parent_field != field
 
-    def _concrete_descendants_including_self(self, class_name: str) -> list[str]:
-        """Concrete (non-abstract, non-mixin) descendants plus self if concrete.
+    def _concrete_descendants_excluding_self(self, class_name: str) -> list[str]:
+        """Concrete (non-abstract, non-mixin) descendants — never the root itself.
+
+        The discriminator root is the union *category*; subclasses are the
+        addressable *instances*. Whether the root is marked
+        ``abstract: true`` doesn't matter for this rule — the discriminator
+        semantics make it the union root by definition, so it must not
+        appear in its own ``oneOf`` array or ``discriminator.mapping``
+        (downstream codegens read the self-reference as cyclic inheritance).
 
         Mixins are excluded entirely from polymorphic mappings — they're
         trait composition, not subtyping.
         """
         sv = self.schemaview
         out: list[str] = []
-        for name in [class_name] + list(sv.class_descendants(class_name, reflexive=False)):
+        for name in sv.class_descendants(class_name, reflexive=False):
             cls = sv.get_class(name)
             if cls is None or cls.abstract or cls.mixin:
                 continue
@@ -1233,7 +1240,7 @@ class OpenAPIGenerator(Generator):
                 continue
             if not self._is_discriminator_root(cls, field):
                 continue
-            concrete = self._concrete_descendants_including_self(class_name)
+            concrete = self._concrete_descendants_excluding_self(class_name)
             if not concrete:
                 # Discriminator declared but nothing concrete to dispatch
                 # to — the parent is itself abstract and has no concrete
