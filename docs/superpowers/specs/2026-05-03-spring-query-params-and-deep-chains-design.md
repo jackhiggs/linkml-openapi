@@ -8,7 +8,7 @@
 ## Goal
 
 Bring the LinkML → Spring server emitter (`src/linkml_openapi/spring/`) to
-parity with the LinkML → OpenAPI generator on two surfaces:
+parity with the LinkML → OpenAPI generator on three surfaces:
 
 1. **Query parameters** — `?slot=`, `?slot__gte=` / `__lte=` / `__gt=` /
    `__lt=`, and a single `?sort=` array param, driven by
@@ -17,11 +17,16 @@ parity with the LinkML → OpenAPI generator on two surfaces:
    schema-level opt-out via `openapi.auto_query_params: "false"` and
    slot-level opt-out via `openapi.query_param: "false"`.
 2. **Deep nested chains** — multi-hop URLs like
-   `/catalogs/{catalogId}/datasets/{datasetId}/distributions/{distId}`
+   `/catalogs/{catalog_id}/dataset/{dataset_id}/distribution/{id}`
    driven by the LinkML relationship graph, plus all four chain-shaping
    annotations: `openapi.path_id`, `openapi.parent_path`,
    `openapi.nested_only` / `openapi.flat_only`, and `openapi.path_template`
    with `openapi.path_param_sources`.
+3. **Path style and slot-segment overrides** — schema-level
+   `openapi.path_style: kebab-case` rendering hyphens for auto-derived
+   class and slot URL nouns (`/data-services/{id}/web-resources`), and
+   slot-level `openapi.path_segment` taken verbatim. Required so the
+   chain URLs in #2 use the right segments.
 
 The Spring emitter currently advertises a contract via the sidecar
 OpenAPI spec that the controller code cannot honor: the spec emits deep
