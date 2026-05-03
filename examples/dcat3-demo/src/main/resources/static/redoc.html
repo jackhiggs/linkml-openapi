@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>DCAT-3 — Redoc</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>body { margin: 0; padding: 0; }</style>
+</head>
+<body>
+  <!--
+    Loads the live OpenAPI spec served by springdoc at /v3/api-docs and
+    renders it with Redoc. Compare with /swagger-ui.html for the same
+    spec under Swagger UI's renderer; Redoc handles allOf-based
+    inheritance more cleanly (no inherited-enum bleed-through under
+    subclasses' Models view).
+  -->
+  <redoc spec-url="/v3/api-docs"
+         expand-responses="200"
+         hide-loading></redoc>
+  <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+</body>
+</html>
