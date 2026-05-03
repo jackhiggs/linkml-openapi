@@ -556,7 +556,8 @@ components:
             minimum: 1
           authors:
             items:
-              $ref: '#/components/schemas/Author'
+              type: string
+              format: uri
             type: array
             description: Authors of the book
         additionalProperties: false

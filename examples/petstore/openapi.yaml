@@ -656,7 +656,8 @@ components:
           pattern: ^\S+@\S+\.\S+$
         pets:
           items:
-            $ref: '#/components/schemas/Pet'
+            type: string
+            format: uri
           type: array
           description: Pets owned by this person
       additionalProperties: false
