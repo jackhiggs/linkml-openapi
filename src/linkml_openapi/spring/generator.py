@@ -458,6 +458,7 @@ public class Problem {
             "org.springframework.web.bind.annotation.PutMapping",
             "org.springframework.web.bind.annotation.RequestBody",
             "org.springframework.web.bind.annotation.RequestParam",
+            "jakarta.validation.Valid",
             "io.swagger.v3.oas.annotations.responses.ApiResponse",
             "io.swagger.v3.oas.annotations.media.ArraySchema",
             "io.swagger.v3.oas.annotations.media.Content",
@@ -539,7 +540,7 @@ public class Problem {
                 "method_name": f"create{cn}",
                 "return_type": cn,
                 "params": [
-                    {"annotation": "@RequestBody", "java_type": cn, "java_name": "body"},
+                    {"annotation": "@Valid @RequestBody", "java_type": cn, "java_name": "body"},
                 ],
             },
             {
@@ -568,7 +569,7 @@ public class Problem {
                         "java_type": "String",
                         "java_name": "id",
                     },
-                    {"annotation": "@RequestBody", "java_type": cn, "java_name": "body"},
+                    {"annotation": "@Valid @RequestBody", "java_type": cn, "java_name": "body"},
                 ],
             },
             {
@@ -671,7 +672,7 @@ public class Problem {
                 "return_type": tn,
                 "params": [
                     _path_param("id"),
-                    {"annotation": "@RequestBody", "java_type": tn, "java_name": "body"},
+                    {"annotation": "@Valid @RequestBody", "java_type": tn, "java_name": "body"},
                 ],
             },
             {
@@ -694,7 +695,7 @@ public class Problem {
                 "params": [
                     _path_param("id"),
                     _path_param(target_id_var),
-                    {"annotation": "@RequestBody", "java_type": tn, "java_name": "body"},
+                    {"annotation": "@Valid @RequestBody", "java_type": tn, "java_name": "body"},
                 ],
             },
             {
@@ -750,7 +751,7 @@ public class Problem {
                 "params": [
                     _path_param("id"),
                     {
-                        "annotation": "@RequestBody",
+                        "annotation": "@Valid @RequestBody",
                         "java_type": "URI",
                         "java_name": "targetIri",
                     },
@@ -850,7 +851,7 @@ public class Problem {
                 "params": [
                     *chain_path_params,
                     leaf_path_param,
-                    {"annotation": "@RequestBody", "java_type": cn, "java_name": "body"},
+                    {"annotation": "@Valid @RequestBody", "java_type": cn, "java_name": "body"},
                 ],
             },
             {
@@ -941,7 +942,7 @@ public class Problem {
                 "return_type": cn,
                 "params": [
                     *item_params,
-                    {"annotation": "@RequestBody", "java_type": cn, "java_name": "body"},
+                    {"annotation": "@Valid @RequestBody", "java_type": cn, "java_name": "body"},
                 ],
             },
             {
@@ -993,7 +994,7 @@ public class Problem {
                                 "params": [
                                     *collection_params,
                                     {
-                                        "annotation": "@RequestBody",
+                                        "annotation": "@Valid @RequestBody",
                                         "java_type": cn,
                                         "java_name": "body",
                                     },

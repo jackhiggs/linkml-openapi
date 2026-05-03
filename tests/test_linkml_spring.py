@@ -215,7 +215,7 @@ class TestApiSurface:
         src = files["io/example/dcat/api/CatalogApi.java"]
         assert "attachCatalogDataset" in src
         assert "detachCatalogDataset" in src
-        assert "@RequestBody URI targetIri" in src
+        assert "@Valid @RequestBody URI targetIri" in src
         # Reference list returns IRIs, not embedded objects.
         assert "List<URI>" in src
 
@@ -294,6 +294,19 @@ class TestValidationAndTypes:
         src = files["io/example/dcat/model/Resource.java"]
         assert "private java.time.OffsetDateTime issued" in src
         assert "private java.time.OffsetDateTime modified" in src
+
+    def test_request_bodies_carry_at_valid_for_bean_validation(self, files):
+        """``@Valid @RequestBody`` triggers Spring's bean-validation pass
+        on the body, so the DTO's ``@NotNull`` / ``@Pattern`` / ``@Min`` /
+        ``@Max`` constraints are actually enforced. Without ``@Valid`` the
+        constraints are silent and the documented 422 response contract
+        is unreachable."""
+        src = files["io/example/dcat/api/CatalogApi.java"]
+        # createCatalog and updateCatalog both take a @RequestBody Catalog.
+        assert "@Valid @RequestBody Catalog body" in src
+        # Verify the import landed too — without it the annotation is a
+        # compile error.
+        assert "import jakarta.validation.Valid;" in src
 
 
 # ----------------------------------------------------------------------
