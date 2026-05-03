@@ -319,6 +319,16 @@ classes:
       openapi.type_value: Dataset
       openapi.legacy_type_value: "com.xyz.dcat.Dataset"
       openapi.parent_path: "Catalog.dataset"
+    slot_usage:
+      title:
+        annotations:
+          openapi.query_param: equality
+      issued:
+        annotations:
+          openapi.query_param: comparable,sortable
+      modified:
+        annotations:
+          openapi.query_param: comparable,sortable
     attributes:
       distribution:
         slot_uri: dcat:distribution
@@ -394,6 +404,16 @@ classes:
       openapi.path: catalogs
       openapi.type_value: Catalog
       openapi.legacy_type_value: "com.xyz.dcat.Catalog"
+    slot_usage:
+      title:
+        annotations:
+          openapi.query_param: equality
+      issued:
+        annotations:
+          openapi.query_param: comparable,sortable
+      modified:
+        annotations:
+          openapi.query_param: comparable,sortable
     attributes:
       dataset:
         slot_uri: dcat:dataset
@@ -511,6 +531,16 @@ classes:
       openapi.path: distributions
       openapi.parent_path: "Catalog.dataset/Dataset.distribution"
       openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
+    slot_usage:
+      title:
+        annotations:
+          openapi.query_param: equality
+      mediaType:
+        annotations:
+          openapi.query_param: equality
+      byteSize:
+        annotations:
+          openapi.query_param: comparable,sortable
     attributes:
       id:
         identifier: true
@@ -673,6 +703,13 @@ classes:
       openapi.path: catalog_records
       openapi.parent_path: "Catalog.record"
       openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
+    slot_usage:
+      title:
+        annotations:
+          openapi.query_param: equality
+      listingDate:
+        annotations:
+          openapi.query_param: comparable,sortable
     attributes:
       id:
         identifier: true
@@ -733,6 +770,10 @@ classes:
       openapi.path: agents
       openapi.parent_path: "Catalog.creator"
       openapi.media_types: "application/json, application/ld+json, text/turtle, application/rdf+xml"
+    slot_usage:
+      name:
+        annotations:
+          openapi.query_param: equality
     attributes:
       id:
         identifier: true
