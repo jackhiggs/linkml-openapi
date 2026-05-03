@@ -601,12 +601,21 @@ public class Problem {
         consistently."""
         ops: list[dict] = []
         for slot in self._sv.class_induced_slots(cls.name):
+            if not slot.multivalued:
+                # Single-valued class refs live as fields in the parent
+                # body — no addressable collection at the URL surface.
+                continue
             target = self._sv.get_class(slot.range or "")
             if target is None:
                 continue
             if not self._has_identifier(target):
                 # Embedded value class (no id) — composition is implicit
                 # via the embedded type; no extra endpoints needed.
+                continue
+            nested_ann = self._get_slot_annotation_compat(cls, slot.name, "openapi.nested")
+            if nested_ann is not None and nested_ann.strip().lower() != "true":
+                # Slot opted out of nested URL surface — relationship
+                # lives in the body payload only.
                 continue
             target_id_path = "{" + _java_identifier(target.name) + "Id}"
             slot_seg = self._render_slot_segment_compat(cls, slot)

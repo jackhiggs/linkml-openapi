@@ -428,6 +428,17 @@ classes:
       modified:
         annotations:
           openapi.query_param: comparable,sortable
+      # Catalog inherits `distribution` and `inSeries` from Dataset.
+      # Suppress those nested URLs on /catalogs — a Catalog typically
+      # doesn't carry its own distributions or live inside another
+      # series. Keeps the API surface focused on Catalog's actual
+      # relationship slots (dataset / service / record).
+      distribution:
+        annotations:
+          openapi.nested: "false"
+      inSeries:
+        annotations:
+          openapi.nested: "false"
     attributes:
       dataset:
         slot_uri: dcat:dataset
@@ -491,7 +502,21 @@ classes:
       openapi.path: dataset-series
       openapi.type_value: DatasetSeries
       openapi.legacy_type_value: "com.xyz.dcat.DatasetSeries"
-      openapi.parent_path: "Catalog.inSeries"
+      # Deep chain: Catalog → Dataset (containing) → inSeries (DatasetSeries).
+      # Catalog.inSeries inherited from Dataset is suppressed via slot_usage,
+      # so the chain has to go through Catalog.dataset.
+      openapi.parent_path: "Catalog.dataset/Dataset.inSeries"
+    slot_usage:
+      # DatasetSeries inherits `distribution` and `inSeries` from Dataset.
+      # A series doesn't carry distributions (those belong to the
+      # member datasets) and series-of-series isn't a typical pattern.
+      # Suppress both to keep the surface focused.
+      distribution:
+        annotations:
+          openapi.nested: "false"
+      inSeries:
+        annotations:
+          openapi.nested: "false"
 
   DataService:
     class_uri: dcat:DataService
