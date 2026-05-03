@@ -42,9 +42,11 @@ from linkml_runtime.utils.schemaview import SchemaView
 # would silently produce mismatched URLs between the spec and Spring
 # routes.
 from linkml_openapi._chains import (
+    PATH_TEMPLATE_PLACEHOLDER_RE,
     ChainHop,
     build_parent_chains_index,
     canonical_parent_chain,
+    parse_path_param_sources,
     render_chain_hops,
 )
 from linkml_openapi._query_params import QueryParamSpec, walk_query_params
@@ -507,10 +509,14 @@ public class Problem {
         ops.extend(self._nested_ops(cls, path_segment, imports, media_types))
         # Deep nested chain (auto-derived). Item-only CRUD on the deep URL.
         if not flat_only:
-            parent_path_ann = self._class_annotation(cls, "openapi.parent_path")
-            chain = canonical_parent_chain(cls.name, self._chains_index, parent_path_ann)
-            if chain:
-                ops.extend(self._deep_chained_ops(cls, chain, imports, media_types))
+            template = self._class_annotation(cls, "openapi.path_template")
+            if template:
+                ops.extend(self._deep_templated_ops(cls, template, imports, media_types))
+            else:
+                parent_path_ann = self._class_annotation(cls, "openapi.parent_path")
+                chain = canonical_parent_chain(cls.name, self._chains_index, parent_path_ann)
+                if chain:
+                    ops.extend(self._deep_chained_ops(cls, chain, imports, media_types))
         # Decorate every op with explicit success + RFC 7807 error
         # responses. The success block fans out one ``@Content`` per
         # advertised media type so the live spec advertises
@@ -882,6 +888,146 @@ public class Problem {
                 "params": [*chain_path_params, leaf_path_param],
             },
         ]
+
+    def _deep_templated_ops(
+        self,
+        cls: ClassDefinition,
+        template: str,
+        imports: set[str],
+        media_types: list[str],
+    ) -> list[dict]:
+        """Item-only CRUD on a templated deep URL, plus optional collection
+        when the template ends with /{name}."""
+        sources_raw = self._class_annotation(cls, "openapi.path_param_sources") or ""
+        sources = parse_path_param_sources(cls.name, sources_raw)
+        placeholders = list(PATH_TEMPLATE_PLACEHOLDER_RE.findall(template))
+        unique_placeholders = list(dict.fromkeys(placeholders))
+
+        if len(unique_placeholders) != len(placeholders):
+            duplicates = sorted({p for p in placeholders if placeholders.count(p) > 1})
+            raise ValueError(
+                f"Class {cls.name!r} `openapi.path_template` "
+                f"{template!r} repeats placeholder(s) {duplicates}: "
+                "OpenAPI requires unique parameter names per path."
+            )
+
+        missing = set(unique_placeholders) - set(sources)
+        extra = set(sources) - set(unique_placeholders)
+        if missing or extra:
+            raise ValueError(
+                f"Class {cls.name!r} `openapi.path_template` placeholders "
+                f"don't match `openapi.path_param_sources`. "
+                f"Template placeholders: {sorted(unique_placeholders)!r}. "
+                f"Source keys: {sorted(sources)!r}. "
+                f"Missing sources: {sorted(missing)!r}. "
+                f"Extra sources (not in template): {sorted(extra)!r}."
+            )
+
+        sv = self._sv
+
+        def _param_dict_for_placeholder(name: str) -> dict:
+            src_class, src_slot = sources[name]
+            if sv.get_class(src_class) is None:
+                raise ValueError(
+                    f"Class {cls.name!r} `openapi.path_param_sources` refers to "
+                    f"unknown class {src_class!r} for parameter {name!r}."
+                )
+            slot = self._induced_slots_by_name(src_class).get(src_slot)
+            if slot is None:
+                raise ValueError(
+                    f"Class {cls.name!r} `openapi.path_param_sources` refers to "
+                    f"unknown slot {src_class}.{src_slot!r} for parameter {name!r}."
+                )
+            return {
+                "annotation": f'@PathVariable("{name}")',
+                "java_type": self._java_type_for_range(slot, imports),
+                "java_name": _java_identifier(name),
+            }
+
+        item_params = [_param_dict_for_placeholder(n) for n in unique_placeholders]
+        cn = cls.name
+        suffix = "ViaTemplate"
+        deep_url = f'"{template}"'
+        produces = _produces_arg(media_types)
+        consumes = produces
+
+        ops: list[dict] = [
+            {
+                "javadoc": f"GET {template} — read a {cn}.",
+                "method_annotations": [
+                    f"@GetMapping(value = {deep_url}, produces = {produces})"
+                ],
+                "method_name": f"get{cn}{suffix}",
+                "return_type": cn,
+                "params": item_params,
+            },
+            {
+                "javadoc": f"PUT {template} — replace a {cn}.",
+                "method_annotations": [
+                    f"@PutMapping(value = {deep_url}, consumes = {consumes}, produces = {produces})"
+                ],
+                "method_name": f"update{cn}{suffix}",
+                "return_type": cn,
+                "params": [
+                    *item_params,
+                    {"annotation": "@RequestBody", "java_type": cn, "java_name": "body"},
+                ],
+            },
+            {
+                "javadoc": f"DELETE {template} — delete a {cn}.",
+                "method_annotations": [f"@DeleteMapping({deep_url})"],
+                "method_name": f"delete{cn}{suffix}",
+                "return_type": "Void",
+                "params": item_params,
+            },
+        ]
+
+        # Collection emission when template ends with `/{name}`.
+        coll_opt = self._class_annotation(cls, "openapi.path_template_collection")
+        emit_collection = coll_opt is None or coll_opt.strip().lower() == "true"
+        if emit_collection and template.endswith("}"):
+            tail_open = template.rfind("/{")
+            tail_name = template[tail_open + 2 : -1] if tail_open != -1 else None
+            if tail_name and tail_name in {n for n in unique_placeholders}:
+                collection_path = template[:tail_open]
+                if collection_path:
+                    collection_params = [
+                        p for p, n in zip(item_params, unique_placeholders) if n != tail_name
+                    ]
+                    ops.extend(
+                        [
+                            {
+                                "javadoc": f"GET {collection_path} — list {cn}s.",
+                                "method_annotations": [
+                                    f'@GetMapping(value = "{collection_path}", produces = {produces})'
+                                ],
+                                "method_name": f"list{cn}s{suffix}",
+                                "return_type": f"List<{cn}>",
+                                "params": [
+                                    *collection_params,
+                                    *_list_query_params(),
+                                    *self._query_param_dicts(cls, imports),
+                                ],
+                            },
+                            {
+                                "javadoc": f"POST {collection_path} — create a {cn}.",
+                                "method_annotations": [
+                                    f'@PostMapping(value = "{collection_path}", consumes = {consumes}, produces = {produces})'
+                                ],
+                                "method_name": f"create{cn}{suffix}",
+                                "return_type": cn,
+                                "params": [
+                                    *collection_params,
+                                    {
+                                        "annotation": "@RequestBody",
+                                        "java_type": cn,
+                                        "java_name": "body",
+                                    },
+                                ],
+                            },
+                        ]
+                    )
+        return ops
 
     # --- Query-param surface -------------------------------------------
 

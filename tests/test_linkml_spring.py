@@ -693,3 +693,90 @@ classes:
 """)
         with pytest.raises(ValueError, match="mutually exclusive"):
             SpringServerGenerator(str(fixture), package="io.example.bad").build()
+
+
+TPL_FIXTURE = str(Path(__file__).parent / "fixtures" / "spring_path_template.yaml")
+
+
+@pytest.fixture(scope="module")
+def tpl_files() -> dict:
+    return SpringServerGenerator(TPL_FIXTURE, package="io.example.tpl").build()
+
+
+class TestTemplatedPaths:
+    def test_template_emits_verbatim_url(self, tpl_files):
+        src = tpl_files["io/example/tpl/api/ResourceVersionApi.java"]
+        assert (
+            '@GetMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"'
+            in src
+        )
+
+    def test_template_method_name_via_template_suffix(self, tpl_files):
+        src = tpl_files["io/example/tpl/api/ResourceVersionApi.java"]
+        assert "getResourceVersionViaTemplate" in src
+        assert "updateResourceVersionViaTemplate" in src
+        assert "deleteResourceVersionViaTemplate" in src
+
+    def test_template_path_params_typed_from_sources(self, tpl_files):
+        src = tpl_files["io/example/tpl/api/ResourceVersionApi.java"]
+        # All three sources resolve to string-ranged slots → String params.
+        assert '@PathVariable("cId") String cId' in src
+        assert '@PathVariable("doi") String doi' in src
+        assert '@PathVariable("version") String version' in src
+
+    def test_template_collection_emitted_when_ending_in_placeholder(self, tpl_files):
+        """The template ends with /{version}; default-on collection emits
+        list/create at /v2/catalogs/{cId}/resources/by-doi/{doi}."""
+        src = tpl_files["io/example/tpl/api/ResourceVersionApi.java"]
+        assert (
+            '@GetMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}",'
+            in src
+        )
+        assert (
+            '@PostMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}",'
+            in src
+        )
+
+    def test_template_placeholder_source_mismatch_raises(self, tmp_path):
+        fixture = tmp_path / "tpl_bad.yaml"
+        fixture.write_text("""\
+id: https://example.org/tpl_bad
+name: tpl_bad
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+  Foo:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/v2/{a}/{b}"
+      openapi.path_param_sources: "a:Catalog.id"
+      openapi.nested_only: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        with pytest.raises(ValueError, match="don't match"):
+            SpringServerGenerator(str(fixture), package="io.example.tpl_bad").build()
+
+    def test_template_unknown_source_class_raises(self, tmp_path):
+        fixture = tmp_path / "tpl_unknown.yaml"
+        fixture.write_text("""\
+id: https://example.org/tpl_u
+name: tpl_u
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Foo:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/v2/{a}"
+      openapi.path_param_sources: "a:DoesNotExist.id"
+      openapi.nested_only: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        with pytest.raises(ValueError, match="unknown class"):
+            SpringServerGenerator(str(fixture), package="io.example.tpl_u").build()
