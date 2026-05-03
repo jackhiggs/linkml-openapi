@@ -2254,20 +2254,14 @@ classes:
     def test_missing_legacy_value_errors_loudly(self):
         """Polymorphic root declares the legacy field, but a concrete
         class doesn't set its value → ValueError naming the class."""
-        broken = self.BASE.replace(
-            'openapi.legacy_type_value: "com.acme.Gadget"', ""
-        )
-        _generate_from_string_raises(
-            broken, match=r"Class 'Gadget'.*openapi.legacy_type_value"
-        )
+        broken = self.BASE.replace('openapi.legacy_type_value: "com.acme.Gadget"', "")
+        _generate_from_string_raises(broken, match=r"Class 'Gadget'.*openapi.legacy_type_value")
 
     def test_no_legacy_field_declared_means_no_synthesis(self):
         """Without ``openapi.legacy_type_field`` on the root, the
         ``openapi.legacy_type_value`` annotations on subclasses are
         ignored — the field doesn't exist on the wire."""
-        no_root = self.BASE.replace(
-            '      openapi.legacy_type_field: "#type"\n', ""
-        )
+        no_root = self.BASE.replace('      openapi.legacy_type_field: "#type"\n', "")
         spec = _generate_from_string(no_root)
         widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
         gadget_local = spec["components"]["schemas"]["Gadget"]["allOf"][1]
@@ -2283,7 +2277,7 @@ classes:
         with_codegen = self.BASE.replace(
             '      openapi.legacy_type_field: "#type"\n',
             '      openapi.legacy_type_field: "#type"\n'
-            '      openapi.legacy_type_codegen_name: legacyType\n',
+            "      openapi.legacy_type_codegen_name: legacyType\n",
         )
         spec = _generate_from_string(with_codegen)
         widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
@@ -2297,7 +2291,7 @@ classes:
         with_codegen = self.BASE.replace(
             '      openapi.legacy_type_field: "#type"\n',
             '      openapi.legacy_type_field: "#type"\n'
-            '      openapi.legacy_type_codegen_name: legacyType\n',
+            "      openapi.legacy_type_codegen_name: legacyType\n",
         )
         with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
             f.write(with_codegen)
@@ -2489,9 +2483,7 @@ classes:
         local = spec["components"]["schemas"]["Catalog"]
         # No descendants → plain $ref to self (the recursion is acknowledged
         # but not bound — the integer is informational for now).
-        assert local["properties"]["sub"]["items"] == {
-            "$ref": "#/components/schemas/Catalog"
-        }
+        assert local["properties"]["sub"]["items"] == {"$ref": "#/components/schemas/Catalog"}
 
     def test_reference_self_cycle_is_fine(self):
         """``inlined: false`` cycles are not real cycles on the wire — the

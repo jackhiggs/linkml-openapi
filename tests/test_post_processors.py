@@ -50,33 +50,31 @@ class TestExtractInlineOneof:
     it into a synthetic union DTO."""
 
     def _spec_with_inline_oneof(self) -> dict:
+        ds_ref = "#/components/schemas/Dataset"
+        cat_ref = "#/components/schemas/Catalog"
+        series_ref = "#/components/schemas/DatasetSeries"
+        inline_schema = {
+            "oneOf": [
+                {"$ref": ds_ref},
+                {"$ref": cat_ref},
+                {"$ref": series_ref},
+            ],
+            "discriminator": {
+                "propertyName": "resourceType",
+                "mapping": {
+                    "Dataset": ds_ref,
+                    "Catalog": cat_ref,
+                    "DatasetSeries": series_ref,
+                },
+            },
+        }
         return {
             "openapi": "3.0.3",
             "paths": {
                 "/datasets/{id}": {
                     "get": {
                         "responses": {
-                            "200": {
-                                "content": {
-                                    "application/json": {
-                                        "schema": {
-                                            "oneOf": [
-                                                {"$ref": "#/components/schemas/Dataset"},
-                                                {"$ref": "#/components/schemas/Catalog"},
-                                                {"$ref": "#/components/schemas/DatasetSeries"},
-                                            ],
-                                            "discriminator": {
-                                                "propertyName": "resourceType",
-                                                "mapping": {
-                                                    "Dataset": "#/components/schemas/Dataset",
-                                                    "Catalog": "#/components/schemas/Catalog",
-                                                    "DatasetSeries": "#/components/schemas/DatasetSeries",
-                                                },
-                                            },
-                                        }
-                                    }
-                                }
-                            }
+                            "200": {"content": {"application/json": {"schema": inline_schema}}}
                         }
                     }
                 }
@@ -86,9 +84,9 @@ class TestExtractInlineOneof:
 
     def test_inline_oneof_in_response_becomes_ref(self):
         spec = extract_inline_oneof(self._spec_with_inline_oneof())
-        schema = spec["paths"]["/datasets/{id}"]["get"]["responses"]["200"][
-            "content"
-        ]["application/json"]["schema"]
+        schema = spec["paths"]["/datasets/{id}"]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
         assert schema == {"$ref": "#/components/schemas/DatasetVariant"}
 
     def test_named_component_carries_full_oneof_shape(self):
@@ -120,9 +118,7 @@ class TestExtractInlineOneof:
         }
         out = extract_inline_oneof(spec)
         # Only one Variant component, both call sites $ref to it.
-        variant_keys = [
-            k for k in out["components"]["schemas"] if "Variant" in k
-        ]
+        variant_keys = [k for k in out["components"]["schemas"] if "Variant" in k]
         assert variant_keys == ["DatasetVariant"]
 
     def test_different_inline_shapes_get_distinct_components(self):
@@ -156,9 +152,7 @@ class TestExtractInlineOneof:
             }
         }
         out = extract_inline_oneof(spec)
-        names = sorted(
-            k for k in out["components"]["schemas"] if "Variant" in k
-        )
+        names = sorted(k for k in out["components"]["schemas"] if "Variant" in k)
         assert names == ["DatasetVariant", "DatasetVariant2"]
 
     def test_does_not_touch_inline_oneof_without_discriminator(self):
@@ -190,12 +184,10 @@ class TestExtractInlineOneof:
         before = copy.deepcopy(spec)
         out = extract_inline_oneof(spec)
         assert (
-            out["paths"]["/x"]["get"]["responses"]["200"]["content"][
-                "application/json"
-            ]["schema"]
-            == before["paths"]["/x"]["get"]["responses"]["200"]["content"][
-                "application/json"
-            ]["schema"]
+            out["paths"]["/x"]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+            == before["paths"]["/x"]["get"]["responses"]["200"]["content"]["application/json"][
+                "schema"
+            ]
         )
 
     def test_does_not_recurse_into_existing_component_schemas(self):
@@ -221,9 +213,9 @@ class TestExtractInlineOneof:
         }
         before = copy.deepcopy(spec)
         out = extract_inline_oneof(spec)
-        assert out["components"]["schemas"]["Resource"] == before["components"][
-            "schemas"
-        ]["Resource"]
+        assert (
+            out["components"]["schemas"]["Resource"] == before["components"]["schemas"]["Resource"]
+        )
 
 
 class TestPostProcessorViaGenerator:
@@ -263,9 +255,7 @@ classes:
         import tempfile
         from pathlib import Path
 
-        with tempfile.NamedTemporaryFile(
-            "w", suffix=".yaml", delete=False
-        ) as f:
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
             f.write(self.SCHEMA)
             path = f.name
         try:
@@ -277,9 +267,7 @@ classes:
     def test_post_processor_runs_on_dcat3_fixture(self):
         from pathlib import Path
 
-        fixture = str(
-            Path(__file__).parent / "fixtures" / "dcat3.yaml"
-        )
+        fixture = str(Path(__file__).parent / "fixtures" / "dcat3.yaml")
         canonical = yaml.safe_load(OpenAPIGenerator(fixture).serialize())
         processed = yaml.safe_load(
             OpenAPIGenerator(
@@ -289,12 +277,12 @@ classes:
         )
 
         # /datasets/{id} GET 200 went from inline oneOf to $ref.
-        canon_schema = canonical["paths"]["/datasets/{id}"]["get"][
-            "responses"
-        ]["200"]["content"]["application/json"]["schema"]
-        proc_schema = processed["paths"]["/datasets/{id}"]["get"][
-            "responses"
-        ]["200"]["content"]["application/json"]["schema"]
+        canon_schema = canonical["paths"]["/datasets/{id}"]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
+        proc_schema = processed["paths"]["/datasets/{id}"]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
         assert "oneOf" in canon_schema
         assert "$ref" in proc_schema
         # The named component carries the polymorphic shape.

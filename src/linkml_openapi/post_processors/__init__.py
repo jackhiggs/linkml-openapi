@@ -37,10 +37,7 @@ def apply(spec: dict, names: list[str]) -> dict:
         processor = REGISTRY.get(name)
         if processor is None:
             available = ", ".join(sorted(REGISTRY))
-            raise ValueError(
-                f"Unknown post-processor {name!r}. "
-                f"Available: {available}"
-            )
+            raise ValueError(f"Unknown post-processor {name!r}. Available: {available}")
         spec = processor(spec)
     return spec
 

@@ -287,6 +287,7 @@ class OpenAPIGenerator(Generator):
         self._inject_rdf_extensions(raw)
         if self.post_processors:
             from linkml_openapi.post_processors import apply as _apply_post
+
             raw = _apply_post(raw, list(self.post_processors))
         if self.format == "json":
             return json.dumps(raw, indent=2) + "\n"
@@ -322,8 +323,7 @@ class OpenAPIGenerator(Generator):
         if not self._codegen_name_mappings:
             return ""
         lines = [
-            f"{wire}={codegen}"
-            for wire, codegen in sorted(self._codegen_name_mappings.items())
+            f"{wire}={codegen}" for wire, codegen in sorted(self._codegen_name_mappings.items())
         ]
         return "\n".join(lines) + "\n"
 
@@ -1331,8 +1331,7 @@ class OpenAPIGenerator(Generator):
         field = self._inherited_discriminator_field(class_name)
         if field is not None:
             mapping = {
-                self._type_value(sv.get_class(n)): f"#/components/schemas/{n}"
-                for n in descendants
+                self._type_value(sv.get_class(n)): f"#/components/schemas/{n}" for n in descendants
             }
             schema.discriminator = Discriminator(propertyName=field, mapping=mapping)
         return schema
@@ -1364,11 +1363,7 @@ class OpenAPIGenerator(Generator):
         for class_name in sv.all_classes():
             edges: list[tuple[str, str]] = []
             for slot in self._induced_slots_iter(class_name):
-                if (
-                    slot.range
-                    and sv.get_class(slot.range)
-                    and self._is_composition(slot)
-                ):
+                if slot.range and sv.get_class(slot.range) and self._is_composition(slot):
                     edges.append((slot.name, slot.range))
             if edges:
                 composition[class_name] = edges
@@ -1388,7 +1383,7 @@ class OpenAPIGenerator(Generator):
             in_stack[node] = len(edge_stack)
             for slot_name, target in composition.get(node, []):
                 if target in in_stack:
-                    return edge_stack[in_stack[target]:] + [(node, slot_name, target)]
+                    return edge_stack[in_stack[target] :] + [(node, slot_name, target)]
                 if target not in visited and target in composition:
                     edge_stack.append((node, slot_name, target))
                     cycle = find_cycle(target)
@@ -1405,18 +1400,14 @@ class OpenAPIGenerator(Generator):
             cycle = find_cycle(class_name)
             if cycle is None:
                 continue
-            cycle_classes = {parent for parent, _, _ in cycle} | {
-                child for _, _, child in cycle
-            }
+            cycle_classes = {parent for parent, _, _ in cycle} | {child for _, _, child in cycle}
             if any(
-                self._class_annotation(sv.get_class(n), "openapi.recurse_max_depth")
-                is not None
+                self._class_annotation(sv.get_class(n), "openapi.recurse_max_depth") is not None
                 for n in cycle_classes
             ):
                 continue
             path = (
-                " -> ".join(f"{parent}.{slot}" for parent, slot, _ in cycle)
-                + f" -> {cycle[-1][2]}"
+                " -> ".join(f"{parent}.{slot}" for parent, slot, _ in cycle) + f" -> {cycle[-1][2]}"
             )
             raise ValueError(
                 f"Inlined composition cycle detected: {path}. Inlined cycles "
@@ -1595,14 +1586,10 @@ class OpenAPIGenerator(Generator):
             legacy_field = self._class_annotation(cls, "openapi.legacy_type_field")
             if legacy_field is not None:
                 legacy_field = legacy_field.strip()
-                codegen_name = self._class_annotation(
-                    cls, "openapi.legacy_type_codegen_name"
-                )
+                codegen_name = self._class_annotation(cls, "openapi.legacy_type_codegen_name")
                 codegen_name = codegen_name.strip() if codegen_name else None
                 for sub_name in seen.values():
-                    self._inject_legacy_type_value(
-                        schemas, sub_name, legacy_field, codegen_name
-                    )
+                    self._inject_legacy_type_value(schemas, sub_name, legacy_field, codegen_name)
 
     @staticmethod
     def _writable_local_schema(schema: Schema) -> Schema:
@@ -1979,9 +1966,7 @@ class OpenAPIGenerator(Generator):
                         self._type_value(sv.get_class(n)): f"#/components/schemas/{n}"
                         for n in descendants
                     }
-                    schema.discriminator = Discriminator(
-                        propertyName=field, mapping=mapping
-                    )
+                    schema.discriminator = Discriminator(propertyName=field, mapping=mapping)
                 return schema
 
         return Reference(ref=f"#/components/schemas/{range_name}")

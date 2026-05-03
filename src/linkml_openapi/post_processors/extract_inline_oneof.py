@@ -56,9 +56,7 @@ def extract_inline_oneof(spec: dict) -> dict:
     for path_item in paths.values():
         if not isinstance(path_item, dict):
             continue
-        for method_key in (
-            "get", "put", "post", "delete", "patch", "options", "head", "trace"
-        ):
+        for method_key in ("get", "put", "post", "delete", "patch", "options", "head", "trace"):
             op = path_item.get(method_key)
             if not isinstance(op, dict):
                 continue

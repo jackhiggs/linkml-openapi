@@ -107,14 +107,11 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
     ),
 )
 @click.version_option(__version__, "-V", "--version")
-def cli(yamlfile, resource_filter=(), emit_name_mappings=None,
-        post_process=None, **kwargs):
+def cli(yamlfile, resource_filter=(), emit_name_mappings=None, post_process=None, **kwargs):
     """Generate an OpenAPI specification from a LinkML schema."""
     resource_filter = list(resource_filter) if resource_filter else None
     if post_process:
-        kwargs["post_processors"] = [
-            n.strip() for n in post_process.split(",") if n.strip()
-        ]
+        kwargs["post_processors"] = [n.strip() for n in post_process.split(",") if n.strip()]
     gen = OpenAPIGenerator(yamlfile, resource_filter=resource_filter, **kwargs)
     spec = gen.serialize()
     click.echo(spec)
