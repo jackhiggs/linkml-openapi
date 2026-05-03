@@ -1,0 +1,48 @@
+id: https://example.org/spring_qp
+name: spring_qp
+prefixes:
+  linkml: https://w3id.org/linkml/
+default_range: string
+
+classes:
+  Person:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: people
+    attributes:
+      id:
+        identifier: true
+        range: string
+        required: true
+      name:
+        range: string
+      age:
+        range: integer
+      email:
+        range: string
+      created:
+        range: datetime
+      active:
+        range: boolean
+      tags:
+        range: string
+        multivalued: true
+    slot_usage:
+      id:
+        annotations:
+          openapi.path_variable: "true"
+      name:
+        annotations:
+          openapi.query_param: sortable
+      age:
+        annotations:
+          openapi.query_param: comparable,sortable
+      email:
+        annotations:
+          openapi.query_param: "false"
+      created:
+        annotations:
+          openapi.query_param: comparable
+      active:
+        annotations:
+          openapi.query_param: equality
