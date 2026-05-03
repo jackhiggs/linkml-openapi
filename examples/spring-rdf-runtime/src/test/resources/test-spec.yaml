@@ -1,0 +1,39 @@
+openapi: 3.1.0
+info:
+  title: Test fixture
+  version: "1.0"
+paths: {}
+components:
+  schemas:
+    Catalog:
+      type: object
+      x-rdf-class: http://www.w3.org/ns/dcat#Catalog
+      properties:
+        title:
+          type: string
+          x-rdf-property: http://purl.org/dc/terms/title
+        landingPage:
+          type: string
+          format: uri
+          x-rdf-property: http://www.w3.org/ns/dcat#landingPage
+        keyword:
+          type: array
+          items:
+            type: string
+          x-rdf-property: http://www.w3.org/ns/dcat#keyword
+    NoRdf:
+      type: object
+      properties:
+        plain:
+          type: string
+    Doc:
+      type: object
+      x-rdf-class: http://example.org/Doc
+      properties:
+        issued:
+          type: string
+          format: date-time
+          x-rdf-property: http://purl.org/dc/terms/issued
+        byteSize:
+          type: integer
+          x-rdf-property: http://www.w3.org/ns/dcat#byteSize
