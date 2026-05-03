@@ -373,3 +373,45 @@ class TestQueryParams:
         list_method_end = src.find(') {', list_method_start)
         list_method_signature = src[list_method_start:list_method_end]
         assert list_method_signature.count("@RequestParam") >= 3
+
+    def test_unknown_query_param_token_warns(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text("""\
+id: https://example.org/qp_warn
+name: qp_warn
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Person:
+    annotations: { openapi.resource: "true", openapi.path: people }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      name: { range: string }
+    slot_usage:
+      name:
+        annotations:
+          openapi.query_param: sorteable
+""")
+        with pytest.warns(UserWarning, match="sorteable"):
+            SpringServerGenerator(str(fixture), package="io.example.qp_warn").build()
+
+    def test_sortable_on_multivalued_raises(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text("""\
+id: https://example.org/qp_err
+name: qp_err
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+classes:
+  Person:
+    annotations: { openapi.resource: "true", openapi.path: people }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      tags: { range: string, multivalued: true }
+    slot_usage:
+      tags:
+        annotations:
+          openapi.query_param: sortable
+""")
+        with pytest.raises(ValueError, match="multivalued"):
+            SpringServerGenerator(str(fixture), package="io.example.qp_err").build()
