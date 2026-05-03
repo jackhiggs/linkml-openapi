@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from linkml_runtime.linkml_model import ClassDefinition, SlotDefinition
 from linkml_runtime.utils.schemaview import SchemaView
 
-
 PATH_TEMPLATE_PLACEHOLDER_RE: re.Pattern[str] = re.compile(r"\{([^{}]+)\}")
 
 
