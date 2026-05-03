@@ -34,15 +34,17 @@ from openapi_pydantic import (
 
 from linkml_openapi import __version__
 from linkml_openapi._base import Generator
+from linkml_openapi._chains import (
+    PATH_TEMPLATE_PLACEHOLDER_RE,
+    build_parent_chains_index,
+    canonical_parent_chain,
+)
+from linkml_openapi._chains import (
+    parse_path_param_sources as _parse_path_param_sources_helper,
+)
 from linkml_openapi._query_params import (
     QueryParamSpec,
     walk_query_params,
-)
-from linkml_openapi._chains import (
-    build_parent_chains_index,
-    canonical_parent_chain,
-    parse_path_param_sources as _parse_path_param_sources_helper,
-    PATH_TEMPLATE_PLACEHOLDER_RE,
 )
 
 # LinkML range → OpenAPI DataType mapping
@@ -1873,12 +1875,8 @@ class OpenAPIGenerator(Generator):
 
     def _canonical_parent_chain(self, class_name: str) -> list[tuple[str, str]]:
         cls = self.schemaview.get_class(class_name)
-        annotated = (
-            self._class_annotation(cls, "openapi.parent_path") if cls else None
-        )
-        return canonical_parent_chain(
-            class_name, self._parent_chains_index, annotated
-        )
+        annotated = self._class_annotation(cls, "openapi.parent_path") if cls else None
+        return canonical_parent_chain(class_name, self._parent_chains_index, annotated)
 
     def _build_chain_path_params(self, chain: list[tuple[str, str]]) -> tuple[str, list[Parameter]]:
         """Render a chain as a URL prefix and the matching path-parameter list.

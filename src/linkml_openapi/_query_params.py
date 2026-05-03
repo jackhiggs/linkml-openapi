@@ -10,6 +10,7 @@ turn it into Parameter objects (OpenAPI) or @RequestParam dicts (Spring).
 Validation rules raise/warn here so both renderers inherit identical
 messages.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -30,24 +31,24 @@ COMPARABLE_RANGES: frozenset[str] = frozenset(
 @dataclass(frozen=True)
 class QueryParamSpec:
     """One slot's contribution to the query-param surface."""
+
     slot: SlotDefinition
-    capabilities: frozenset[str]   # subset of QUERY_PARAM_TOKENS
+    capabilities: frozenset[str]  # subset of QUERY_PARAM_TOKENS
 
 
 @dataclass(frozen=True)
 class QueryParamSurface:
     """Result of walking a class for query params."""
+
     params: list[QueryParamSpec]
-    sort_tokens: list[str]   # ["name", "-name", ...] or []
+    sort_tokens: list[str]  # ["name", "-name", ...] or []
 
 
 def _parse_csv(raw: str) -> list[str]:
     return [tok.strip().lower() for tok in raw.split(",") if tok.strip()]
 
 
-def _capabilities_from_raw(
-    raw: str | None, cls_name: str, slot_name: str
-) -> frozenset[str] | None:
+def _capabilities_from_raw(raw: str | None, cls_name: str, slot_name: str) -> frozenset[str] | None:
     """Parse `openapi.query_param` into a capability set.
 
     Returns None when absent or explicitly `false`. Unknown tokens are
@@ -152,9 +153,7 @@ def walk_query_params(
             sv.get_enum(range_name) is not None
         )
         if is_scalar:
-            inferred.append(
-                QueryParamSpec(slot=slot, capabilities=frozenset({"equality"}))
-            )
+            inferred.append(QueryParamSpec(slot=slot, capabilities=frozenset({"equality"})))
 
     # Annotated slots win when present; otherwise fall back to inferred.
     if has_explicit_param:

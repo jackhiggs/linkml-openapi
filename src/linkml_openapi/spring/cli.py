@@ -22,8 +22,7 @@ from linkml_openapi.spring.generator import SpringServerGenerator
     default="io.example",
     show_default=True,
     help=(
-        "Java root package. Models go in <package>.model, controller "
-        "interfaces in <package>.api."
+        "Java root package. Models go in <package>.model, controller interfaces in <package>.api."
     ),
 )
 @click.version_option(__version__, "-V", "--version")

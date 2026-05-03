@@ -49,7 +49,7 @@ class TestPolymorphism:
     def test_resource_is_abstract_and_carries_jsontypeinfo(self, files):
         src = files["io/example/dcat/model/Resource.java"]
         assert "public abstract class Resource" in src
-        assert "@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = \"resourceType\")" in src
+        assert '@JsonTypeInfo(use = JsonTypeInfo.Id.NAME, property = "resourceType")' in src
         assert "@JsonSubTypes" in src
 
     @pytest.mark.parametrize(
@@ -81,7 +81,7 @@ class TestPolymorphism:
     def test_jsonsubtypes_lists_every_concrete_descendant(self, files):
         src = files["io/example/dcat/model/Resource.java"]
         for tag in ("Dataset", "Catalog", "DatasetSeries", "DataService"):
-            assert f"name = \"{tag}\")" in src
+            assert f'name = "{tag}")' in src
 
 
 # ----------------------------------------------------------------------
@@ -99,8 +99,7 @@ class TestRdfAnnotations:
     def test_class_uri_lands_as_x_rdf_class_extension(self, files):
         src = files["io/example/dcat/model/Catalog.java"]
         assert (
-            'name = "x-rdf-class"' in src
-            and 'value = "http://www.w3.org/ns/dcat#Catalog"' in src
+            'name = "x-rdf-class"' in src and 'value = "http://www.w3.org/ns/dcat#Catalog"' in src
         )
 
     def test_class_uri_also_emitted_as_ietf_x_jsonld_type(self, files):
@@ -111,8 +110,7 @@ class TestRdfAnnotations:
         up natively without our serdes runtime in the loop."""
         src = files["io/example/dcat/model/Catalog.java"]
         assert (
-            'name = "x-jsonld-type"' in src
-            and 'value = "http://www.w3.org/ns/dcat#Catalog"' in src
+            'name = "x-jsonld-type"' in src and 'value = "http://www.w3.org/ns/dcat#Catalog"' in src
         )
 
     def test_slot_uri_lands_as_x_rdf_property_extension(self, files):
@@ -159,9 +157,7 @@ class TestLegacyTypeField:
             ("DataService", "com.xyz.dcat.DataService"),
         ],
     )
-    def test_each_concrete_class_pins_its_legacy_value(
-        self, files, cls, value
-    ):
+    def test_each_concrete_class_pins_its_legacy_value(self, files, cls, value):
         src = files[f"io/example/dcat/model/{cls}.java"]
         assert f'private String legacyType = "{value}";' in src
         assert '@JsonProperty("#type")' in src
@@ -191,11 +187,11 @@ class TestApiSurface:
 
     def test_top_level_crud_present(self, files):
         src = files["io/example/dcat/api/CatalogApi.java"]
-        assert "@GetMapping(value = \"/catalogs\"" in src
-        assert "@PostMapping(value = \"/catalogs\"" in src
-        assert "@GetMapping(value = \"/catalogs/{id}\"" in src
-        assert "@PutMapping(value = \"/catalogs/{id}\"" in src
-        assert "@DeleteMapping(\"/catalogs/{id}\")" in src
+        assert '@GetMapping(value = "/catalogs"' in src
+        assert '@PostMapping(value = "/catalogs"' in src
+        assert '@GetMapping(value = "/catalogs/{id}"' in src
+        assert '@PutMapping(value = "/catalogs/{id}"' in src
+        assert '@DeleteMapping("/catalogs/{id}")' in src
 
     def test_list_endpoints_have_paging_query_params(self, files):
         src = files["io/example/dcat/api/CatalogApi.java"]
@@ -207,9 +203,9 @@ class TestApiSurface:
         /datasets/{id}/distribution + /datasets/{id}/distribution/{id}.
         Methods reflect the embedded payload type (Distribution)."""
         src = files["io/example/dcat/api/DatasetApi.java"]
-        assert "@GetMapping(value = \"/datasets/{id}/distribution\"" in src
-        assert "@PostMapping(value = \"/datasets/{id}/distribution\"" in src
-        assert "@GetMapping(value = \"/datasets/{id}/distribution/{DistributionId}\"" in src
+        assert '@GetMapping(value = "/datasets/{id}/distribution"' in src
+        assert '@PostMapping(value = "/datasets/{id}/distribution"' in src
+        assert '@GetMapping(value = "/datasets/{id}/distribution/{DistributionId}"' in src
         assert "ResponseEntity<Distribution>" in src
         assert "List<Distribution>" in src
 
@@ -330,10 +326,7 @@ class TestQueryParams:
 
     def test_sortable_emits_single_list_string_param(self, qp_files):
         src = qp_files["io/example/qp/api/PersonApi.java"]
-        assert (
-            '@RequestParam(name = "sort", required = false) java.util.List<String> sort'
-            in src
-        )
+        assert '@RequestParam(name = "sort", required = false) java.util.List<String> sort' in src
 
     def test_query_param_false_excludes_slot(self, qp_files):
         src = qp_files["io/example/qp/api/PersonApi.java"]
@@ -343,10 +336,10 @@ class TestQueryParams:
         src = qp_files["io/example/qp/api/PersonApi.java"]
         assert (
             '@RequestParam(name = "created__gte", required = false) '
-            'java.time.OffsetDateTime createdGte' in src
+            "java.time.OffsetDateTime createdGte" in src
         )
-        assert 'Boolean active' in src
-        assert 'Long age' in src
+        assert "Boolean active" in src
+        assert "Long age" in src
 
     def test_paging_params_still_present(self, qp_files):
         src = qp_files["io/example/qp/api/PersonApi.java"]
@@ -359,8 +352,8 @@ class TestQueryParams:
         query params (auto-inferred from Distribution's scalar slots)."""
         src = files["io/example/dcat/api/DatasetApi.java"]
         assert "/datasets/{id}/distribution" in src
-        list_method_start = src.find('listDatasetDistribution')
-        list_method_end = src.find(') {', list_method_start)
+        list_method_start = src.find("listDatasetDistribution")
+        list_method_end = src.find(") {", list_method_start)
         list_method_signature = src[list_method_start:list_method_end]
         assert list_method_signature.count("@RequestParam") >= 3
 
@@ -369,8 +362,8 @@ class TestQueryParams:
         /catalogs/{id}/dataset. The list of attached IRIs carries Dataset's
         query params."""
         src = files["io/example/dcat/api/CatalogApi.java"]
-        list_method_start = src.find('listCatalogDatasetRefs')
-        list_method_end = src.find(') {', list_method_start)
+        list_method_start = src.find("listCatalogDatasetRefs")
+        list_method_end = src.find(") {", list_method_start)
         list_method_signature = src[list_method_start:list_method_end]
         assert list_method_signature.count("@RequestParam") >= 3
 
@@ -551,10 +544,7 @@ class TestDeepChainedPaths:
         """Dataset's parent chain is just [(Catalog, dataset)] — a single
         hop. The deep URL is /catalogs/{catalog_id}/dataset/{id}."""
         src = files["io/example/dcat/api/DatasetApi.java"]
-        assert (
-            '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{id}"'
-            in src
-        )
+        assert '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{id}"' in src
         assert "getDatasetViaCatalog" in src
 
     def test_deep_path_params_in_order(self, files):
@@ -585,6 +575,7 @@ class TestDeepChainedPaths:
         """Within DistributionApi, all method names must be unique."""
         src = files["io/example/dcat/api/DistributionApi.java"]
         import re
+
         method_names = re.findall(r"default ResponseEntity<[^>]*> (\w+)\(", src)
         assert len(method_names) == len(set(method_names)), (
             f"duplicate methods: {[m for m in method_names if method_names.count(m) > 1]}"
@@ -665,7 +656,7 @@ class TestNestedOnlyAndFlatOnly:
         assert '@GetMapping(value = "/datasets/{id}",' not in src
         # Deep chain endpoint IS present (slot `datasets` plural in this
         # fixture; ancestor uses default snake_case path_id; leaf is {id}).
-        assert '/catalogs/{catalog_id}/datasets/{id}' in src
+        assert "/catalogs/{catalog_id}/datasets/{id}" in src
 
     def test_flat_only_suppresses_deep_ops(self, no_files):
         src = no_files["io/example/no_/api/TagApi.java"]
@@ -673,7 +664,7 @@ class TestNestedOnlyAndFlatOnly:
         assert '@GetMapping(value = "/tags",' in src
         assert '@GetMapping(value = "/tags/{id}",' in src
         # Deep chain endpoint NOT present.
-        assert '/catalogs/{catalog_id}/tags/{id}' not in src
+        assert "/catalogs/{catalog_id}/tags/{id}" not in src
 
     def test_nested_only_and_flat_only_together_raises(self, tmp_path):
         fixture = tmp_path / "bad.yaml"
@@ -706,10 +697,7 @@ def tpl_files() -> dict:
 class TestTemplatedPaths:
     def test_template_emits_verbatim_url(self, tpl_files):
         src = tpl_files["io/example/tpl/api/ResourceVersionApi.java"]
-        assert (
-            '@GetMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"'
-            in src
-        )
+        assert '@GetMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}"' in src
 
     def test_template_method_name_via_template_suffix(self, tpl_files):
         src = tpl_files["io/example/tpl/api/ResourceVersionApi.java"]
@@ -728,14 +716,8 @@ class TestTemplatedPaths:
         """The template ends with /{version}; default-on collection emits
         list/create at /v2/catalogs/{cId}/resources/by-doi/{doi}."""
         src = tpl_files["io/example/tpl/api/ResourceVersionApi.java"]
-        assert (
-            '@GetMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}",'
-            in src
-        )
-        assert (
-            '@PostMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}",'
-            in src
-        )
+        assert '@GetMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}",' in src
+        assert '@PostMapping(value = "/v2/catalogs/{cId}/resources/by-doi/{doi}",' in src
 
     def test_template_placeholder_source_mismatch_raises(self, tmp_path):
         fixture = tmp_path / "tpl_bad.yaml"
@@ -831,9 +813,7 @@ class TestParityWithOpenApiSide:
 
         # For each spec path with a GET method that has query params,
         # find the matching Spring controller method and verify the set.
-        request_param_re = re.compile(
-            r'@RequestParam\(name = "([^"]+)"'
-        )
+        request_param_re = re.compile(r'@RequestParam\(name = "([^"]+)"')
 
         # Build {spec_path: set_of_query_param_names} for GET.
         spec_query_params: dict[str, set[str]] = {}
@@ -842,11 +822,7 @@ class TestParityWithOpenApiSide:
             if not get:
                 continue
             params = get.get("parameters") or []
-            qp_names = {
-                p["name"]
-                for p in params
-                if isinstance(p, dict) and p.get("in") == "query"
-            }
+            qp_names = {p["name"] for p in params if isinstance(p, dict) and p.get("in") == "query"}
             if qp_names:
                 spec_query_params[url] = qp_names
 

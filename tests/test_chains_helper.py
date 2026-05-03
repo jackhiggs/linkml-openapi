@@ -1,4 +1,5 @@
 """Unit tests for the shared chains helper."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,7 +48,8 @@ def _sv(yaml: str, tmp_path: Path) -> SchemaView:
 
 def _build_index(sv: SchemaView):
     resource_classes = {
-        name for name in sv.all_classes()
+        name
+        for name in sv.all_classes()
         if (sv.get_class(name).annotations or {})
         and any(
             ann.tag == "openapi.resource" and str(ann.value) == "true"
@@ -67,19 +69,18 @@ def _build_index(sv: SchemaView):
 def test_chain_index_for_linear_schema(tmp_path):
     sv = _sv(SCHEMA_LINEAR, tmp_path)
     index = _build_index(sv)
-    assert index["Distribution"] == [
-        [("Catalog", "datasets"), ("Dataset", "distributions")]
-    ]
+    assert index["Distribution"] == [[("Catalog", "datasets"), ("Dataset", "distributions")]]
     assert index["Dataset"] == [[("Catalog", "datasets")]]
-    assert "Catalog" not in index   # root, no parent chain
+    assert "Catalog" not in index  # root, no parent chain
 
 
 def test_canonical_chain_with_one_chain(tmp_path):
     sv = _sv(SCHEMA_LINEAR, tmp_path)
     index = _build_index(sv)
-    assert canonical_parent_chain(
-        "Distribution", index, parent_path_annotation=None
-    ) == [("Catalog", "datasets"), ("Dataset", "distributions")]
+    assert canonical_parent_chain("Distribution", index, parent_path_annotation=None) == [
+        ("Catalog", "datasets"),
+        ("Dataset", "distributions"),
+    ]
 
 
 def test_canonical_chain_no_parents_returns_empty(tmp_path):

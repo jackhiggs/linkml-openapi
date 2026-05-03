@@ -89,9 +89,7 @@ class SpringServerGenerator:
 
     _sv: SchemaView = field(init=False)
     _env: Environment = field(init=False)
-    _induced_slots_cache: dict[str, list[SlotDefinition]] = field(
-        init=False, default_factory=dict
-    )
+    _induced_slots_cache: dict[str, list[SlotDefinition]] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         self._sv = SchemaView(self.schema_path)
@@ -140,9 +138,7 @@ class SpringServerGenerator:
         # convention. Falling back to `out/resources/` when the
         # parent doesn't look like a Maven/Gradle source tree keeps
         # this useful in toy/test layouts too.
-        resources_dir = (
-            out.parent / "resources" if out.name == "java" else out / "resources"
-        )
+        resources_dir = out.parent / "resources" if out.name == "java" else out / "resources"
         resources_dir.mkdir(parents=True, exist_ok=True)
         spec_path = resources_dir / "openapi.yaml"
         spec_path.write_text(self._render_openapi_spec())
@@ -251,9 +247,7 @@ public class Problem {
                 parts.append(f'description = "{_escape_java(class_description)}"')
             if class_uri:
                 imports.add("io.swagger.v3.oas.annotations.extensions.Extension")
-                imports.add(
-                    "io.swagger.v3.oas.annotations.extensions.ExtensionProperty"
-                )
+                imports.add("io.swagger.v3.oas.annotations.extensions.ExtensionProperty")
                 # Emit both ``x-rdf-class`` (our custom, what the
                 # spec-driven serdes runtime currently reads) and
                 # ``x-jsonld-type`` (IETF draft-polli-restapi-ld-
@@ -282,9 +276,7 @@ public class Problem {
             imports=sorted(imports),
         )
 
-    def _collect_properties(
-        self, cls: ClassDefinition
-    ) -> tuple[list[dict], set[str]]:
+    def _collect_properties(self, cls: ClassDefinition) -> tuple[list[dict], set[str]]:
         """Build the per-class property list (LOCAL slots only, no
         inherited — those come via Java ``extends``). Plus the synthesised
         discriminator and legacy-type fields when this class is a
@@ -314,9 +306,7 @@ public class Problem {
         if not cls.abstract:
             legacy_field = self._inherited_legacy_field(cls)
             if legacy_field is not None:
-                legacy_value = self._class_annotation(
-                    cls, "openapi.legacy_type_value"
-                )
+                legacy_value = self._class_annotation(cls, "openapi.legacy_type_value")
                 if legacy_value:
                     legacy_codegen_name = self._class_annotation(
                         self._discriminator_root(cls) or cls,
@@ -336,7 +326,7 @@ public class Problem {
                                 f'defaultValue = "{legacy_value}")'
                             ),
                             "javadoc": (
-                                f'Back-compat opaque type marker. Pinned to '
+                                f"Back-compat opaque type marker. Pinned to "
                                 f'"{legacy_value}" for {cls.name}.'
                             ),
                         }
@@ -352,9 +342,7 @@ public class Problem {
 
         return properties, imports
 
-    def _slot_to_property(
-        self, slot: SlotDefinition, imports: set[str]
-    ) -> dict | None:
+    def _slot_to_property(self, slot: SlotDefinition, imports: set[str]) -> dict | None:
         """Render a LinkML slot as a Java DTO property dict.
 
         Honours the same composition vs reference logic as the OpenAPI
@@ -423,9 +411,7 @@ public class Problem {
                 rdf_property = self._sv.expand_curie(slot.slot_uri)
             except Exception:
                 rdf_property = slot.slot_uri
-        slot_description = _description_with_rdf(
-            slot.description, slot.slot_uri, kind="property"
-        )
+        slot_description = _description_with_rdf(slot.description, slot.slot_uri, kind="property")
         schema_annotation = None
         if rdf_property or slot_description:
             imports.add("io.swagger.v3.oas.annotations.media.Schema")
@@ -434,11 +420,9 @@ public class Problem {
                 parts.append(f'description = "{_escape_java(slot_description)}"')
             if rdf_property:
                 imports.add("io.swagger.v3.oas.annotations.extensions.Extension")
-                imports.add(
-                    "io.swagger.v3.oas.annotations.extensions.ExtensionProperty"
-                )
+                imports.add("io.swagger.v3.oas.annotations.extensions.ExtensionProperty")
                 parts.append(
-                    'extensions = @Extension(properties = '
+                    "extensions = @Extension(properties = "
                     '@ExtensionProperty(name = "x-rdf-property", '
                     f'value = "{rdf_property}"))'
                 )
@@ -449,9 +433,7 @@ public class Problem {
             "java_name": java_name,
             "java_type": java_type,
             "getter_name": java_name[:1].upper() + java_name[1:],
-            "json_property": (
-                slot.name if slot.name != java_name else json_prop
-            ),
+            "json_property": (slot.name if slot.name != java_name else json_prop),
             "required": bool(slot.required),
             "default": None,
             "javadoc": (slot.description or "").strip() or None,
@@ -486,18 +468,12 @@ public class Problem {
         # Mutex check: nested_only and flat_only contradict.
         nested_only_raw = self._class_annotation(cls, "openapi.nested_only")
         flat_only_raw = self._class_annotation(cls, "openapi.flat_only")
-        nested_only = (
-            nested_only_raw is not None
-            and nested_only_raw.strip().lower() == "true"
-        )
-        flat_only = (
-            flat_only_raw is not None
-            and flat_only_raw.strip().lower() == "true"
-        )
+        nested_only = nested_only_raw is not None and nested_only_raw.strip().lower() == "true"
+        flat_only = flat_only_raw is not None and flat_only_raw.strip().lower() == "true"
         if nested_only and flat_only:
             raise ValueError(
-                f"Class {cls.name!r} declares both `openapi.nested_only: \"true\"` "
-                f"and `openapi.flat_only: \"true\"`. They are mutually exclusive — "
+                f'Class {cls.name!r} declares both `openapi.nested_only: "true"` '
+                f'and `openapi.flat_only: "true"`. They are mutually exclusive — '
                 "pick one. `nested_only` keeps the deep URL only; `flat_only` keeps "
                 "the flat URL only."
             )
@@ -610,7 +586,6 @@ public class Problem {
             },
         ]
 
-
     def _nested_ops(
         self,
         cls: ClassDefinition,
@@ -639,11 +614,13 @@ public class Problem {
             item = f'"/{path_segment}/{{id}}/{slot_seg}/{target_id_path}"'
 
             if slot.inlined:
-                ops.extend(self._composition_ops(
-                    cls, target, slot, collection, item, imports, media_types))
+                ops.extend(
+                    self._composition_ops(cls, target, slot, collection, item, imports, media_types)
+                )
             else:
-                ops.extend(self._reference_ops(
-                    cls, target, slot, collection, item, imports, media_types))
+                ops.extend(
+                    self._reference_ops(cls, target, slot, collection, item, imports, media_types)
+                )
         return ops
 
     def _composition_ops(
@@ -744,10 +721,7 @@ public class Problem {
         consumes = produces
         return [
             {
-                "javadoc": (
-                    f"GET /{slot.name} — list IRIs of attached {tn}s "
-                    f"on this {pn}."
-                ),
+                "javadoc": (f"GET /{slot.name} — list IRIs of attached {tn}s on this {pn}."),
                 "method_annotations": [f"@GetMapping(value = {collection}, produces = {produces})"],
                 "method_name": f"list{pn}{sn}Refs",
                 "return_type": "List<URI>",
@@ -758,10 +732,7 @@ public class Problem {
                 ],
             },
             {
-                "javadoc": (
-                    f"POST /{slot.name} — attach an existing {tn} "
-                    f"by IRI to this {pn}."
-                ),
+                "javadoc": (f"POST /{slot.name} — attach an existing {tn} by IRI to this {pn}."),
                 "method_annotations": [
                     f"@PostMapping(value = {collection}, consumes = {consumes})"
                 ],
@@ -777,10 +748,7 @@ public class Problem {
                 ],
             },
             {
-                "javadoc": (
-                    f"DELETE /{slot.name}/{{id}} — detach a {tn} from "
-                    f"this {pn}."
-                ),
+                "javadoc": (f"DELETE /{slot.name}/{{id}} — detach a {tn} from this {pn}."),
                 "method_annotations": [f"@DeleteMapping({item})"],
                 "method_name": f"detach{pn}{sn}",
                 "return_type": "Void",
@@ -829,13 +797,9 @@ public class Problem {
         # Leaf id stays {id} to match Spring's existing flat-URL convention
         # in _top_level_ops (which uses /{path_segment}/{{id}}). Ancestor
         # segments DO honor openapi.path_id.
-        parts: list[str] = [
-            f"{hops[0].parent_path_segment}/{{{hops[0].parent_id_param_name}}}"
-        ]
+        parts: list[str] = [f"{hops[0].parent_path_segment}/{{{hops[0].parent_id_param_name}}}"]
         for i in range(len(hops) - 1):
-            parts.append(
-                f"{hops[i].slot_segment}/{{{hops[i + 1].parent_id_param_name}}}"
-            )
+            parts.append(f"{hops[i].slot_segment}/{{{hops[i + 1].parent_id_param_name}}}")
         parts.append(f"{hops[-1].slot_segment}/{{id}}")
         chain_url = "/".join(parts)
         deep_item = f'"/{chain_url}"'
@@ -861,9 +825,7 @@ public class Problem {
         return [
             {
                 "javadoc": f"GET deep — read a {cn} via its parent chain.",
-                "method_annotations": [
-                    f"@GetMapping(value = {deep_item}, produces = {produces})"
-                ],
+                "method_annotations": [f"@GetMapping(value = {deep_item}, produces = {produces})"],
                 "method_name": f"get{cn}{suffix}",
                 "return_type": cn,
                 "params": [*chain_path_params, leaf_path_param],
@@ -956,9 +918,7 @@ public class Problem {
         ops: list[dict] = [
             {
                 "javadoc": f"GET {template} — read a {cn}.",
-                "method_annotations": [
-                    f"@GetMapping(value = {deep_url}, produces = {produces})"
-                ],
+                "method_annotations": [f"@GetMapping(value = {deep_url}, produces = {produces})"],
                 "method_name": f"get{cn}{suffix}",
                 "return_type": cn,
                 "params": item_params,
@@ -1036,9 +996,7 @@ public class Problem {
 
     # --- Query-param surface -------------------------------------------
 
-    def _query_param_dicts(
-        self, cls: ClassDefinition, imports: set[str]
-    ) -> list[dict]:
+    def _query_param_dicts(self, cls: ClassDefinition, imports: set[str]) -> list[dict]:
         """Slot-driven @RequestParam dicts for a list endpoint on `cls`.
 
         Returns dicts shaped like _list_query_params() so the
@@ -1082,19 +1040,13 @@ public class Problem {
         Mirrors the OpenAPI generator's _get_slot_annotation but uses the
         Spring emitter's induced-slot cache."""
         if cls.slot_usage:
-            items = (
-                cls.slot_usage.values()
-                if isinstance(cls.slot_usage, dict)
-                else cls.slot_usage
-            )
+            items = cls.slot_usage.values() if isinstance(cls.slot_usage, dict) else cls.slot_usage
             for su in items:
                 su_obj = su if not isinstance(su, str) else None
                 if su_obj and getattr(su_obj, "name", None) == slot_name:
                     anns = getattr(su_obj, "annotations", None)
                     if anns:
-                        for ann in (
-                            anns.values() if isinstance(anns, dict) else [anns]
-                        ):
+                        for ann in anns.values() if isinstance(anns, dict) else [anns]:
                             if hasattr(ann, "tag") and ann.tag == tag:
                                 return str(ann.value)
         induced = self._slot_for(cls, slot_name)
@@ -1112,19 +1064,14 @@ public class Problem {
                     return str(ann.value)
         return None
 
-    def _render_query_param_spec(
-        self, spec: QueryParamSpec, imports: set[str]
-    ) -> list[dict]:
+    def _render_query_param_spec(self, spec: QueryParamSpec, imports: set[str]) -> list[dict]:
         """Render one QueryParamSpec into one or more @RequestParam dicts."""
         out: list[dict] = []
         java_type = self._java_type_for_range(spec.slot, imports)
         if "equality" in spec.capabilities:
             out.append(
                 {
-                    "annotation": (
-                        f'@RequestParam(name = "{spec.slot.name}", '
-                        "required = false)"
-                    ),
+                    "annotation": (f'@RequestParam(name = "{spec.slot.name}", required = false)'),
                     "java_type": java_type,
                     "java_name": _java_identifier(spec.slot.name),
                 }
@@ -1132,17 +1079,10 @@ public class Problem {
         if "comparable" in spec.capabilities:
             for op in ("gte", "lte", "gt", "lt"):
                 wire_name = f"{spec.slot.name}__{op}"
-                java_name = (
-                    _java_identifier(spec.slot.name)
-                    + op[0].upper()
-                    + op[1:]
-                )
+                java_name = _java_identifier(spec.slot.name) + op[0].upper() + op[1:]
                 out.append(
                     {
-                        "annotation": (
-                            f'@RequestParam(name = "{wire_name}", '
-                            "required = false)"
-                        ),
+                        "annotation": (f'@RequestParam(name = "{wire_name}", required = false)'),
                         "java_type": java_type,
                         "java_name": java_name,
                     }
@@ -1156,9 +1096,7 @@ public class Problem {
             "java_name": "sort",
         }
 
-    def _java_type_for_range(
-        self, slot: SlotDefinition, imports: set[str]
-    ) -> str:
+    def _java_type_for_range(self, slot: SlotDefinition, imports: set[str]) -> str:
         """Java type for a query-param @RequestParam, derived from slot range.
 
         Reuses _RANGE_TYPE_MAP. Class-ranged or enum-ranged slots fall back
@@ -1251,9 +1189,7 @@ public class Problem {
                 return explicit.strip()
         return self._apply_path_style(slot.name)
 
-    def _induced_slots(
-        self, class_name: str
-    ) -> list[SlotDefinition]:
+    def _induced_slots(self, class_name: str) -> list[SlotDefinition]:
         """Cached wrapper around ``SchemaView.class_induced_slots``.
 
         ``class_induced_slots`` is an expensive walk (merges ``is_a``
@@ -1379,17 +1315,13 @@ public class Problem {
             sub = self._sv.get_class(name)
             if sub is None or sub.abstract or sub.mixin:
                 continue
-            subtypes.append(
-                {"class_name": sub.name, "tag": self._type_value(sub)}
-            )
+            subtypes.append({"class_name": sub.name, "tag": self._type_value(sub)})
         if not subtypes:
             return None
         return {"property": field_name.strip(), "subtypes": subtypes}
 
 
 # --- module-level helpers ----------------------------------------------
-
-
 
 
 def _produces_arg(media_types: list[str]) -> str:
@@ -1474,9 +1406,7 @@ def _list_query_params() -> list[dict]:
     ]
 
 
-def _success_and_problem_responses(
-    return_type: str, media_types: list[str]
-) -> list[str]:
+def _success_and_problem_responses(return_type: str, media_types: list[str]) -> list[str]:
     """Success + RFC 7807 error responses for an operation.
 
     Springdoc drops the auto-detected ``200`` whenever any
@@ -1496,7 +1426,7 @@ def _success_and_problem_responses(
         contents = [
             (
                 f'@Content(mediaType = "{mt}",'
-                f' array = @ArraySchema(schema = @Schema(implementation = {inner}.class)))'
+                f" array = @ArraySchema(schema = @Schema(implementation = {inner}.class)))"
             )
             for mt in media_types
         ]
@@ -1522,11 +1452,11 @@ def _problem_responses() -> list[str]:
     return [
         '@ApiResponse(responseCode = "404", description = "Not found",'
         ' content = @Content(mediaType = "application/problem+json",'
-        ' schema = @Schema(implementation = Problem.class)))',
+        " schema = @Schema(implementation = Problem.class)))",
         '@ApiResponse(responseCode = "422", description = "Validation error",'
         ' content = @Content(mediaType = "application/problem+json",'
-        ' schema = @Schema(implementation = Problem.class)))',
+        " schema = @Schema(implementation = Problem.class)))",
         '@ApiResponse(responseCode = "500", description = "Server error",'
         ' content = @Content(mediaType = "application/problem+json",'
-        ' schema = @Schema(implementation = Problem.class)))',
+        " schema = @Schema(implementation = Problem.class)))",
     ]

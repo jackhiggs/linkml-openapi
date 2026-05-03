@@ -5,6 +5,7 @@ walk_query_params(); the helper does all parsing, capability inference,
 auto-detection, and validation. These tests pin the contract independent
 of either renderer.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -86,20 +87,23 @@ def test_auto_inference_picks_scalar_slots(tmp_path):
     assert "name" in names
     assert "age" in names
     assert "email" in names
-    assert "tags" not in names    # multivalued auto-excluded
-    assert "id" not in names      # identifier auto-excluded
+    assert "tags" not in names  # multivalued auto-excluded
+    assert "id" not in names  # identifier auto-excluded
     for spec in surface.params:
         assert spec.capabilities == frozenset({"equality"})
     assert surface.sort_tokens == []
 
 
 def test_explicit_equality_token(tmp_path):
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       name:
         annotations:
           openapi.query_param: equality
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     surface = _walk(sv, "Person")
     name_spec = next(s for s in surface.params if s.slot.name == "name")
@@ -107,12 +111,15 @@ def test_explicit_equality_token(tmp_path):
 
 
 def test_comparable_implies_equality(tmp_path):
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       age:
         annotations:
           openapi.query_param: comparable
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     surface = _walk(sv, "Person")
     age_spec = next(s for s in surface.params if s.slot.name == "age")
@@ -120,12 +127,15 @@ def test_comparable_implies_equality(tmp_path):
 
 
 def test_sortable_implies_equality_and_emits_sort_tokens(tmp_path):
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       name:
         annotations:
           openapi.query_param: sortable
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     surface = _walk(sv, "Person")
     name_spec = next(s for s in surface.params if s.slot.name == "name")
@@ -134,12 +144,15 @@ def test_sortable_implies_equality_and_emits_sort_tokens(tmp_path):
 
 
 def test_query_param_false_excludes_slot_from_auto(tmp_path):
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       email:
         annotations:
           openapi.query_param: "false"
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     surface = _walk(sv, "Person")
     names = [spec.slot.name for spec in surface.params]
@@ -164,12 +177,15 @@ def test_auto_query_params_class_level_overrides_schema(tmp_path):
 
 
 def test_unknown_token_warns_and_ignores(tmp_path):
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       name:
         annotations:
           openapi.query_param: sorteable
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     with pytest.warns(UserWarning, match="sorteable"):
         surface = _walk(sv, "Person")
@@ -179,24 +195,30 @@ def test_unknown_token_warns_and_ignores(tmp_path):
 
 
 def test_sortable_on_multivalued_raises(tmp_path):
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       tags:
         annotations:
           openapi.query_param: sortable
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     with pytest.raises(ValueError, match="multivalued"):
         _walk(sv, "Person")
 
 
 def test_comparable_on_string_warns(tmp_path):
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       name:
         annotations:
           openapi.query_param: comparable
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     with pytest.warns(UserWarning, match="not a numeric or temporal"):
         _walk(sv, "Person")
@@ -205,13 +227,16 @@ def test_comparable_on_string_warns(tmp_path):
 def test_annotated_class_disables_auto_inference_for_unannotated_slots(tmp_path):
     """When ANY slot on the class has openapi.query_param, auto-inference
     is suppressed for the rest. Matches existing OpenAPI generator behavior."""
-    yaml = SCHEMA_BASE + """\
+    yaml = (
+        SCHEMA_BASE
+        + """\
     slot_usage:
       name:
         annotations:
           openapi.query_param: equality
 """
+    )
     sv = _sv_from_text(yaml, tmp_path)
     surface = _walk(sv, "Person")
     names = [spec.slot.name for spec in surface.params]
-    assert names == ["name"]   # age, email NOT auto-inferred
+    assert names == ["name"]  # age, email NOT auto-inferred

@@ -6,6 +6,7 @@ out. Path-style and `path_id` rendering stay in the calling generator
 (injected via callbacks) because they need access to that generator's
 already-implemented path-style state.
 """
+
 from __future__ import annotations
 
 import re
@@ -21,11 +22,12 @@ PATH_TEMPLATE_PLACEHOLDER_RE: re.Pattern[str] = re.compile(r"\{([^{}]+)\}")
 @dataclass(frozen=True)
 class ChainHop:
     """One hop of a deep-nested URL chain."""
+
     parent_class: str
-    parent_id_param_name: str        # honors openapi.path_id
-    parent_path_segment: str         # honors openapi.path / path_style
-    slot_segment: str                # honors openapi.path_segment / path_style
-    parent_id_slot: SlotDefinition   # for typing the path param
+    parent_id_param_name: str  # honors openapi.path_id
+    parent_path_segment: str  # honors openapi.path / path_style
+    slot_segment: str  # honors openapi.path_segment / path_style
+    parent_id_slot: SlotDefinition  # for typing the path param
 
 
 def _parse_csv(raw: str) -> list[str]:
@@ -68,7 +70,7 @@ def build_parent_chains_index(
             if not target or sv.get_class(target) is None:
                 continue
             if target == parent_name:
-                continue   # self-loop
+                continue  # self-loop
             nested_ann = get_slot_annotation(parent_cls, slot.name, "openapi.nested")
             if nested_ann is not None and str(nested_ann).lower() != "true":
                 continue
@@ -132,9 +134,7 @@ def canonical_parent_chain(
         return []
     if len(chains) == 1:
         return chains[0]
-    candidates_qualified = [
-        "/".join(f"{p}.{s}" for p, s in chain) for chain in chains
-    ]
+    candidates_qualified = ["/".join(f"{p}.{s}" for p, s in chain) for chain in chains]
     if parent_path_annotation:
         wanted = parent_path_segments(parent_path_annotation)
         for chain in chains:
@@ -218,11 +218,7 @@ def render_chain_hops(
             )
         parent_cls = sv.get_class(parent_name)
         slot_def = induced_slots_by_name(parent_name).get(slot_name)
-        slot_seg = (
-            render_slot_segment(parent_cls, slot_def)
-            if slot_def is not None
-            else slot_name
-        )
+        slot_seg = render_slot_segment(parent_cls, slot_def) if slot_def is not None else slot_name
         hops.append(
             ChainHop(
                 parent_class=parent_name,
