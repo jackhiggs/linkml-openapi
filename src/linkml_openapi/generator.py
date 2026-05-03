@@ -34,6 +34,12 @@ from openapi_pydantic import (
 
 from linkml_openapi import __version__
 from linkml_openapi._base import Generator
+from linkml_openapi._query_params import (
+    QueryParamSpec,
+    walk_query_params,
+    QUERY_PARAM_TOKENS as _QUERY_PARAM_TOKENS,
+    COMPARABLE_RANGES as _COMPARABLE_RANGES,
+)
 
 # LinkML range → OpenAPI DataType mapping
 RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
@@ -2478,80 +2484,13 @@ class OpenAPIGenerator(Generator):
         )
         paths[item_path] = item
 
-    # Slot ranges over which `comparable` operators (>=, <=, >, <) are
-    # well-defined. String ranges are technically lex-comparable but the
-    # intent is almost always "numeric / temporal range" — warn if asked.
-    _COMPARABLE_RANGES = frozenset({"integer", "float", "double", "decimal", "date", "datetime"})
-
-    _QUERY_PARAM_TOKENS = frozenset({"equality", "comparable", "sortable"})
-
-    def _query_param_capabilities(self, cls: ClassDefinition, slot_name: str) -> set[str] | None:
-        """Parse the slot's `openapi.query_param` annotation into a capability set.
-
-        Accepted tokens (comma-separated):
-
-          ``"true"`` / ``"equality"``  — exact-match query param
-          ``"comparable"``             — equality + ``__gte`` / ``__lte`` / ``__gt`` / ``__lt``
-          ``"sortable"``               — equality + token in ``?sort=`` array
-
-        ``comparable`` and ``sortable`` imply ``equality`` (most APIs that filter
-        by range also filter by exact match). Returns ``None`` when the
-        annotation is absent or explicitly false. Unknown tokens are warned
-        about so typos like ``"sorteable"`` don't silently disable filtering.
-        """
-        raw = self._get_slot_annotation(cls, slot_name, "openapi.query_param")
-        if raw is None:
-            return None
-        tokens = set(_parse_csv(raw, lowercase=True))
-        if not tokens or tokens == {"false"}:
-            return None
-        unknown = tokens - {"true", "false"} - self._QUERY_PARAM_TOKENS
-        if unknown:
-            import warnings
-
-            warnings.warn(
-                f"Slot {cls.name}.{slot_name!r} declares unknown "
-                f"openapi.query_param token(s) {sorted(unknown)!r}; "
-                f"expected one or more of {sorted(self._QUERY_PARAM_TOKENS)!r}. "
-                "Token(s) ignored — fix the typo or remove them.",
-                stacklevel=3,
-            )
-        if "true" in tokens:
-            tokens.add("equality")
-            tokens.discard("true")
-        if "comparable" in tokens or "sortable" in tokens:
-            tokens.add("equality")
-        valid = tokens & self._QUERY_PARAM_TOKENS
-        return valid or None
-
-    def _auto_query_params_enabled(self, cls: ClassDefinition) -> bool:
-        """Whether auto-inferred query parameters are emitted for this class.
-
-        Class-level ``openapi.auto_query_params`` wins over the schema-level
-        annotation; default is ``True`` so existing schemas keep their
-        current behaviour. Set to ``"false"`` at either level to suppress
-        the auto-inferred filter parameters on a class with many slots.
-        """
-        class_value = self._class_annotation(cls, "openapi.auto_query_params")
-        if class_value is not None:
-            return _is_truthy(class_value)
-        schema_value = self._schema_annotation("openapi.auto_query_params")
-        if schema_value is not None:
-            return _is_truthy(schema_value)
-        return True
-
     def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
         """Generate query parameters for the list endpoint.
 
-        Annotated slots win when any are present on the class; otherwise
-        the auto-inference path picks scalar non-identifier slots — unless
-        ``openapi.auto_query_params: "false"`` is set at the class or
-        schema level, in which case only ``limit`` / ``offset`` emit.
-        Slots annotated ``openapi.query_param: "false"`` are excluded from
-        auto-inference even when it is enabled. Both paths walk induced
-        slots once.
+        Delegates capability parsing, auto-inference, and validation to
+        `_query_params.walk_query_params`. This method only renders
+        Parameter objects — wire shape stays unchanged.
         """
-        sv = self.schemaview
         params: list[Parameter] = [
             Parameter(
                 name="limit",
@@ -2564,101 +2503,52 @@ class OpenAPIGenerator(Generator):
                 param_schema=Schema(type=DataType.INTEGER, default=0),
             ),
         ]
-
-        auto_enabled = self._auto_query_params_enabled(cls)
-
-        annotated_params: list[Parameter] = []
-        inferred_params: list[Parameter] = []
-        sort_tokens: list[str] = []
-
-        for slot in self._induced_slots_iter(cls.name):
-            if self._is_slot_excluded(slot):
-                continue
-            caps = self._query_param_capabilities(cls, slot.name)
-            if caps is not None:
-                self._add_annotated_query_params(cls, slot, caps, annotated_params, sort_tokens)
-                continue
-            if not auto_enabled:
-                continue
-            # Slot-level explicit opt-out: `openapi.query_param: "false"`
-            # makes ``_query_param_capabilities`` return ``None``, but the
-            # raw annotation tells us the user explicitly removed this slot
-            # from auto-inference (vs. being silent about it).
-            raw = self._get_slot_annotation(cls, slot.name, "openapi.query_param")
-            if raw is not None and set(_parse_csv(raw, lowercase=True)) == {"false"}:
-                continue
-            if (
-                not slot.multivalued
-                and not slot.identifier
-                and (
-                    (slot.range or "string") in ("string", "integer", "boolean")
-                    or sv.get_enum(slot.range or "string")
-                )
-            ):
-                inferred_params.append(
-                    Parameter(
-                        name=slot.name,
-                        param_in=ParameterLocation.QUERY,
-                        required=False,
-                        param_schema=self._slot_to_schema(slot),
-                    )
-                )
-
-        if annotated_params or sort_tokens:
-            params.extend(annotated_params)
-            if sort_tokens:
-                params.append(self._make_sort_param(sort_tokens))
-            return params
-
-        params.extend(inferred_params)
+        surface = walk_query_params(
+            self.schemaview,
+            cls,
+            schema_auto_default=_is_truthy(
+                self._schema_annotation("openapi.auto_query_params") or "true"
+            ),
+            is_slot_excluded=self._is_slot_excluded,
+            induced_slots=lambda name: list(self._induced_slots_iter(name)),
+            get_slot_annotation=self._get_slot_annotation,
+            get_class_annotation=self._class_annotation,
+        )
+        for spec in surface.params:
+            params.extend(self._render_query_param_for_spec(spec))
+        if surface.sort_tokens:
+            params.append(self._make_sort_param(surface.sort_tokens))
         return params
 
-    def _add_annotated_query_params(
-        self,
-        cls: ClassDefinition,
-        slot: SlotDefinition,
-        caps: set[str],
-        out: list[Parameter],
-        sort_tokens: list[str],
-    ) -> None:
-        """Emit equality / comparison / sort entries for one annotated slot."""
-        range_name = slot.range or "string"
-        if "equality" in caps:
+    def _render_query_param_for_spec(self, spec: QueryParamSpec) -> list[Parameter]:
+        """Render one QueryParamSpec into one or more Parameter objects.
+
+        `equality` → single param. `comparable` → four `__gte`/`__lte`/
+        `__gt`/`__lt` params. `sortable` doesn't produce a per-slot
+        Parameter (it contributes to the shared `?sort=` array param built
+        by _make_sort_param).
+        """
+        out: list[Parameter] = []
+        if "equality" in spec.capabilities:
             out.append(
                 Parameter(
-                    name=slot.name,
+                    name=spec.slot.name,
                     param_in=ParameterLocation.QUERY,
                     required=False,
-                    param_schema=self._slot_to_schema(slot),
+                    param_schema=self._slot_to_schema(spec.slot),
                 )
             )
-        if "comparable" in caps:
-            if range_name not in self._COMPARABLE_RANGES:
-                import warnings
-
-                warnings.warn(
-                    f"Slot {cls.name}.{slot.name!r} marked `comparable` but "
-                    f"range {range_name!r} is not a numeric or temporal type; "
-                    "comparison operators may behave unexpectedly.",
-                    stacklevel=3,
-                )
+        if "comparable" in spec.capabilities:
             for op in ("gte", "lte", "gt", "lt"):
                 out.append(
                     Parameter(
-                        name=f"{slot.name}__{op}",
+                        name=f"{spec.slot.name}__{op}",
                         param_in=ParameterLocation.QUERY,
                         required=False,
-                        param_schema=self._slot_to_schema(slot),
+                        param_schema=self._slot_to_schema(spec.slot),
                     )
                 )
-        if "sortable" in caps:
-            if slot.multivalued:
-                raise ValueError(
-                    f"Slot {cls.name}.{slot.name!r} is multivalued; sort "
-                    "order over a set is not well-defined. Remove `sortable` "
-                    "or change the slot to single-valued."
-                )
-            sort_tokens.extend([slot.name, f"-{slot.name}"])
+        return out
 
     @staticmethod
     def _make_sort_param(sort_tokens: list[str]) -> Parameter:
