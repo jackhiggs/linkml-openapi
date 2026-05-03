@@ -1154,11 +1154,29 @@ public class Problem {
         """Render a name in the active path style.
 
         snake_case → unchanged. kebab-case → underscores become hyphens.
-        Names with neither convention pass through (no character to swap).
+        When the schema-level ``openapi.path_split_camel: "true"`` is
+        set alongside ``kebab-case``, also splits camelCase boundaries
+        (acronym-aware) and lowercases the result, so ``inSeries`` →
+        ``in-series`` and ``XMLParser`` → ``xml-parser``.
         """
-        if self._resolve_path_style() == "kebab-case":
-            return name.replace("_", "-")
-        return name
+        if self._resolve_path_style() != "kebab-case":
+            return name
+        if self._schema_split_camel():
+            name = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1-\2", name)
+            name = re.sub(r"([a-z0-9])([A-Z])", r"\1-\2", name)
+            return name.replace("_", "-").lower()
+        return name.replace("_", "-")
+
+    def _schema_split_camel(self) -> bool:
+        """Whether ``openapi.path_split_camel: "true"`` is set at the
+        schema level. Composes with ``openapi.path_style: kebab-case``.
+        """
+        sv_schema = self._sv.schema
+        if sv_schema and sv_schema.annotations:
+            for ann in sv_schema.annotations.values():
+                if ann.tag == "openapi.path_split_camel":
+                    return str(ann.value).strip().lower() == "true"
+        return False
 
     def _path_segment(self, cls: ClassDefinition) -> str:
         """URL path segment for a class.

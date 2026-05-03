@@ -1581,6 +1581,95 @@ classes:
         # the path emits exactly as written.
         assert "/v2/catalogs/{cId}/resources/by-doi/{doi}/{version}" in spec["paths"]
 
+    def test_path_split_camel_off_by_default_under_kebab(self, tmp_path):
+        """Without `openapi.path_split_camel`, kebab-case only swaps
+        underscores. CamelCase slot names pass through unchanged."""
+        import yaml
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text("""\
+id: https://example.org/sc
+name: sc
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+classes:
+  Hub:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      contactPoint: { range: Agent, multivalued: true }
+  Agent:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        spec = yaml.safe_load(OpenAPIGenerator(str(fixture)).serialize())
+        assert "/hubs/{id}/contactPoint" in spec["paths"]
+
+    def test_path_split_camel_splits_camelcase_under_kebab(self, tmp_path):
+        """`openapi.path_split_camel: "true"` + `kebab-case` splits
+        camelCase boundaries: `contactPoint` → `contact-point`."""
+        import yaml
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text("""\
+id: https://example.org/sc2
+name: sc2
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+  openapi.path_split_camel: "true"
+classes:
+  Hub:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      contactPoint: { range: Agent, multivalued: true }
+      servesDataset: { range: Agent, multivalued: true }
+  Agent:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        spec = yaml.safe_load(OpenAPIGenerator(str(fixture)).serialize())
+        assert "/hubs/{id}/contact-point" in spec["paths"]
+        assert "/hubs/{id}/serves-dataset" in spec["paths"]
+        # camelCase form is no longer present
+        assert "/hubs/{id}/contactPoint" not in spec["paths"]
+
+    def test_path_split_camel_acronym_aware(self, tmp_path):
+        """Acronym-aware: `XMLParser` → `xml-parser`, not `x-m-l-parser`."""
+        import yaml
+
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text("""\
+id: https://example.org/sc3
+name: sc3
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.path_style: kebab-case
+  openapi.path_split_camel: "true"
+classes:
+  Hub:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      XMLParser: { range: Agent, multivalued: true }
+  Agent:
+    attributes:
+      id: { identifier: true, range: string, required: true }
+""")
+        spec = yaml.safe_load(OpenAPIGenerator(str(fixture)).serialize())
+        assert "/hubs/{id}/xml-parser" in spec["paths"]
+
     def test_operation_ids_and_property_keys_unchanged(self):
         """Kebab style only touches URL segments — body identifiers stay snake."""
         spec = _generate(path_style="kebab-case")
