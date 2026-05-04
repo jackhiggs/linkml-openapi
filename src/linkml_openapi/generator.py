@@ -207,6 +207,14 @@ class OpenAPIGenerator(Generator):
     # identifiers in the OpenAPI body, operation IDs, tags, and RDF
     # extensions are unaffected — only the URL segment changes.
     path_style: str | None = None
+    # URL path prefix prepended to every emitted ``paths:`` key. None
+    # falls back to the schema-level ``openapi.path_prefix`` annotation,
+    # then no prefix. Single transformation point — applied at the end
+    # of ``_build_openapi`` so every emitter (composition, chain,
+    # templated, synthetic-inverse) picks it up uniformly. ``servers[0].url``
+    # is intentionally left alone; if a deployment wants the prefix in
+    # the server URL too, pass ``--server-url`` explicitly.
+    path_prefix: str | None = None
     # Names of registered post-processors to apply (in order) after the
     # canonical spec is built but before serialisation. See
     # ``linkml_openapi.post_processors`` for the registry. Each
@@ -251,6 +259,10 @@ class OpenAPIGenerator(Generator):
         # validate once here so per-call-site renderers can just check the
         # cached value without re-parsing.
         self._effective_path_style = self._resolve_path_style()
+        # Resolve the active path prefix (CLI / Python kwarg → schema
+        # annotation → none). Stored as the canonical normalised form
+        # (leading "/", no trailing "/") or empty string for "no prefix".
+        self._effective_path_prefix = self._resolve_path_prefix()
         # Resolve the active profile (or no-op when self.profile is None).
         # `_resolve_profile_filter` also runs drift detection — failing
         # loudly if an excluded slot is referenced by another annotation.
@@ -514,6 +526,15 @@ class OpenAPIGenerator(Generator):
 
         if self._needs_resource_link and "ResourceLink" not in schemas:
             schemas["ResourceLink"] = self._build_resource_link_schema()
+
+        # Apply the path prefix to every emitted `paths:` key. Single
+        # transformation point so composition / chain / templated /
+        # synthetic-inverse paths all pick it up uniformly. Validates
+        # that no class-level ``openapi.path`` already includes the
+        # prefix (would produce a doubled prefix like
+        # ``/api/v1/api/v1/catalogs``).
+        if self._effective_path_prefix:
+            paths = self._apply_path_prefix(paths)
 
         # openapi-pydantic restricts the `openapi` field to 3.1.x literals;
         # we build the model with 3.1.0 and then rewrite the version string
@@ -927,6 +948,69 @@ class OpenAPIGenerator(Generator):
             return annotated
         fallback = identifier_slot or id_named_slot
         return [(fallback, "iri")] if fallback else []
+
+    def _resolve_path_prefix(self) -> str:
+        """Pick the effective URL path prefix for this build.
+
+        Resolution order: CLI / Python ``path_prefix`` kwarg, then the
+        schema-level ``openapi.path_prefix`` annotation, then no prefix.
+
+        Normalisation: must start with ``/``; trailing ``/`` is stripped;
+        no ``{…}`` placeholders (literal only — parameterised prefixes
+        are a runtime / tenancy concern, not a spec one). Returns ``""``
+        when no prefix is configured (caller treats that as no-op).
+        """
+        candidate = self.path_prefix
+        if candidate is None:
+            candidate = self._schema_annotation("openapi.path_prefix")
+        if not candidate:
+            return ""
+        normalised = str(candidate).strip()
+        if not normalised:
+            return ""
+        if not normalised.startswith("/"):
+            raise ValueError(
+                f"`openapi.path_prefix` {candidate!r} must start with `/` "
+                "(use the absolute form, e.g. `/api/v1`)."
+            )
+        if "{" in normalised or "}" in normalised:
+            raise ValueError(
+                f"`openapi.path_prefix` {candidate!r} contains a `{{…}}` "
+                "placeholder. Path prefixes must be literal — parameterised "
+                "prefixes belong to runtime routing / API gateways."
+            )
+        # Strip a single trailing `/` (the prepend step adds back the
+        # separator before each path key).
+        if normalised != "/" and normalised.endswith("/"):
+            normalised = normalised[:-1]
+        return normalised
+
+    def _apply_path_prefix(self, paths: dict[str, PathItem]) -> dict[str, PathItem]:
+        """Prepend ``self._effective_path_prefix`` to every key in ``paths``.
+
+        Validates: no key already starts with the prefix (would double
+        up like ``/api/v1/api/v1/catalogs``). The most likely cause is
+        a class-level ``openapi.path`` annotation that already includes
+        the prefix — the error names the offending path so the schema
+        author can pick one source.
+        """
+        prefix = self._effective_path_prefix
+        prefixed: dict[str, PathItem] = {}
+        for original_path, path_item in paths.items():
+            # The doubled-prefix check fires when the class-level
+            # ``openapi.path`` (or a user-authored ``openapi.path_template``)
+            # already begins with the prefix. Either is fine on its own;
+            # combining them silently is not.
+            if original_path == prefix or original_path.startswith(prefix + "/"):
+                raise ValueError(
+                    f"Path {original_path!r} already starts with the "
+                    f"configured path prefix {prefix!r}. Pick one source: "
+                    "either drop the prefix from the class-level "
+                    "`openapi.path` / `openapi.path_template` annotation, "
+                    "or drop `--path-prefix` / `openapi.path_prefix`."
+                )
+            prefixed[f"{prefix}{original_path}"] = path_item
+        return prefixed
 
     def _resolve_path_style(self) -> str:
         """Pick the effective URL path-segment convention for this build.

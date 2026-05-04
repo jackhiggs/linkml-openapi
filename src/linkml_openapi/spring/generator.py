@@ -86,6 +86,14 @@ class SpringServerGenerator:
 
     schema_path: str
     package: str = "io.example"
+    # URL path prefix prepended to every emitted controller path. None
+    # falls back to the schema-level ``openapi.path_prefix`` annotation,
+    # then no prefix. Emitted as a class-level ``@RequestMapping`` on
+    # every controller interface (Spring idiom — method-level mappings
+    # stay relative). The sidecar OpenAPI spec uses the same prefix on
+    # its ``paths:`` keys so springdoc's runtime view matches the
+    # static spec.
+    path_prefix: str | None = None
 
     _sv: SchemaView = field(init=False)
     _env: Environment = field(init=False)
@@ -108,6 +116,42 @@ class SpringServerGenerator:
             get_slot_annotation=self._get_slot_annotation_compat,
             induced_slots=self._induced_slots,
         )
+        self._effective_path_prefix = self._resolve_path_prefix()
+
+    def _resolve_path_prefix(self) -> str:
+        """Pick the effective URL path prefix for this build.
+
+        Resolution order: ``path_prefix`` kwarg → schema-level
+        ``openapi.path_prefix`` annotation → no prefix. Normalisation
+        matches the OpenAPI generator: must start with ``/``, trailing
+        ``/`` stripped, no ``{…}`` placeholders.
+        """
+        candidate = self.path_prefix
+        if candidate is None:
+            schema_anns = getattr(self._sv.schema, "annotations", None) or {}
+            for ann in schema_anns.values() if hasattr(schema_anns, "values") else schema_anns:
+                if getattr(ann, "tag", None) == "openapi.path_prefix":
+                    candidate = str(ann.value)
+                    break
+        if not candidate:
+            return ""
+        normalised = str(candidate).strip()
+        if not normalised:
+            return ""
+        if not normalised.startswith("/"):
+            raise ValueError(
+                f"`openapi.path_prefix` {candidate!r} must start with `/` "
+                "(use the absolute form, e.g. `/api/v1`)."
+            )
+        if "{" in normalised or "}" in normalised:
+            raise ValueError(
+                f"`openapi.path_prefix` {candidate!r} contains a `{{…}}` "
+                "placeholder. Path prefixes must be literal — parameterised "
+                "prefixes belong to runtime routing / API gateways."
+            )
+        if normalised != "/" and normalised.endswith("/"):
+            normalised = normalised[:-1]
+        return normalised
 
     # --- Public API ---------------------------------------------------
 
@@ -153,7 +197,13 @@ class SpringServerGenerator:
         emitter produces."""
         from linkml_openapi.generator import OpenAPIGenerator
 
-        return OpenAPIGenerator(self.schema_path).serialize()
+        # Pass the prefix through so the sidecar's `paths:` keys match
+        # springdoc's runtime view (which is built from the live
+        # class-level `@RequestMapping` + relative method mappings).
+        return OpenAPIGenerator(
+            self.schema_path,
+            path_prefix=self._effective_path_prefix or None,
+        ).serialize()
 
     def build(self) -> dict[str, str]:
         """In-memory rendering. Returns {relative_path: java_source}."""
@@ -502,12 +552,15 @@ public class Problem {
             op.setdefault("method_annotations", []).extend(
                 _success_and_problem_responses(op["return_type"], media_types)
             )
+        if self._effective_path_prefix:
+            imports.add("org.springframework.web.bind.annotation.RequestMapping")
         return self._env.get_template("api.java.jinja").render(
             package=self.package,
             resource_class=cls.name,
             class_uri=self._expand_curie(cls.class_uri) if cls.class_uri else "",
             imports=sorted(imports),
             operations=ops,
+            request_mapping_base=self._effective_path_prefix,
         )
 
     def _top_level_ops(

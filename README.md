@@ -62,6 +62,8 @@ json_str = gen.serialize(format="json")
 | `openapi_version` | `str` | `"3.0.3"` | OpenAPI dialect to emit (`"3.0.3"` or `"3.1.0"`) |
 | `flatten_inheritance` | `bool` | `False` | Inline parent properties instead of using `allOf` |
 | `error_schema` | `bool` | `True` | Synthesize an RFC 7807 `Problem` schema and reference it from non-2xx responses |
+| `path_style` | `str` | `None` (→ `snake_case`) | URL path-segment convention (`"snake_case"` or `"kebab-case"`) — overrides `openapi.path_style` |
+| `path_prefix` | `str` | `None` | URL path prefix prepended to every `paths:` key (e.g. `/api/v1`) — overrides `openapi.path_prefix` |
 
 > **Why default to 3.0.3?** Several popular codegens — notably
 > `openapi-generator`'s Spring server library — still mishandle `allOf`-based
@@ -193,6 +195,37 @@ Does **not** apply to:
 
 The Python API and CLI both expose a `path_style` / `--path-style`
 override that wins over the schema annotation.
+
+#### `openapi.path_prefix`
+
+URL path prefix prepended to every endpoint in the generated spec
+(e.g. `/api/v1`). Default: no prefix.
+
+```yaml
+annotations:
+  openapi.path_prefix: /api/v1
+```
+
+* **OpenAPI generator** prepends the prefix to every key under
+  `paths:` (so `/catalogs` becomes `/api/v1/catalogs`). Build-time
+  validation: a class whose `openapi.path` /
+  `openapi.path_template` already starts with the prefix raises an
+  error so the schema author picks one source of truth instead of
+  silently doubling.
+* **Spring server emitter** renders a class-level
+  `@RequestMapping("<prefix>")` on every controller interface (Spring
+  idiom — method-level mappings stay relative). The sidecar
+  `resources/openapi.yaml` adopts the same prefix on its `paths:`
+  keys so springdoc's runtime view matches the static spec.
+
+The prefix must start with `/`, must not contain `{…}` placeholders
+(parameterised prefixes belong to runtime routing / API gateways),
+and trailing `/` is normalised. `servers[0].url` is left
+untouched — pass `--server-url` separately if you want the prefix in
+the server URL too.
+
+The Python API and both CLIs expose a `path_prefix` /
+`--path-prefix` override that wins over the schema annotation.
 
 ### Class-level annotations
 
@@ -994,6 +1027,7 @@ endpoints regardless of any of these annotations.
 | `openapi.media_types` | class | comma-separated list | `application/json` |
 | `openapi.tag` | class | string | Class name (composition-derived ops inherit from the target) |
 | `openapi.path_style` | schema | `snake_case` / `kebab-case` | `snake_case` |
+| `openapi.path_prefix` | schema | `/PREFIX` (e.g. `/api/v1`) | No prefix |
 | `openapi.auto_query_params` | schema or class | `"true"` / `"false"` | `"true"` (auto-infer scalar slots) |
 | `openapi.path_id` | class | identifier name | `<class_snake>_id` (e.g. `catalog_id`) |
 | `openapi.parent_path` | class | `Class.slot/Class.slot/...` | Auto-derive when chain is unambiguous |

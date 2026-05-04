@@ -2091,6 +2091,98 @@ classes:
     # `test_oneof_lists_concrete_descendants_at_property`, and similar.
 
 
+class TestPathPrefix:
+    """Coverage for issue #61 — `openapi.path_prefix` on the OpenAPI spec."""
+
+    _PREFIX_SCHEMA = """
+id: https://example.org/prefix
+name: prefix
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      datasets: { range: Dataset, multivalued: true }
+  Dataset:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+
+    def test_prefix_from_schema_annotation_applies_to_every_path(self):
+        spec = _generate_from_string(
+            self._PREFIX_SCHEMA.replace(
+                "default_range: string",
+                "default_range: string\nannotations:\n  openapi.path_prefix: /api/v1",
+            )
+        )
+        assert all(p.startswith("/api/v1/") for p in spec["paths"]), sorted(spec["paths"])
+
+    def test_kwarg_overrides_schema_annotation(self):
+        spec = _generate_from_string(
+            self._PREFIX_SCHEMA.replace(
+                "default_range: string",
+                "default_range: string\nannotations:\n  openapi.path_prefix: /from-schema",
+            ),
+            path_prefix="/from-kwarg",
+        )
+        assert all(p.startswith("/from-kwarg/") for p in spec["paths"])
+        assert not any("from-schema" in p for p in spec["paths"])
+
+    def test_no_prefix_keeps_paths_unchanged(self):
+        """Default behaviour (no annotation, no kwarg) leaves paths at the root."""
+        spec = _generate_from_string(self._PREFIX_SCHEMA)
+        # Catalog's flat collection is at /catalogs, not /<anything>/catalogs.
+        assert "/catalogs" in spec["paths"]
+        assert not any(p.startswith("/api/") for p in spec["paths"])
+
+    def test_trailing_slash_normalised(self):
+        spec = _generate_from_string(self._PREFIX_SCHEMA, path_prefix="/api/v1/")
+        # Trailing `/` stripped → `/api/v1/catalogs`, not `/api/v1//catalogs`.
+        assert "/api/v1/catalogs" in spec["paths"]
+        assert not any("//" in p for p in spec["paths"])
+
+    def test_missing_leading_slash_raises(self):
+        _generate_from_string_raises(
+            self._PREFIX_SCHEMA, match="must start with `/`", path_prefix="api/v1"
+        )
+
+    def test_placeholder_in_prefix_raises(self):
+        _generate_from_string_raises(
+            self._PREFIX_SCHEMA,
+            match="contains a `\\{…\\}` placeholder",
+            path_prefix="/{tenant}/api/v1",
+        )
+
+    def test_double_prefix_in_class_path_raises(self):
+        """A class with `openapi.path: /api/v1/foo` and `--path-prefix /api/v1` must error."""
+        schema = """
+id: https://example.org/double
+name: double
+default_range: string
+classes:
+  Already:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: /api/v1/already
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        _generate_from_string_raises(
+            schema,
+            match="already starts with the configured path prefix",
+            path_prefix="/api/v1",
+        )
+
+    def test_servers_url_not_modified(self):
+        """`servers[0].url` is left alone — separate concern from path prefix."""
+        spec = _generate_from_string(
+            self._PREFIX_SCHEMA, path_prefix="/api/v1", server_url="https://api.example.com"
+        )
+        assert spec["servers"] == [{"url": "https://api.example.com"}]
+
+
 class TestProfiles:
     """Coverage for issue #17 — multi-view profile filtering."""
 

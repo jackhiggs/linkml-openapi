@@ -968,3 +968,160 @@ class TestParityWithOpenApiSide:
                     f"{url}: spec={sorted(spec_names)}, spring={sorted(spring_names)}"
                 )
         assert not mismatches, "Query-param drift detected:\n" + "\n".join(mismatches)
+
+
+class TestPathPrefix:
+    """Coverage for issue #61 — `openapi.path_prefix` on the Spring emitter.
+
+    Idiomatic Spring places the shared base path on a class-level
+    ``@RequestMapping`` so method-level mappings stay relative — the
+    sidecar OpenAPI spec adopts the same prefix on its ``paths:`` keys
+    so springdoc's runtime view matches the static spec.
+    """
+
+    @pytest.fixture(scope="class")
+    def prefixed_files(self) -> dict:
+        return SpringServerGenerator(
+            FIXTURE, package="io.example.dcat", path_prefix="/api/v1"
+        ).build()
+
+    def test_class_level_request_mapping_on_every_controller(self, prefixed_files):
+        api_files = {p: s for p, s in prefixed_files.items() if p.endswith("Api.java")}
+        assert api_files, "expected at least one *Api.java to be emitted"
+        for path, source in api_files.items():
+            assert '@RequestMapping("/api/v1")' in source, (
+                f"{path} missing class-level @RequestMapping for /api/v1"
+            )
+
+    def test_request_mapping_import_is_added(self, prefixed_files):
+        for path, source in prefixed_files.items():
+            if not path.endswith("Api.java"):
+                continue
+            assert "import org.springframework.web.bind.annotation.RequestMapping;" in source, (
+                f"{path} missing RequestMapping import"
+            )
+
+    def test_method_level_mappings_stay_relative(self, prefixed_files):
+        """Spring composes class + method mappings — method-level paths must
+        not also include the prefix or the runtime URL doubles up."""
+        for path, source in prefixed_files.items():
+            if not path.endswith("Api.java"):
+                continue
+            # No method-level mapping value should start with the prefix.
+            for line in source.splitlines():
+                stripped = line.strip()
+                if stripped.startswith(
+                    (
+                        "@GetMapping",
+                        "@PostMapping",
+                        "@PutMapping",
+                        "@PatchMapping",
+                        "@DeleteMapping",
+                    )
+                ):
+                    assert "/api/v1" not in stripped, (
+                        f"{path}: method-level mapping should be prefix-relative: {stripped}"
+                    )
+
+    def test_no_request_mapping_when_prefix_unset(self, files):
+        """Default fixture build has no prefix → no class-level @RequestMapping
+        and no RequestMapping import on the controller interfaces."""
+        for path, source in files.items():
+            if not path.endswith("Api.java"):
+                continue
+            assert "@RequestMapping(" not in source, (
+                f"{path} should not carry @RequestMapping when prefix is unset"
+            )
+            assert "import org.springframework.web.bind.annotation.RequestMapping;" not in source, (
+                f"{path} should not import RequestMapping when prefix is unset"
+            )
+
+    def test_sidecar_openapi_spec_adopts_prefix(self, tmp_path):
+        """The sidecar `resources/openapi.yaml` must carry the same prefix on
+        its `paths:` keys so springdoc's runtime view matches the static spec."""
+        import yaml as _yaml
+
+        gen = SpringServerGenerator(FIXTURE, package="io.example.dcat", path_prefix="/api/v1")
+        java_dir = tmp_path / "java"
+        gen.emit(java_dir)
+        spec = _yaml.safe_load((tmp_path / "resources" / "openapi.yaml").read_text())
+        assert spec["paths"], "sidecar spec has no paths"
+        assert all(p.startswith("/api/v1/") for p in spec["paths"]), sorted(spec["paths"])
+
+    def test_schema_annotation_resolves_when_no_kwarg(self, tmp_path):
+        """A schema with `openapi.path_prefix` annotation drives the prefix
+        even when the kwarg is not passed — same resolution order as the
+        OpenAPI generator."""
+        schema = """
+id: https://example.org/anns
+name: anns
+default_range: string
+annotations:
+  openapi.path_prefix: /annotated
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        schema_path = tmp_path / "schema.yaml"
+        schema_path.write_text(schema)
+        files = SpringServerGenerator(str(schema_path), package="io.example.x").build()
+        api_src = files["io/example/x/api/CatalogApi.java"]
+        assert '@RequestMapping("/annotated")' in api_src
+
+    def test_kwarg_overrides_schema_annotation(self, tmp_path):
+        schema = """
+id: https://example.org/anns
+name: anns
+default_range: string
+annotations:
+  openapi.path_prefix: /from-schema
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        schema_path = tmp_path / "schema.yaml"
+        schema_path.write_text(schema)
+        files = SpringServerGenerator(
+            str(schema_path), package="io.example.x", path_prefix="/from-kwarg"
+        ).build()
+        api_src = files["io/example/x/api/CatalogApi.java"]
+        assert '@RequestMapping("/from-kwarg")' in api_src
+        assert "from-schema" not in api_src
+
+    def test_missing_leading_slash_raises(self, tmp_path):
+        schema = """
+id: https://example.org/x
+name: x
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        schema_path = tmp_path / "schema.yaml"
+        schema_path.write_text(schema)
+        with pytest.raises(ValueError, match="must start with `/`"):
+            SpringServerGenerator(str(schema_path), package="io.example.x", path_prefix="api/v1")
+
+    def test_placeholder_in_prefix_raises(self, tmp_path):
+        schema = """
+id: https://example.org/x
+name: x
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        schema_path = tmp_path / "schema.yaml"
+        schema_path.write_text(schema)
+        with pytest.raises(ValueError, match=r"contains a `\{…\}` placeholder"):
+            SpringServerGenerator(
+                str(schema_path), package="io.example.x", path_prefix="/{tenant}/api"
+            )

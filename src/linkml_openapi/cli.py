@@ -82,6 +82,20 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
     ),
 )
 @click.option(
+    "--path-prefix",
+    default=None,
+    metavar="/PREFIX",
+    help=(
+        "URL path prefix prepended to every emitted `paths:` key "
+        "(e.g. `/api/v1`). Defaults to the schema-level "
+        "`openapi.path_prefix` annotation; CLI flag wins. Validation "
+        "errors if a class's `openapi.path` already starts with the "
+        "prefix (would double up). `servers[0].url` is left alone — "
+        "pass `--server-url` separately if you want the prefix in the "
+        "server URL too."
+    ),
+)
+@click.option(
     "--emit-name-mappings",
     type=click.Path(dir_okay=False, writable=True, path_type=Path),
     default=None,
