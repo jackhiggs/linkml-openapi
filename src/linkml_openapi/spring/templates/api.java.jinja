@@ -16,6 +16,9 @@ import {{ imp }};
  * <p>Covers the {@code {{ class_uri }}} resource and its relationships.
 {%- endif %}
  */
+{%- if request_mapping_base %}
+@RequestMapping("{{ request_mapping_base }}")
+{%- endif %}
 public interface {{ resource_class }}Api {
 
 {%- for op in operations %}

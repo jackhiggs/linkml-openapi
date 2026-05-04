@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [Unreleased]
+
+### Added
+
+- **URL path prefix on both emitters** — `--path-prefix /PREFIX`
+  (CLI) / `path_prefix=` (Python) / schema-level
+  `openapi.path_prefix` annotation. Resolution order: kwarg → schema
+  annotation → no prefix. The prefix must start with `/`, must not
+  contain `{…}` placeholders, and trailing `/` is normalised.
+  ([#61](https://github.com/jackhiggs/linkml-openapi/issues/61))
+  - **OpenAPI generator** prepends the prefix to every key under
+    `paths:`. Validates that no class-level `openapi.path` /
+    `openapi.path_template` already starts with the prefix
+    (catches doubled-prefix configs at build time). `servers[0].url`
+    is left untouched — pass `--server-url` separately if you want
+    the prefix in the server URL too.
+  - **Spring server emitter** renders a class-level
+    `@RequestMapping("<prefix>")` on every controller interface
+    (Spring idiom — method-level mappings stay relative). The
+    sidecar `resources/openapi.yaml` adopts the same prefix on its
+    `paths:` keys so springdoc's runtime view matches the static
+    spec.
+
 ## [0.9.0] — 2026-05-04
 
 The ship-it release for the **LinkML → Spring server emitter** —

@@ -25,10 +25,23 @@ from linkml_openapi.spring.generator import SpringServerGenerator
         "Java root package. Models go in <package>.model, controller interfaces in <package>.api."
     ),
 )
+@click.option(
+    "--path-prefix",
+    default=None,
+    metavar="/PREFIX",
+    help=(
+        "URL path prefix prepended to every controller. Defaults to the "
+        "schema-level `openapi.path_prefix` annotation; CLI flag wins. "
+        'Emitted as a class-level `@RequestMapping(value = "<prefix>")` '
+        "on every controller interface — method-level mappings stay "
+        "relative. The sidecar `resources/openapi.yaml` adopts the same "
+        "prefix on its `paths:` keys to match springdoc's runtime view."
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
-def cli(yamlfile, output: Path, package: str) -> None:
+def cli(yamlfile, output: Path, package: str, path_prefix: str | None) -> None:
     """Generate Spring server source files directly from a LinkML schema."""
-    gen = SpringServerGenerator(yamlfile, package=package)
+    gen = SpringServerGenerator(yamlfile, package=package, path_prefix=path_prefix)
     written = gen.emit(output)
     for path in written:
         click.echo(str(path))
