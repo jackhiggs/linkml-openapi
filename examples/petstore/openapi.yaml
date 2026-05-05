@@ -178,7 +178,7 @@ paths:
   /owners/{owner_id}/pets/{id}:
     get:
       tags:
-      - Pet
+      - Owner
       summary: Get a Pet
       operationId: get_pet_via_owner
       responses:
@@ -200,7 +200,7 @@ paths:
       deprecated: false
     put:
       tags:
-      - Pet
+      - Owner
       summary: Update a Pet
       operationId: update_pet_via_owner
       requestBody:
@@ -237,7 +237,7 @@ paths:
       deprecated: false
     delete:
       tags:
-      - Pet
+      - Owner
       summary: Delete a Pet
       operationId: delete_pet_via_owner
       responses:
@@ -507,7 +507,7 @@ paths:
   /owners/{id}/pets:
     get:
       tags:
-      - Pet
+      - Owner
       summary: List Pet attached to Owner.pets
       operationId: list_owner_pets
       responses:
@@ -531,7 +531,7 @@ paths:
       deprecated: false
     post:
       tags:
-      - Pet
+      - Owner
       summary: Attach Pet to Owner.pets
       operationId: attach_owner_pets
       requestBody:
@@ -576,7 +576,7 @@ paths:
   /owners/{id}/pets/{pet_id}:
     delete:
       tags:
-      - Pet
+      - Owner
       summary: Detach Pet from Owner.pets
       operationId: detach_owner_pets
       responses:

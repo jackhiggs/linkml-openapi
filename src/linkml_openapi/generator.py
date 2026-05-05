@@ -2479,7 +2479,23 @@ class OpenAPIGenerator(Generator):
         chain_suffix = "_via_" + "_".join(_to_snake_case(p) for p, _ in chain)
         deep_paths = {deep_item_path: deep_item}
         self._suffix_operation_ids(deep_paths, chain_suffix)
+        # Re-tag deep-chain operations to the *immediate URL parent* (the
+        # last chain hop's class) so Swagger UI groups them with the rest
+        # of the parent's nested ops rather than under the leaf's tag
+        # (#68). The leaf's flat-path operations keep the leaf's tag.
+        if chain:
+            parent_tag = self._class_tag(chain[-1][0])
+            self._retag_path_operations(deep_paths, parent_tag)
         return deep_paths
+
+    @staticmethod
+    def _retag_path_operations(paths: dict[str, PathItem], tag: str) -> None:
+        """Overwrite every operation's ``tags`` to ``[tag]``."""
+        for path_item in paths.values():
+            for method in ("get", "put", "post", "patch", "delete"):
+                op = getattr(path_item, method, None)
+                if op is not None:
+                    op.tags = [tag]
 
     _PATH_TEMPLATE_PLACEHOLDER_RE = PATH_TEMPLATE_PLACEHOLDER_RE
 
@@ -2616,7 +2632,11 @@ class OpenAPIGenerator(Generator):
         media_types = self._get_media_types(target_cls)
         target_ref = self._class_response_ref(target_class_name)
         array_schema = Schema(type=DataType.ARRAY, items=target_ref)
-        op_tag = self._class_tag(target_class_name)
+        # Nested composition operations group under the *parent* class's
+        # tag (Swagger UI groups by tag). All operations under
+        # /<parent>/{id}/... live with the rest of the parent's surface
+        # rather than scattering across the child's tag (#68).
+        op_tag = self._class_tag(parent_class_name)
         slot_seg = slot.name
 
         collection = PathItem(parameters=list(parent_path_params))
@@ -2792,7 +2812,9 @@ class OpenAPIGenerator(Generator):
         link_ref = Reference(ref="#/components/schemas/ResourceLink")
         # Body accepts a single link or a batch — clients prefer batch.
         link_body_schema = Schema(oneOf=[link_ref, Schema(type=DataType.ARRAY, items=link_ref)])
-        op_tag = self._class_tag(target_class_name)
+        # Reference attach/detach operations group under the *parent*
+        # class's tag for the same reason as composition (#68).
+        op_tag = self._class_tag(parent_class_name)
         slot_seg = slot.name
 
         collection = PathItem(parameters=list(parent_path_params))
