@@ -821,6 +821,30 @@ get_distribution_via_catalog_dataset
 
 Slot annotations are placed via `slot_usage` on the class (not on the top-level slot definition). This is because the same slot may serve different roles in different classes.
 
+#### `openapi.body`
+
+Set to `"false"` to suppress a class-ranged slot from the parent's
+component-schema `properties` while keeping the nested endpoint:
+
+```yaml
+classes:
+  Catalog:
+    slot_usage:
+      datasets:
+        annotations:
+          openapi.body: "false"   # /catalogs/{id}/datasets stays; Catalog.datasets disappears
+```
+
+Use it for "composition for routing only" — the related collection is
+discoverable via the URL but clients fetch it on demand instead of
+receiving it embedded in the parent payload.
+
+* Validates: error if the slot's range is a scalar (no nested endpoint
+  to preserve), or if combined with `openapi.nested: "false"` (slot
+  would have no representation at all).
+* Both emitters honour it. Spring drops the field from the DTO; the
+  controller's nested endpoint is still emitted.
+
 #### `openapi.format`
 
 Override the OpenAPI `format` string for a slot's emitted schema. Useful

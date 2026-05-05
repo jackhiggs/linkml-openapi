@@ -2265,6 +2265,80 @@ classes:
         assert spec["servers"] == [{"url": "https://api.example.com"}]
 
 
+class TestBodyFalse:
+    """Coverage for issue #65 — `openapi.body: "false"` slot annotation."""
+
+    _SCHEMA = """
+id: https://example.org/b
+name: b
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      datasets:
+        range: Dataset
+        multivalued: true
+        inlined_as_list: true
+        annotations:
+          openapi.body: "false"
+  Dataset:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+
+    def test_slot_dropped_from_parent_body(self):
+        spec = _generate_from_string(self._SCHEMA)
+        catalog = spec["components"]["schemas"]["Catalog"]
+        assert "datasets" not in catalog.get("properties", {})
+
+    def test_nested_endpoint_still_emitted(self):
+        spec = _generate_from_string(self._SCHEMA)
+        assert "/catalogs/{id}/datasets" in spec["paths"]
+
+    def test_scalar_ranged_slot_raises(self):
+        schema = """
+id: https://example.org/scalar-bad
+name: scalar_bad
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      title:
+        annotations:
+          openapi.body: "false"
+"""
+        _generate_from_string_raises(schema, match="not a class")
+
+    def test_combined_with_nested_false_raises(self):
+        schema = """
+id: https://example.org/combo-bad
+name: combo_bad
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      datasets:
+        range: Dataset
+        multivalued: true
+        inlined_as_list: true
+        annotations:
+          openapi.body: "false"
+          openapi.nested: "false"
+  Dataset:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        _generate_from_string_raises(schema, match="have no representation")
+
+
 class TestProfiles:
     """Coverage for issue #17 — multi-view profile filtering."""
 

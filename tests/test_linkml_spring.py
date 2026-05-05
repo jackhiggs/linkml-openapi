@@ -1229,3 +1229,48 @@ classes:
         """Module fixture has no error_class_name annotation → Problem stays."""
         assert "io/example/dcat/model/Problem.java" in files
         assert "public class Problem" in files["io/example/dcat/model/Problem.java"]
+
+
+class TestBodyFalse:
+    """Coverage for issue #65 — `openapi.body: "false"` slot annotation
+    on the Spring side. The slot generates a nested controller endpoint
+    but is dropped from the Java DTO so the parent payload doesn't carry
+    the child collection."""
+
+    _SCHEMA = """
+id: https://example.org/sb
+name: sb
+default_range: string
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+      datasets:
+        range: Dataset
+        multivalued: true
+        inlined_as_list: true
+        annotations:
+          openapi.body: "false"
+  Dataset:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+
+    def test_field_dropped_from_dto(self, tmp_path):
+        schema_path = tmp_path / "sb.yaml"
+        schema_path.write_text(self._SCHEMA)
+        files = SpringServerGenerator(str(schema_path), package="io.example.sb").build()
+        catalog_dto = files["io/example/sb/model/Catalog.java"]
+        # Catalog.datasets is excluded → no `private List<Dataset> datasets` field.
+        assert "private java.util.List<Dataset> datasets" not in catalog_dto
+        assert "private List<Dataset> datasets" not in catalog_dto
+
+    def test_nested_endpoint_still_emitted(self, tmp_path):
+        schema_path = tmp_path / "sb.yaml"
+        schema_path.write_text(self._SCHEMA)
+        files = SpringServerGenerator(str(schema_path), package="io.example.sb").build()
+        api = files["io/example/sb/api/CatalogApi.java"]
+        # Composition routing under /catalogs/{id}/datasets remains.
+        assert '"/catalogs/{id}/datasets"' in api
