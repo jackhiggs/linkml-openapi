@@ -2428,6 +2428,75 @@ classes:
         _generate_from_string_raises(schema, match="not defined in the schema")
 
 
+class TestCodegenFriendly:
+    """Coverage for issue #64 — `--codegen-friendly` flag."""
+
+    _SCHEMA = """
+id: https://example.org/cgf
+name: cgf
+default_range: string
+classes:
+  Resource:
+    abstract: true
+    annotations:
+      openapi.discriminator: resourceType
+    attributes:
+      id: { identifier: true, required: true }
+  Dataset:
+    is_a: Resource
+    annotations: { openapi.resource: "true" }
+  Catalog:
+    is_a: Dataset
+"""
+
+    def test_default_mode_emits_inline_oneof(self):
+        """Without --codegen-friendly, today's authoring-clarity output:
+        inline oneOf at use sites, enum + default on subclass pins."""
+        spec = _generate_from_string(self._SCHEMA)
+        post = spec["paths"]["/datasets"]["post"]
+        body = post["requestBody"]["content"]["application/json"]["schema"]
+        assert "oneOf" in body
+        ds = spec["components"]["schemas"]["Dataset"]
+        local = ds["allOf"][1] if "allOf" in ds else ds
+        disc = local["properties"]["resourceType"]
+        assert disc.get("enum") == ["Dataset"]
+        assert disc.get("default") == "Dataset"
+
+    def test_codegen_friendly_uses_default_only_on_subclass_pin(self):
+        spec = _generate_from_string(self._SCHEMA, codegen_friendly=True)
+        ds = spec["components"]["schemas"]["Dataset"]
+        local = ds["allOf"][1] if "allOf" in ds else ds
+        disc = local["properties"]["resourceType"]
+        assert "enum" not in disc, f"expected no enum, got {disc}"
+        assert disc["default"] == "Dataset"
+        assert disc["type"] == "string"
+
+    def test_codegen_friendly_use_site_is_ref_to_parent(self):
+        spec = _generate_from_string(self._SCHEMA, codegen_friendly=True)
+        post = spec["paths"]["/datasets"]["post"]
+        body = post["requestBody"]["content"]["application/json"]["schema"]
+        assert "oneOf" not in body
+        assert body == {"$ref": "#/components/schemas/Dataset"}
+        resp = post["responses"]["201"]["content"]["application/json"]["schema"]
+        assert resp == {"$ref": "#/components/schemas/Dataset"}
+
+    def test_codegen_friendly_parent_has_discriminator_block(self):
+        spec = _generate_from_string(self._SCHEMA, codegen_friendly=True)
+        resource = spec["components"]["schemas"]["Resource"]
+        disc = resource.get("discriminator")
+        assert disc is not None
+        assert disc["propertyName"] == "resourceType"
+        assert "Dataset" in disc["mapping"]
+        assert "Catalog" in disc["mapping"]
+
+    def test_codegen_friendly_array_items_also_use_ref(self):
+        spec = _generate_from_string(self._SCHEMA, codegen_friendly=True)
+        items = spec["paths"]["/datasets"]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]["items"]
+        assert items == {"$ref": "#/components/schemas/Dataset"}
+
+
 class TestProfiles:
     """Coverage for issue #17 — multi-view profile filtering."""
 

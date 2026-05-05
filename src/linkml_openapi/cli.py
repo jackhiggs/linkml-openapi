@@ -109,6 +109,20 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
     ),
 )
 @click.option(
+    "--codegen-friendly",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit a spec optimised for downstream codegens (openapi-generator, "
+        "NSwag, etc.). Drops the single-value `enum` on every discriminator "
+        "subclass schema (keeps `default` only) so codegens don't generate "
+        "single-value enum classes; replaces inline `oneOf` at use sites "
+        "with `$ref` to the polymorphic parent (the parent's component "
+        "schema gains its own `discriminator` block + `mapping` so dispatch "
+        "still works)."
+    ),
+)
+@click.option(
     "--post-process",
     "post_process",
     default=None,

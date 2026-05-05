@@ -216,6 +216,17 @@ class OpenAPIGenerator(Generator):
     # is intentionally left alone; if a deployment wants the prefix in
     # the server URL too, pass ``--server-url`` explicitly.
     path_prefix: str | None = None
+    # Codegen-friendly emission for downstream tools (#64). When True:
+    # * Discriminator pin on each subclass uses ``default`` only (drops
+    #   ``enum: [<self>]`` so codegens that materialise enums as Java
+    #   enums don't generate a single-value enum field).
+    # * Use-site polymorphic dispatch becomes ``$ref`` to the parent
+    #   class schema instead of inline ``oneOf: [...]``. The parent
+    #   component schema gains its own ``discriminator`` block (with
+    #   ``mapping``) so codegens still wire polymorphic dispatch.
+    # Default ``False`` keeps today's authoring-clarity output
+    # byte-identical.
+    codegen_friendly: bool = False
     # Names of registered post-processors to apply (in order) after the
     # canonical spec is built but before serialisation. See
     # ``linkml_openapi.post_processors`` for the registry. Each
@@ -1511,6 +1522,12 @@ class OpenAPIGenerator(Generator):
         descendants = self._concrete_descendants_including_self(class_name)
         if len(descendants) <= 1:
             return Reference(ref=f"#/components/schemas/{class_name}")
+        # Codegen-friendly mode: ``$ref`` to the parent class schema.
+        # The parent carries its own ``discriminator`` block (attached
+        # in ``_apply_discriminators``) so codegens dispatch correctly
+        # without inline ``oneOf`` at the use site (#64).
+        if self.codegen_friendly:
+            return Reference(ref=f"#/components/schemas/{class_name}")
         oneof = [Reference(ref=f"#/components/schemas/{n}") for n in descendants]
         schema = Schema(oneOf=oneof)
         field = self._inherited_discriminator_field(class_name)
@@ -1754,6 +1771,18 @@ class OpenAPIGenerator(Generator):
             for tv, sub_name in seen.items():
                 self._inject_subclass_type_value(schemas, sub_name, field, tv)
 
+            # Codegen-friendly mode: attach the ``discriminator`` block
+            # (with ``mapping``) to the parent's component schema so a
+            # use-site ``$ref`` to the parent carries dispatch info for
+            # codegens. Default mode keeps the dispatch info inline at
+            # the use sites only (today's authoring-clarity output).
+            if self.codegen_friendly:
+                parent_schema = schemas.get(class_name)
+                if isinstance(parent_schema, Schema):
+                    parent_schema.discriminator = Discriminator(
+                        propertyName=field, mapping=dict(mapping)
+                    )
+
             # Optional back-compat field: `openapi.legacy_type_field` on
             # the polymorphic root names a per-class constant property
             # (e.g. `#type` carrying a Java FQN like
@@ -1827,11 +1856,21 @@ class OpenAPIGenerator(Generator):
             return
         local = self._writable_local_schema(schema)
         properties = dict(local.properties or {})
-        disc = Schema(
-            type=DataType.STRING,
-            enum=[type_value],
-            default=type_value,
-        )
+        # Codegen-friendly mode emits ``default`` only; openapi-generator
+        # then renders the discriminator as a plain ``String`` field with
+        # a constant default rather than a single-value enum (which it
+        # otherwise materialises as a Java enum class) (#64).
+        if self.codegen_friendly:
+            disc = Schema(
+                type=DataType.STRING,
+                default=type_value,
+            )
+        else:
+            disc = Schema(
+                type=DataType.STRING,
+                enum=[type_value],
+                default=type_value,
+            )
         properties[field] = disc
         local.properties = properties
         # The discriminator's RDF identity belongs to the *class*, not
@@ -2145,6 +2184,11 @@ class OpenAPIGenerator(Generator):
         if target_cls is not None and self._is_composition(slot):
             descendants = self._concrete_descendants_including_self(range_name)
             if len(descendants) > 1:
+                # Codegen-friendly: collapse to a ``$ref`` to the
+                # range — the parent's component schema carries the
+                # ``discriminator`` block (#64).
+                if self.codegen_friendly:
+                    return Reference(ref=f"#/components/schemas/{range_name}")
                 oneof = [Reference(ref=f"#/components/schemas/{n}") for n in descendants]
                 schema = Schema(oneOf=oneof)
                 field = self._inherited_discriminator_field(range_name)
