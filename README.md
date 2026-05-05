@@ -64,6 +64,7 @@ json_str = gen.serialize(format="json")
 | `error_schema` | `bool` | `True` | Synthesize an RFC 7807 `Problem` schema and reference it from non-2xx responses |
 | `path_style` | `str` | `None` (→ `snake_case`) | URL path-segment convention (`"snake_case"` or `"kebab-case"`) — overrides `openapi.path_style` |
 | `path_prefix` | `str` | `None` | URL path prefix prepended to every `paths:` key (e.g. `/api/v1`) — overrides `openapi.path_prefix` |
+| `codegen_friendly` | `bool` | `False` | Emit a spec optimised for downstream codegens (drops single-value `enum` on discriminator pins; replaces inline `oneOf` use sites with `$ref` to the polymorphic parent + parent-level `discriminator` block). |
 
 > **Why default to 3.0.3?** Several popular codegens — notably
 > `openapi-generator`'s Spring server library — still mishandle `allOf`-based

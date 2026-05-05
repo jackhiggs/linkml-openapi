@@ -43,6 +43,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   classes must be declared in the schema; otherwise generation
   fails.
   ([#66](https://github.com/jackhiggs/linkml-openapi/issues/66))
+- **`--codegen-friendly`** flag (and `codegen_friendly=` kwarg) on
+  `gen-openapi` — emits a spec optimised for downstream codegens
+  (openapi-generator, NSwag, etc.):
+  * Drops the single-value `enum` on every discriminator subclass
+    schema (keeps `default` only) so codegens don't materialise
+    single-value enum classes.
+  * Replaces inline `oneOf` at every use site (request body, response,
+    array `items`, slot range) with `$ref` to the polymorphic
+    parent — the parent's component schema gains its own
+    `discriminator` block + `mapping` so codegens still wire dispatch.
+  * The discriminator field name comes from each chain's
+    `openapi.discriminator` annotation (configurable per chain) — not
+    hardcoded.
+  * Default behaviour is unchanged (byte-identical when the flag is
+    absent).
+  ([#64](https://github.com/jackhiggs/linkml-openapi/issues/64))
 
 ### Changed
 
