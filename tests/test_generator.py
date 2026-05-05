@@ -1091,6 +1091,86 @@ classes:
         finally:
             Path(tmp).unlink(missing_ok=True)
 
+    def test_error_class_name_renames_synthesised_problem(self):
+        """`openapi.error_class_name: ProblemDetail` renames the synthesised
+        RFC 7807 schema (and every `$ref` to it) without authoring a class."""
+        import tempfile
+
+        schema_yaml = """
+id: https://example.org/rename-error
+name: rename_error
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.error_class_name: ProblemDetail
+classes:
+  Widget:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            gen = OpenAPIGenerator(tmp)
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+            assert "Problem" not in spec["components"]["schemas"]
+            problem = spec["components"]["schemas"]["ProblemDetail"]
+            # RFC 7807 fields still present under the renamed schema.
+            for key in ("type", "title", "status", "detail", "instance"):
+                assert key in problem["properties"]
+            assert problem["title"] == "ProblemDetail"
+            # Non-2xx responses point at the renamed schema.
+            not_found = spec["paths"]["/widgets/{id}"]["get"]["responses"]["404"]
+            assert not_found["content"]["application/json"]["schema"] == {
+                "$ref": "#/components/schemas/ProblemDetail"
+            }
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
+    def test_error_class_wins_over_error_class_name_with_warning(self):
+        """When both annotations are set, the user-defined class wins and a
+        UserWarning fires so the conflict is visible."""
+        import tempfile
+        import warnings
+
+        schema_yaml = """
+id: https://example.org/both
+name: both_set
+prefixes: { linkml: https://w3id.org/linkml/ }
+default_range: string
+annotations:
+  openapi.error_class: ApiError
+  openapi.error_class_name: ProblemDetail
+classes:
+  ApiError:
+    attributes:
+      code: { range: string, required: true }
+  Widget:
+    annotations:
+      openapi.resource: "true"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+"""
+        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
+            f.write(schema_yaml)
+            tmp = f.name
+        try:
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                gen = OpenAPIGenerator(tmp)
+                spec = yaml.safe_load(gen.serialize(format="yaml"))
+            assert any("openapi.error_class_name" in str(w.message) for w in caught), (
+                f"expected UserWarning naming the conflict, got {[str(w.message) for w in caught]}"
+            )
+            # ApiError wins; ProblemDetail is not synthesised.
+            assert "ApiError" in spec["components"]["schemas"]
+            assert "ProblemDetail" not in spec["components"]["schemas"]
+        finally:
+            Path(tmp).unlink(missing_ok=True)
+
     def test_undefined_error_class_raises(self):
         """openapi.error_class pointing at a missing class fails at generation time."""
         import tempfile

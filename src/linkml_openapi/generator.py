@@ -9,6 +9,7 @@ Converts LinkML schema definitions into OpenAPI 3.1 specifications with:
 import json
 import os
 import re
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -414,10 +415,16 @@ class OpenAPIGenerator(Generator):
             schemas[enum_name] = self._enum_to_schema(enum_def)
 
         # Synthesise the RFC 7807 Problem schema when no custom error class
-        # was declared. Skipped silently if a class literally named "Problem"
-        # already exists in the schema.
-        if self._error_class_name == "Problem" and "Problem" not in schemas:
-            schemas["Problem"] = self._build_problem_schema()
+        # was declared. The component name is whatever
+        # `openapi.error_class_name` resolved to (default "Problem"). We
+        # only synthesise when no LinkML-defined class supplied the schema —
+        # that case is detected by checking whether the resolved name is a
+        # class in the schema (a user-defined class already produced its
+        # own component) versus an auto-name we own.
+        if self._error_class_name and self._error_class_name not in schemas:
+            user_defined = self.schemaview.get_class(self._error_class_name) is not None
+            if not user_defined:
+                schemas[self._error_class_name] = self._build_problem_schema(self._error_class_name)
 
         # Apply discriminator blocks driven by `designates_type` or by
         # `openapi.discriminator` annotations. Done after class schemas are
@@ -1190,13 +1197,25 @@ class OpenAPIGenerator(Generator):
         With ``error_schema`` off, returns None and no error body is emitted.
         With it on, honours a ``openapi.error_class`` schema annotation if
         present (and validates that the named class exists), otherwise
-        falls back to ``"Problem"`` — synthesised in `_build_openapi`.
+        falls back to a synthesised RFC 7807 schema. The synthesised
+        schema's name comes from ``openapi.error_class_name`` (e.g.
+        ``"ProblemDetail"``) or defaults to ``"Problem"``.
         """
         if not self.error_schema:
             return None
         custom = self._schema_annotation("openapi.error_class")
+        rename = self._schema_annotation("openapi.error_class_name")
         if custom is None:
-            return "Problem"
+            # Synthesised path: name comes from the rename annotation, else "Problem".
+            return rename or "Problem"
+        if rename is not None:
+            warnings.warn(
+                f"Both `openapi.error_class` ({custom!r}) and "
+                f"`openapi.error_class_name` ({rename!r}) are set; the "
+                "user-defined class wins and the rename is ignored. "
+                "Drop one to silence this warning.",
+                stacklevel=2,
+            )
         if self.schemaview.get_class(custom) is None:
             raise ValueError(
                 f"openapi.error_class refers to undefined class {custom!r}; "
@@ -1318,10 +1337,14 @@ class OpenAPIGenerator(Generator):
         return False
 
     @staticmethod
-    def _build_problem_schema() -> Schema:
-        """Construct the RFC 7807 Problem Details component schema."""
+    def _build_problem_schema(name: str = "Problem") -> Schema:
+        """Construct the RFC 7807 Problem Details component schema.
+
+        ``name`` becomes the schema's ``title``; callers pass the resolved
+        ``openapi.error_class_name`` (e.g. ``"ProblemDetail"``).
+        """
         schema = Schema(type=DataType.OBJECT, additionalProperties=True)
-        schema.title = "Problem"
+        schema.title = name
         schema.description = (
             "RFC 7807 Problem Details for HTTP APIs. Default error response "
             "shape for non-2xx replies; additional members are permitted "

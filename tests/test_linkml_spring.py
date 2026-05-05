@@ -1125,3 +1125,45 @@ classes:
             SpringServerGenerator(
                 str(schema_path), package="io.example.x", path_prefix="/{tenant}/api"
             )
+
+
+class TestErrorClassName:
+    """Coverage for issue #67 — `openapi.error_class_name` renames the
+    auto-emitted RFC 7807 DTO without redefining the class."""
+
+    _SCHEMA = """
+id: https://example.org/rename
+name: rename
+default_range: string
+annotations:
+  openapi.error_class_name: ProblemDetail
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+
+    def test_renamed_dto_emitted_under_new_filename(self, tmp_path):
+        schema_path = tmp_path / "schema.yaml"
+        schema_path.write_text(self._SCHEMA)
+        files = SpringServerGenerator(str(schema_path), package="io.example.x").build()
+        assert "io/example/x/model/ProblemDetail.java" in files
+        assert "io/example/x/model/Problem.java" not in files
+        assert "public class ProblemDetail" in files["io/example/x/model/ProblemDetail.java"]
+
+    def test_controller_imports_and_references_renamed_dto(self, tmp_path):
+        schema_path = tmp_path / "schema.yaml"
+        schema_path.write_text(self._SCHEMA)
+        files = SpringServerGenerator(str(schema_path), package="io.example.x").build()
+        api = files["io/example/x/api/CatalogApi.java"]
+        assert "import io.example.x.model.ProblemDetail;" in api
+        assert "import io.example.x.model.Problem;" not in api
+        assert "implementation = ProblemDetail.class" in api
+        # No references to the old name in @ApiResponse content.
+        assert "implementation = Problem.class" not in api
+
+    def test_default_unset_keeps_problem_name(self, files):
+        """Module fixture has no error_class_name annotation → Problem stays."""
+        assert "io/example/dcat/model/Problem.java" in files
+        assert "public class Problem" in files["io/example/dcat/model/Problem.java"]

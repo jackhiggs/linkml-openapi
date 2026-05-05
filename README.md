@@ -165,6 +165,24 @@ a clear error.
 To opt out entirely (today's body-less responses), pass
 `--no-error-schema` on the CLI or `error_schema=False` to the Python API.
 
+#### `openapi.error_class_name`
+
+Renames the auto-emitted RFC 7807 schema (and every `$ref` to it) without
+authoring a class. Useful when a downstream codegen / SDK convention
+requires `ProblemDetail` (or any other name).
+
+```yaml
+annotations:
+  openapi.error_class_name: ProblemDetail
+```
+
+* Renames the synthesised `Problem` component, all non-2xx `$ref`s, and
+  on the Spring side the auto-emitted Java DTO file (`ProblemDetail.java`
+  instead of `Problem.java`).
+* Ignored when `--no-error-schema` is passed (no schema to rename).
+* Ignored when `openapi.error_class` is also set (the user-defined class
+  wins; a `UserWarning` fires so the conflict isn't silent).
+
 #### `openapi.path_style`
 
 URL path-segment convention for the whole spec. Default `snake_case`

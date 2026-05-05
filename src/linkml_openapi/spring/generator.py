@@ -117,6 +117,25 @@ class SpringServerGenerator:
             induced_slots=self._induced_slots,
         )
         self._effective_path_prefix = self._resolve_path_prefix()
+        self._error_class_name = self._resolve_error_class_name()
+
+    def _resolve_error_class_name(self) -> str:
+        """Pick the Java class name for the auto-emitted RFC 7807 DTO.
+
+        Resolution order: schema-level ``openapi.error_class_name``
+        annotation → ``"Problem"``. ``openapi.error_class`` (which points
+        at a user-defined LinkML class) is not honoured here — when set,
+        the user's class supplies the DTO and ``Problem.java`` should not
+        be auto-emitted. The Spring emitter doesn't currently read user-
+        defined error classes, so this stays as the synthesised path.
+        """
+        schema_anns = getattr(self._sv.schema, "annotations", None) or {}
+        for ann in schema_anns.values() if hasattr(schema_anns, "values") else schema_anns:
+            if getattr(ann, "tag", None) == "openapi.error_class_name":
+                value = str(ann.value).strip()
+                if value:
+                    return value
+        return "Problem"
 
     def _resolve_path_prefix(self) -> str:
         """Pick the effective URL path prefix for this build.
@@ -217,7 +236,7 @@ class SpringServerGenerator:
             files[f"{package_path}/model/{class_name}.java"] = self._render_dto(cls)
             if self._is_resource(cls):
                 files[f"{package_path}/api/{class_name}Api.java"] = self._render_api(cls)
-        files[f"{package_path}/model/Problem.java"] = self._render_problem_dto()
+        files[f"{package_path}/model/{self._error_class_name}.java"] = self._render_problem_dto()
         return files
 
     def _render_problem_dto(self) -> str:
@@ -232,7 +251,7 @@ import io.swagger.v3.oas.annotations.media.Schema;
  * RFC 7807 problem details, served as the body of non-2xx responses
  * with content type application/problem+json.
  */
-public class Problem {
+public class %(class_name)s {
 
     @Schema(description = "URI reference identifying the problem type.")
     private String type;
@@ -261,7 +280,7 @@ public class Problem {
     public void setInstance(String instance) { this.instance = instance; }
 }
 """
-        return template % {"package": self.package}
+        return template % {"package": self.package, "class_name": self._error_class_name}
 
     # --- DTO emission -------------------------------------------------
 
@@ -514,7 +533,7 @@ public class Problem {
             "io.swagger.v3.oas.annotations.media.Content",
             "io.swagger.v3.oas.annotations.media.Schema",
             f"{self.package}.model.{cls.name}",
-            f"{self.package}.model.Problem",
+            f"{self.package}.model.{self._error_class_name}",
         }
         # Mutex check: nested_only and flat_only contradict.
         nested_only_raw = self._class_annotation(cls, "openapi.nested_only")
@@ -550,7 +569,9 @@ public class Problem {
         # auto-detected 200 when any ``@ApiResponse`` is present.
         for op in ops:
             op.setdefault("method_annotations", []).extend(
-                _success_and_problem_responses(op["return_type"], media_types)
+                _success_and_problem_responses(
+                    op["return_type"], media_types, self._error_class_name
+                )
             )
         if self._effective_path_prefix:
             imports.add("org.springframework.web.bind.annotation.RequestMapping")
@@ -1487,7 +1508,9 @@ def _list_query_params() -> list[dict]:
     ]
 
 
-def _success_and_problem_responses(return_type: str, media_types: list[str]) -> list[str]:
+def _success_and_problem_responses(
+    return_type: str, media_types: list[str], error_class: str = "Problem"
+) -> list[str]:
     """Success + RFC 7807 error responses for an operation.
 
     Springdoc drops the auto-detected ``200`` whenever any
@@ -1500,7 +1523,7 @@ def _success_and_problem_responses(return_type: str, media_types: list[str]) -> 
     if return_type == "Void":
         return [
             '@ApiResponse(responseCode = "204", description = "No content")',
-            *_problem_responses(),
+            *_problem_responses(error_class),
         ]
     if return_type.startswith("List<"):
         inner = return_type[len("List<") : -1]
@@ -1523,21 +1546,23 @@ def _success_and_problem_responses(return_type: str, media_types: list[str]) -> 
         '@ApiResponse(responseCode = "200", description = "OK",'
         f" content = {{{', '.join(contents)}}})"
     )
-    return [success, *_problem_responses()]
+    return [success, *_problem_responses(error_class)]
 
 
-def _problem_responses() -> list[str]:
-    """RFC 7807 error contract — same Problem shape under
+def _problem_responses(error_class: str = "Problem") -> list[str]:
+    """RFC 7807 error contract — same Problem-shaped DTO under
     ``application/problem+json`` for 404/422/500 across every
-    operation."""
+    operation. ``error_class`` is the Java type used for the error
+    body (defaults to ``Problem``; configurable via
+    ``openapi.error_class_name``)."""
     return [
         '@ApiResponse(responseCode = "404", description = "Not found",'
         ' content = @Content(mediaType = "application/problem+json",'
-        " schema = @Schema(implementation = Problem.class)))",
+        f" schema = @Schema(implementation = {error_class}.class)))",
         '@ApiResponse(responseCode = "422", description = "Validation error",'
         ' content = @Content(mediaType = "application/problem+json",'
-        " schema = @Schema(implementation = Problem.class)))",
+        f" schema = @Schema(implementation = {error_class}.class)))",
         '@ApiResponse(responseCode = "500", description = "Server error",'
         ' content = @Content(mediaType = "application/problem+json",'
-        " schema = @Schema(implementation = Problem.class)))",
+        f" schema = @Schema(implementation = {error_class}.class)))",
     ]
