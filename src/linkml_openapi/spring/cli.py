@@ -26,6 +26,19 @@ from linkml_openapi.spring.generator import SpringServerGenerator
     ),
 )
 @click.option(
+    "--path-style",
+    type=click.Choice(["snake_case", "kebab-case"]),
+    default=None,
+    help=(
+        "URL path-segment convention. Defaults to the schema-level "
+        "`openapi.path_style` annotation, or `snake_case` if neither is "
+        "set (byte-identical to today). `kebab-case` flips auto-derived "
+        "class- and slot-driven URL segments to hyphenated form. "
+        "Threads through to controller `@*Mapping` URLs and the sidecar "
+        "OpenAPI spec so springdoc's runtime view matches."
+    ),
+)
+@click.option(
     "--path-prefix",
     default=None,
     metavar="/PREFIX",
@@ -39,9 +52,17 @@ from linkml_openapi.spring.generator import SpringServerGenerator
     ),
 )
 @click.version_option(__version__, "-V", "--version")
-def cli(yamlfile, output: Path, package: str, path_prefix: str | None) -> None:
+def cli(
+    yamlfile,
+    output: Path,
+    package: str,
+    path_prefix: str | None,
+    path_style: str | None,
+) -> None:
     """Generate Spring server source files directly from a LinkML schema."""
-    gen = SpringServerGenerator(yamlfile, package=package, path_prefix=path_prefix)
+    gen = SpringServerGenerator(
+        yamlfile, package=package, path_prefix=path_prefix, path_style=path_style
+    )
     written = gen.emit(output)
     for path in written:
         click.echo(str(path))
