@@ -327,7 +327,7 @@ public class StubControllers {
 
     /**
      * Distribution is `nested_only` — its only canonical URLs are the
-     * deep chain `/catalogs/{cat}/dataset/{ds}/distribution/{id}`.
+     * deep chain `/api/v1/catalogs/{cat}/dataset/{ds}/distribution/{id}`.
      * Wires through to the same in-memory store as the parent paths.
      */
     @RestController
