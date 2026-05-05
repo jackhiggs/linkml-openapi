@@ -365,6 +365,12 @@ public class %(class_name)s {
             slot = self._slot_for(cls, slot_name)
             if slot is None:
                 continue
+            # Honour `openapi.body: "false"` (#65) — slot generates the
+            # nested controller endpoint but is dropped from the DTO so
+            # the parent's JSON body doesn't carry the child collection.
+            body_ann = self._get_slot_annotation_compat(cls, slot_name, "openapi.body")
+            if body_ann is not None and str(body_ann).strip().lower() == "false":
+                continue
             prop = self._slot_to_property(slot, imports)
             if prop is not None:
                 properties.append(prop)

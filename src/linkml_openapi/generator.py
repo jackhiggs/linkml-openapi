@@ -618,6 +618,8 @@ class OpenAPIGenerator(Generator):
                 if self._is_slot_excluded(slot):
                     continue
                 self._record_rdf_slot_uri(cls.name, slot)
+                if self._is_slot_body_excluded(cls, slot):
+                    continue
                 if slot.name not in parent_slot_names:
                     local_properties[slot.name] = self._slot_to_schema(slot)
                     if slot.required:
@@ -649,6 +651,8 @@ class OpenAPIGenerator(Generator):
             if self._is_slot_excluded(slot):
                 continue
             self._record_rdf_slot_uri(cls.name, slot)
+            if self._is_slot_body_excluded(cls, slot):
+                continue
             properties[slot.name] = self._slot_to_schema(slot)
             if slot.required:
                 required.append(slot.name)
@@ -1335,6 +1339,35 @@ class OpenAPIGenerator(Generator):
         if slot.range and slot.range in self._excluded_classes:
             return True
         return False
+
+    def _is_slot_body_excluded(self, cls: ClassDefinition, slot: SlotDefinition) -> bool:
+        """True when the slot is excluded from the parent class's body schema.
+
+        Honours ``openapi.body: "false"`` (#65) — slot generates the
+        nested endpoint but is dropped from the parent's component
+        ``properties``. Validates that the slot's range is a class
+        (composition for routing only makes no sense for scalars), and
+        that it is not also marked ``openapi.nested: "false"`` (the
+        slot would have no representation at all).
+        """
+        body_ann = self._get_slot_annotation(cls, slot.name, "openapi.body")
+        if body_ann is None or body_ann.strip().lower() != "false":
+            return False
+        if not slot.range or self.schemaview.get_class(slot.range) is None:
+            raise ValueError(
+                f'Slot {cls.name}.{slot.name!r} is annotated `openapi.body: "false"` '
+                f"but its range {slot.range!r} is not a class. The annotation only "
+                "makes sense on class-ranged slots — there's no nested endpoint to "
+                "preserve otherwise."
+            )
+        nested_ann = self._get_slot_annotation(cls, slot.name, "openapi.nested")
+        if nested_ann is not None and nested_ann.strip().lower() == "false":
+            raise ValueError(
+                f'Slot {cls.name}.{slot.name!r} is annotated both `openapi.body: "false"` '
+                'and `openapi.nested: "false"`. The slot would have no representation '
+                "at all — drop one annotation."
+            )
+        return True
 
     @staticmethod
     def _build_problem_schema(name: str = "Problem") -> Schema:

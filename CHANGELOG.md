@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+<<<<<<< HEAD
 - **`openapi.error_class_name`** schema-level annotation — renames the
   auto-emitted RFC 7807 `Problem` schema (and every `$ref` to it; and
   on the Spring side the auto-emitted Java DTO) without authoring a
@@ -25,6 +26,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `resources/openapi.yaml` `paths:` keys so springdoc's runtime view
   matches.
   ([#70](https://github.com/jackhiggs/linkml-openapi/issues/70))
+- **`openapi.body: "false"`** slot annotation — suppresses a
+  class-ranged slot from the parent's component-schema `properties`
+  while keeping the nested endpoint. Use it for "composition for
+  routing only" — the related collection is discoverable via the URL
+  but clients fetch it on demand instead of receiving it embedded.
+  Both emitters honour it (Spring drops the DTO field too).
+  Validates: scalar range and `openapi.nested: "false"` combo both
+  raise.
+  ([#65](https://github.com/jackhiggs/linkml-openapi/issues/65))
 
 ### Changed
 
