@@ -277,6 +277,36 @@ classes:
       openapi.resource: "true"  # This class gets endpoints
 ```
 
+#### `openapi.request_class` / `openapi.update_class`
+
+Different schemas for POST/PUT bodies vs GET responses:
+
+```yaml
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.request_class: CatalogRequest      # POST + PUT body when no update_class
+      openapi.update_class: CatalogUpdateRequest # PUT body (overrides request_class for PUT)
+    attributes: { id: ..., title: string }
+
+  CatalogRequest:
+    attributes: { title: { required: true } }    # no `id` — server-assigned
+
+  CatalogUpdateRequest:
+    attributes: { title: string }                # patch-shaped
+```
+
+* POST `/catalogs` → body `$ref: CatalogRequest`; 201 response stays
+  `$ref: Catalog`.
+* PUT `/catalogs/{id}` → body `$ref: CatalogUpdateRequest` (else
+  `CatalogRequest`, else `Catalog`); 200 response stays `$ref: Catalog`.
+* GET responses are always the resource class — unchanged.
+* The named classes must be declared in the LinkML schema; otherwise
+  generation fails with a clear error.
+* Spring side: emits the matching `*Request` Java DTOs and uses them as
+  the `@RequestBody` parameter type on POST/PUT.
+
 #### `openapi.path`
 
 Sets a custom URL path segment for the resource's endpoints.

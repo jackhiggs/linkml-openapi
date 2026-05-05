@@ -1274,3 +1274,67 @@ classes:
         api = files["io/example/sb/api/CatalogApi.java"]
         # Composition routing under /catalogs/{id}/datasets remains.
         assert '"/catalogs/{id}/datasets"' in api
+
+
+class TestRequestUpdateClass:
+    """Coverage for issue #66 — `openapi.request_class` /
+    `openapi.update_class` on the Spring side. Distinct Java types for
+    POST and PUT bodies vs the GET response type."""
+
+    _SCHEMA = """
+id: https://example.org/sr
+name: sr
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.request_class: CatalogRequest
+      openapi.update_class: CatalogUpdateRequest
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+  CatalogRequest:
+    attributes:
+      title: { required: true }
+  CatalogUpdateRequest:
+    attributes:
+      title: string
+"""
+
+    def test_request_dtos_emitted(self, tmp_path):
+        schema = tmp_path / "sr.yaml"
+        schema.write_text(self._SCHEMA)
+        files = SpringServerGenerator(str(schema), package="io.example.sr").build()
+        assert "io/example/sr/model/CatalogRequest.java" in files
+        assert "io/example/sr/model/CatalogUpdateRequest.java" in files
+
+    def test_post_uses_request_dto_in_signature(self, tmp_path):
+        schema = tmp_path / "sr.yaml"
+        schema.write_text(self._SCHEMA)
+        files = SpringServerGenerator(str(schema), package="io.example.sr").build()
+        api = files["io/example/sr/api/CatalogApi.java"]
+        # Imports both request DTOs.
+        assert "import io.example.sr.model.CatalogRequest;" in api
+        assert "import io.example.sr.model.CatalogUpdateRequest;" in api
+        # @Valid @RequestBody types switch per op; response stays Catalog.
+        assert "@Valid @RequestBody CatalogRequest body" in api
+        assert "@Valid @RequestBody CatalogUpdateRequest body" in api
+        assert "ResponseEntity<Catalog>" in api
+
+    def test_undefined_request_class_raises(self, tmp_path):
+        schema = tmp_path / "bad.yaml"
+        schema.write_text("""
+id: https://example.org/bad
+name: bad
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.request_class: NonExistent
+    attributes:
+      id: { identifier: true, required: true }
+""")
+        with pytest.raises(ValueError, match="not defined in the schema"):
+            SpringServerGenerator(str(schema), package="io.example.bad").build()

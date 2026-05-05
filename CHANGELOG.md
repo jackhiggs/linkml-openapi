@@ -10,7 +10,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-<<<<<<< HEAD
 - **`openapi.error_class_name`** schema-level annotation — renames the
   auto-emitted RFC 7807 `Problem` schema (and every `$ref` to it; and
   on the Spring side the auto-emitted Java DTO) without authoring a
@@ -35,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Validates: scalar range and `openapi.nested: "false"` combo both
   raise.
   ([#65](https://github.com/jackhiggs/linkml-openapi/issues/65))
+- **`openapi.request_class`** / **`openapi.update_class`** class-level
+  annotations — distinct schemas for POST/PUT request bodies vs GET
+  responses. POST uses ``request_class``; PUT prefers
+  ``update_class`` then falls back to ``request_class``; GET responses
+  are unchanged. Both emitters honour them; Spring renders the
+  ``@RequestBody`` parameter type as the override class. The named
+  classes must be declared in the schema; otherwise generation
+  fails.
+  ([#66](https://github.com/jackhiggs/linkml-openapi/issues/66))
 
 ### Changed
 

@@ -2339,6 +2339,95 @@ classes:
         _generate_from_string_raises(schema, match="have no representation")
 
 
+class TestRequestUpdateClass:
+    """Coverage for issue #66 — distinct schemas for POST/PUT vs GET response."""
+
+    _SCHEMA = """
+id: https://example.org/r
+name: r
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.request_class: CatalogRequest
+      openapi.update_class: CatalogUpdateRequest
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+  CatalogRequest:
+    attributes:
+      title: { required: true }
+  CatalogUpdateRequest:
+    attributes:
+      title: string
+"""
+
+    def test_post_uses_request_class(self):
+        spec = _generate_from_string(self._SCHEMA)
+        post = spec["paths"]["/catalogs"]["post"]
+        assert post["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/CatalogRequest"
+        }
+        assert post["responses"]["201"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/Catalog"
+        }
+
+    def test_put_uses_update_class(self):
+        spec = _generate_from_string(self._SCHEMA)
+        put = spec["paths"]["/catalogs/{id}"]["put"]
+        assert put["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/CatalogUpdateRequest"
+        }
+        assert put["responses"]["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/Catalog"
+        }
+
+    def test_get_uses_resource_class(self):
+        spec = _generate_from_string(self._SCHEMA)
+        get_one = spec["paths"]["/catalogs/{id}"]["get"]
+        assert get_one["responses"]["200"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/Catalog"
+        }
+
+    def test_put_falls_back_to_request_class_when_no_update_class(self):
+        schema = """
+id: https://example.org/r2
+name: r2
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.request_class: CatalogRequest
+    attributes:
+      id: { identifier: true, required: true }
+  CatalogRequest:
+    attributes:
+      title: { required: true }
+"""
+        spec = _generate_from_string(schema)
+        put = spec["paths"]["/catalogs/{id}"]["put"]
+        assert put["requestBody"]["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/CatalogRequest"
+        }
+
+    def test_undefined_request_class_raises(self):
+        schema = """
+id: https://example.org/r-bad
+name: r_bad
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.request_class: NonExistent
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        _generate_from_string_raises(schema, match="not defined in the schema")
+
+
 class TestProfiles:
     """Coverage for issue #17 — multi-view profile filtering."""
 

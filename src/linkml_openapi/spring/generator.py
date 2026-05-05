@@ -606,6 +606,16 @@ public class %(class_name)s {
     ) -> list[dict]:
         """Standard CRUD on the resource itself."""
         cn = cls.name
+        # Distinct request-body classes for POST / PUT vs GET response (#66).
+        # Falls back to ``cn`` when the annotations are unset.
+        create_body_type = self._request_body_class(cls, op="create") or cn
+        update_body_type = self._request_body_class(cls, op="update") or cn
+        # Add Java imports for the synthesised request DTOs (the model
+        # classes themselves are emitted by ``build()`` for every class in
+        # the schema; they just need a controller-side import).
+        for body_type in (create_body_type, update_body_type):
+            if body_type != cn:
+                imports.add(f"{self.package}.model.{body_type}")
         base = f'"/{path_segment}"'
         item = f'"/{path_segment}/{{id}}"'
         list_return = f"List<{cn}>"
@@ -627,7 +637,11 @@ public class %(class_name)s {
                 "method_name": f"create{cn}",
                 "return_type": cn,
                 "params": [
-                    {"annotation": "@Valid @RequestBody", "java_type": cn, "java_name": "body"},
+                    {
+                        "annotation": "@Valid @RequestBody",
+                        "java_type": create_body_type,
+                        "java_name": "body",
+                    },
                 ],
             },
             {
@@ -656,7 +670,11 @@ public class %(class_name)s {
                         "java_type": "String",
                         "java_name": "id",
                     },
-                    {"annotation": "@Valid @RequestBody", "java_type": cn, "java_name": "body"},
+                    {
+                        "annotation": "@Valid @RequestBody",
+                        "java_type": update_body_type,
+                        "java_name": "body",
+                    },
                 ],
             },
             {
@@ -1357,6 +1375,36 @@ public class %(class_name)s {
             if ann.tag == tag:
                 return str(ann.value)
         return None
+
+    def _request_body_class(self, cls: ClassDefinition, op: str) -> str | None:
+        """Distinct request-body Java type for POST/PUT (#66).
+
+        Resolution mirrors the OpenAPI side:
+        * ``op="create"`` → ``openapi.request_class`` if set, else None.
+        * ``op="update"`` → ``openapi.update_class`` if set, else
+          ``openapi.request_class`` if set, else None.
+
+        Returns the named class. Validates that the class exists in the
+        schema; otherwise raises so the codegen doesn't ship a controller
+        that imports a non-existent type.
+        """
+        if op == "update":
+            override = self._class_annotation(
+                cls, "openapi.update_class"
+            ) or self._class_annotation(cls, "openapi.request_class")
+        elif op == "create":
+            override = self._class_annotation(cls, "openapi.request_class")
+        else:
+            override = None
+        if not override:
+            return None
+        target = override.strip()
+        if self._sv.get_class(target) is None:
+            raise ValueError(
+                f"Class {cls.name!r} is annotated with a request-body class {target!r} "
+                "that is not defined in the schema. Add the class or drop the annotation."
+            )
+        return target
 
     def _resource_class_names(self) -> set[str]:
         out: set[str] = set()
