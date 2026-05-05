@@ -19,6 +19,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fires).
   ([#67](https://github.com/jackhiggs/linkml-openapi/issues/67))
 
+### Changed
+
+- **Nested composition / reference / deep-chain operations now inherit
+  the *immediate URL parent*'s `openapi.tag`** instead of the leaf
+  class's tag. Swagger UI groups every operation under
+  `/<parent>/{id}/...` with the rest of the parent's surface, rather
+  than scattering across the child's tag group. The leaf's flat-path
+  CRUD (`/distributions/{id}`) keeps the leaf tag.
+  Example: `/catalogs/{cat}/dataset/{ds}/distribution/{id}` now tags
+  with `Dataset` (the URL parent) — previously `Distribution`. The
+  Spring emitter's sidecar OpenAPI spec inherits the change
+  automatically.
+  ([#68](https://github.com/jackhiggs/linkml-openapi/issues/68))
+
 ## [0.10.0] — 2026-05-04
 
 ### Added

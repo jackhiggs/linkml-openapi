@@ -1849,22 +1849,24 @@ class TestCompositionAndTagEnhancements:
 
     # --- Enhancement 5: openapi.tag --------------------------------------
 
-    def test_openapi_tag_overrides_flat_class_name(self):
-        """Flat operations on a tagged class use `openapi.tag`, not the class name."""
+    def test_nested_composition_inherits_parent_tag(self):
+        """Per #68, single-hop nested composition endpoints inherit the
+        *parent* class's `openapi.tag` so Swagger UI groups them with the
+        rest of the parent's surface."""
         spec = _generate()
-        # Library declares `openapi.tag: Library` (matches class name) —
-        # use BookEntry indirectly: its composition-derived ops should
-        # carry tag `Book`, not `BookEntry`.
+        # /libraries/{id}/books — Library is the parent (openapi.tag: Library);
+        # the operation is tagged Library, NOT Book (the target's tag).
         list_book_op = spec["paths"]["/libraries/{libraryId}/books"]["get"]
-        assert list_book_op["tags"] == ["Book"]
+        assert list_book_op["tags"] == ["Library"]
 
-    def test_openapi_tag_inherits_from_target_in_composition(self):
-        """Composition-derived nested ops use the *target* class's tag, not the parent's."""
+    def test_deep_chained_path_uses_immediate_url_parent_tag(self):
+        """Deep-chain item paths inherit the *immediate URL parent*'s tag —
+        the last chain hop's class — not the leaf class (#68)."""
         spec = _generate()
-        # /libraries/{id}/books/{id}/chapters → tagged Chapter (target),
-        # NOT Library (parent) and NOT BookEntry (intermediate class).
+        # /libraries/{id}/books/{id}/chapters → immediate parent in the URL
+        # is BookEntry (openapi.tag: Book), not Library or Chapter.
         chapter_coll = spec["paths"]["/libraries/{libraryId}/books/{bookId}/chapters"]["get"]
-        assert chapter_coll["tags"] == ["Chapter"]
+        assert chapter_coll["tags"] == ["Book"]
 
     def test_openapi_tag_default_is_class_name(self):
         """Without the annotation, the tag is still the class name (backward compat)."""

@@ -1043,7 +1043,7 @@ endpoints regardless of any of these annotations.
 | `openapi.path` | class | path segment string | Auto-pluralized snake_case of class name |
 | `openapi.operations` | class | comma-separated list | `list,create,read,update,delete` |
 | `openapi.media_types` | class | comma-separated list | `application/json` |
-| `openapi.tag` | class | string | Class name (composition-derived ops inherit from the target) |
+| `openapi.tag` | class | string | Class name. Nested composition / reference / deep-chain ops inherit the *immediate URL parent*'s tag (Swagger UI groups them with the rest of the parent's surface). |
 | `openapi.path_style` | schema | `snake_case` / `kebab-case` | `snake_case` |
 | `openapi.path_prefix` | schema | `/PREFIX` (e.g. `/api/v1`) | No prefix |
 | `openapi.auto_query_params` | schema or class | `"true"` / `"false"` | `"true"` (auto-infer scalar slots) |
