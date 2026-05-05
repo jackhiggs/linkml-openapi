@@ -1458,6 +1458,41 @@ class OpenAPIGenerator(Generator):
             return designates_slot.name
         return None
 
+    def _request_body_ref(
+        self, cls: ClassDefinition, class_name: str, op: str
+    ) -> Schema | Reference:
+        """Pick the schema referenced by a POST or PUT request body.
+
+        Resolution (#66):
+
+        * PUT (``op="update"``) → ``openapi.update_class`` if set, else
+          ``openapi.request_class`` if set, else the class's own response ref.
+        * POST (``op="create"``) → ``openapi.request_class`` if set, else
+          the class's own response ref.
+
+        The named class must exist in the schema; otherwise generation fails
+        with a clear error so authors don't ship specs with dangling
+        ``$ref``s. The Spring emitter generates a matching DTO and uses
+        it as the ``@RequestBody`` parameter type.
+        """
+        if op == "update":
+            override = self._class_annotation(
+                cls, "openapi.update_class"
+            ) or self._class_annotation(cls, "openapi.request_class")
+        elif op == "create":
+            override = self._class_annotation(cls, "openapi.request_class")
+        else:
+            override = None
+        if not override:
+            return self._class_response_ref(class_name)
+        target = override.strip()
+        if self.schemaview.get_class(target) is None:
+            raise ValueError(
+                f"Class {class_name!r} is annotated with a request-body class {target!r} "
+                "that is not defined in the schema. Add the class or drop the annotation."
+            )
+        return Reference(ref=f"#/components/schemas/{target}")
+
     def _class_response_ref(self, class_name: str) -> Schema | Reference:
         """Schema or ``$ref`` for the ``class_name`` payload in a path op.
 
@@ -1893,19 +1928,20 @@ class OpenAPIGenerator(Generator):
 
     def _make_create_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)
-        ref = self._class_response_ref(class_name)
+        response_ref = self._class_response_ref(class_name)
+        request_ref = self._request_body_ref(cls, class_name, op="create")
         return Operation(
             summary=f"Create a {class_name}",
             operationId=f"create_{_to_snake_case(class_name)}",
             tags=[self._class_tag(class_name)],
             requestBody=RequestBody(
                 required=True,
-                content=self._content_for(ref, media_types),
+                content=self._content_for(request_ref, media_types),
             ),
             responses={
                 "201": Response(
                     description=f"{class_name} created",
-                    content=self._content_for(ref, media_types),
+                    content=self._content_for(response_ref, media_types),
                 ),
                 "422": self._error_response("Validation error"),
             },
@@ -1929,19 +1965,20 @@ class OpenAPIGenerator(Generator):
 
     def _make_update_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)
-        ref = self._class_response_ref(class_name)
+        response_ref = self._class_response_ref(class_name)
+        request_ref = self._request_body_ref(cls, class_name, op="update")
         return Operation(
             summary=f"Update a {class_name}",
             operationId=f"update_{_to_snake_case(class_name)}",
             tags=[self._class_tag(class_name)],
             requestBody=RequestBody(
                 required=True,
-                content=self._content_for(ref, media_types),
+                content=self._content_for(request_ref, media_types),
             ),
             responses={
                 "200": Response(
                     description=f"{class_name} updated",
-                    content=self._content_for(ref, media_types),
+                    content=self._content_for(response_ref, media_types),
                 ),
                 "404": self._error_response("Not found"),
                 "422": self._error_response("Validation error"),
