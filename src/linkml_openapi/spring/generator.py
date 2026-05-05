@@ -86,6 +86,12 @@ class SpringServerGenerator:
 
     schema_path: str
     package: str = "io.example"
+    # URL path-segment convention. None falls back to the schema-level
+    # ``openapi.path_style`` annotation, then ``"snake_case"`` (today's
+    # default). ``"kebab-case"`` flips auto-derived class- and slot-
+    # driven URL segments to hyphenated form (``/data-services``,
+    # ``/contact-point``). Mirrors gen-openapi's ``path_style`` flag.
+    path_style: str | None = None
     # URL path prefix prepended to every emitted controller path. None
     # falls back to the schema-level ``openapi.path_prefix`` annotation,
     # then no prefix. Emitted as a class-level ``@RequestMapping`` on
@@ -222,6 +228,7 @@ class SpringServerGenerator:
         return OpenAPIGenerator(
             self.schema_path,
             path_prefix=self._effective_path_prefix or None,
+            path_style=self.path_style,
         ).serialize()
 
     def build(self) -> dict[str, str]:
@@ -1224,7 +1231,20 @@ public class %(class_name)s {
         return ["application/json"]
 
     def _resolve_path_style(self) -> str:
-        """Active schema-level path style; defaults to snake_case."""
+        """Pick the effective URL path-segment convention.
+
+        Resolution order: ``path_style`` kwarg → schema-level
+        ``openapi.path_style`` annotation → ``"snake_case"`` (today's
+        default). Mirrors :meth:`OpenAPIGenerator._resolve_path_style`.
+        """
+        if self.path_style is not None:
+            value = str(self.path_style).strip().lower()
+            if value not in ("snake_case", "kebab-case"):
+                raise ValueError(
+                    f"path_style {self.path_style!r} is not supported. "
+                    "Use `snake_case` or `kebab-case`."
+                )
+            return value
         sv_schema = self._sv.schema
         if sv_schema and sv_schema.annotations:
             for ann in sv_schema.annotations.values():

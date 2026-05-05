@@ -18,6 +18,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `openapi.error_class` is also set (user class wins; `UserWarning`
   fires).
   ([#67](https://github.com/jackhiggs/linkml-openapi/issues/67))
+- **`gen-spring-server` `--path-style` flag (kebab-case parity with
+  gen-openapi).** Resolution order: CLI / `path_style=` kwarg →
+  schema-level `openapi.path_style` annotation → `snake_case`. Threads
+  through to controller `@*Mapping` URLs and the sidecar
+  `resources/openapi.yaml` `paths:` keys so springdoc's runtime view
+  matches.
+  ([#70](https://github.com/jackhiggs/linkml-openapi/issues/70))
 
 ### Changed
 

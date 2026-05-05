@@ -621,6 +621,68 @@ classes:
         src = files["io/example/acro/api/HubApi.java"]
         assert '"/hubs/{id}/xml-parser"' in src
 
+    def test_path_style_kwarg_overrides_schema_annotation(self, tmp_path):
+        """Per #70, the `path_style` kwarg wins over the schema-level
+        `openapi.path_style` annotation (matching gen-openapi)."""
+        fixture = tmp_path / "kw.yaml"
+        fixture.write_text("""
+id: https://example.org/kw
+name: kw
+default_range: string
+annotations:
+  openapi.path_style: snake_case
+classes:
+  DataService:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+""")
+        # Schema says snake_case; kwarg flips to kebab.
+        files = SpringServerGenerator(
+            str(fixture), package="io.example.kw", path_style="kebab-case"
+        ).build()
+        src = files["io/example/kw/api/DataServiceApi.java"]
+        assert '"/data-services"' in src
+        assert '"/data_services"' not in src
+
+    def test_path_style_kwarg_threads_into_sidecar(self, tmp_path):
+        """The sidecar `resources/openapi.yaml` adopts the same path-style
+        as the controllers — springdoc's runtime view matches."""
+        import yaml as _yaml
+
+        fixture = tmp_path / "side.yaml"
+        fixture.write_text("""
+id: https://example.org/side
+name: side
+default_range: string
+classes:
+  DataService:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+""")
+        gen = SpringServerGenerator(str(fixture), package="io.example.s", path_style="kebab-case")
+        spec = _yaml.safe_load(gen._render_openapi_spec())
+        assert "/data-services" in spec["paths"]
+        assert "/data_services" not in spec["paths"]
+
+    def test_invalid_path_style_kwarg_raises(self, tmp_path):
+        fixture = tmp_path / "bad.yaml"
+        fixture.write_text("""
+id: https://example.org/bad
+name: bad
+default_range: string
+classes:
+  Foo:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+""")
+        with pytest.raises(ValueError, match="not supported"):
+            SpringServerGenerator(
+                str(fixture), package="io.example.bad", path_style="camelCase"
+            )._resolve_path_style()
+
 
 class TestDeepChainedPaths:
     """Deep nested URL chains land on the leaf class's controller as
