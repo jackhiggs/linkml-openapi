@@ -311,7 +311,7 @@ wheels = [
 
 [[package]]
 name = "linkml-openapi"
-version = "0.8.1"
+version = "0.11.0"
 source = { editable = "." }
 dependencies = [
     { name = "click" },

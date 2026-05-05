@@ -99,6 +99,15 @@
                                 <argument>${project.build.directory}/generated-sources/openapi/java</argument>
                                 <argument>--package</argument>
                                 <argument>io.example.dcat</argument>
+                                <!--
+                                  Demo runs under /api/v1 to exercise the
+                                  path-prefix feature (#61). Class-level
+                                  @RequestMapping("/api/v1") on every
+                                  controller; sidecar OpenAPI spec
+                                  prefixes every paths: key.
+                                -->
+                                <argument>--path-prefix</argument>
+                                <argument>/api/v1</argument>
                             </arguments>
                         </configuration>
                     </execution>

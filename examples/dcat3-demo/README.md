@@ -32,12 +32,22 @@ JAVA_HOME=/opt/homebrew/opt/openjdk/libexec/openjdk.jdk/Contents/Home \
 ```
 
 Maven runs `gen-spring-server` against `tests/fixtures/dcat3.yaml`
-during the `generate-sources` phase, compiles, and boots Spring Boot
-on port 8080. To use a different port:
+during the `generate-sources` phase (with `--path-prefix /api/v1`),
+compiles, and boots Spring Boot on port 8080. To use a different
+port:
 
 ```bash
 mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8089
 ```
+
+> **Path prefix.** The demo serves every endpoint under `/api/v1`
+> (`/api/v1/catalogs/{id}`, `/api/v1/datasets`, …). The Maven build
+> passes `--path-prefix /api/v1` to `gen-spring-server`, which emits
+> a class-level `@RequestMapping("/api/v1")` on every controller
+> interface and prefixes every `paths:` key in the sidecar
+> `resources/openapi.yaml` so springdoc's runtime view matches.
+> Drop the `--path-prefix` argument from `pom.xml` to serve at the
+> root again.
 
 ## URLs
 
@@ -46,6 +56,9 @@ mvn spring-boot:run -Dspring-boot.run.arguments=--server.port=8089
 | `http://localhost:8080/swagger-ui/index.html` | Interactive Swagger UI |
 | `http://localhost:8080/redoc.html` | ReDoc rendering |
 | `http://localhost:8080/v3/api-docs` | Live OpenAPI 3.1 spec (springdoc) |
+
+(Swagger UI / ReDoc / `/v3/api-docs` are springdoc's own paths and
+are not affected by the resource path prefix.)
 
 ## Content negotiation
 
@@ -56,16 +69,16 @@ The demo seeds an in-memory store with a `Catalog`, two `Dataset`s
 
 ```bash
 # JSON (default)
-curl -s http://localhost:8080/catalogs/city-data
+curl -s http://localhost:8080/api/v1/catalogs/city-data
 
 # Turtle
-curl -s -H 'Accept: text/turtle' http://localhost:8080/catalogs/city-data
+curl -s -H 'Accept: text/turtle' http://localhost:8080/api/v1/catalogs/city-data
 
 # JSON-LD
-curl -s -H 'Accept: application/ld+json' http://localhost:8080/catalogs/city-data
+curl -s -H 'Accept: application/ld+json' http://localhost:8080/api/v1/catalogs/city-data
 
 # RDF/XML
-curl -s -H 'Accept: application/rdf+xml' http://localhost:8080/catalogs/city-data
+curl -s -H 'Accept: application/rdf+xml' http://localhost:8080/api/v1/catalogs/city-data
 ```
 
 Sample Turtle output:
@@ -91,20 +104,21 @@ through to the RDF output.
 
 ## URL surface
 
-After the kebab-case transform and inherited-slot suppression, the
-demo exposes ~54 paths:
+After the kebab-case transform, inherited-slot suppression, and
+`/api/v1` path prefix, the demo exposes ~54 paths:
 
 - **Top-level CRUD** on every resource class:
-  `/catalogs`, `/datasets`, `/dataset-series`, `/data-services`,
-  `/agents`, `/catalog-records`
+  `/api/v1/catalogs`, `/api/v1/datasets`, `/api/v1/dataset-series`,
+  `/api/v1/data-services`, `/api/v1/agents`, `/api/v1/catalog-records`
 - **Single-level nested**:
-  `/datasets/{id}/distribution`, `/catalogs/{id}/dataset`,
-  `/data-services/{id}/serves-dataset`,
-  `/<resource>/{id}/contact-point|contributor|creator`
+  `/api/v1/datasets/{id}/distribution`,
+  `/api/v1/catalogs/{id}/dataset`,
+  `/api/v1/data-services/{id}/serves-dataset`,
+  `/api/v1/<resource>/{id}/contact-point|contributor|creator`
 - **Deep-chained item paths**:
-  `/catalogs/{cat}/dataset/{ds}/in-series/{id}`,
-  `/catalogs/{cat}/dataset/{ds}/distribution/{id}` (Distribution is
-  `nested_only` — no flat `/distributions` URL)
+  `/api/v1/catalogs/{cat}/dataset/{ds}/in-series/{id}`,
+  `/api/v1/catalogs/{cat}/dataset/{ds}/distribution/{id}` (Distribution
+  is `nested_only` — no flat `/api/v1/distributions` URL)
 - **Slot-driven query parameters** on every list endpoint:
   `?title=`, `?issued__gte=`, `?issued__lte=`, `?modified__gte=`,
   `?sort=` array, plus `?limit=` and `?offset=` for pagination
@@ -112,7 +126,7 @@ demo exposes ~54 paths:
 ## Try the deep chain
 
 ```bash
-curl -s "http://localhost:8080/catalogs/city-data/dataset/transit-2024/distribution/transit-2024-gtfs"
+curl -s "http://localhost:8080/api/v1/catalogs/city-data/dataset/transit-2024/distribution/transit-2024-gtfs"
 ```
 
 Returns the seeded `Distribution` with `title`, `mediaType`, `byteSize`,
