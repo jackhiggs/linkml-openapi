@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [0.11.1] — 2026-05-05
+
+### Docs
+
+- `examples/dcat3-demo/` adopts `--path-prefix /api/v1` in its Maven
+  invocation; controllers carry class-level
+  `@RequestMapping("/api/v1")`; sidecar OpenAPI spec is prefixed; every
+  curl example in the demo README updated to `/api/v1/...`. Closes the
+  last acceptance criterion of
+  [#61](https://github.com/jackhiggs/linkml-openapi/issues/61). No
+  behaviour change in the library itself.
+
 ## [0.11.0] — 2026-05-05
 
 ### Added
