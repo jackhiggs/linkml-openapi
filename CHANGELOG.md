@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
-## [Unreleased]
+## [0.12.0] — 2026-05-11
 
 ### Added
 
@@ -20,7 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ``reactive=`` kwarg → schema-level ``openapi.reactive`` annotation →
   off (today's blocking output). The OpenAPI sidecar spec is
   unchanged — reactive is purely a Spring codegen concern.
-  ([#80](https://github.com/jackhiggs/openapi/issues/80))
+  ([#80](https://github.com/jackhiggs/linkml-openapi/issues/80))
 
 ## [0.11.1] — 2026-05-05
 
