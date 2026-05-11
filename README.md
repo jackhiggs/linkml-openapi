@@ -246,6 +246,39 @@ the server URL too.
 The Python API and both CLIs expose a `path_prefix` /
 `--path-prefix` override that wins over the schema annotation.
 
+#### `openapi.reactive` (Spring only)
+
+Switch `gen-spring-server` to Spring WebFlux output (mirrors
+openapi-generator's `reactive: true` flag on its Spring template):
+
+```yaml
+annotations:
+  openapi.reactive: "true"
+```
+
+Or pass `--reactive` on the CLI / `reactive=True` to the Python API
+(kwarg wins over the annotation).
+
+When set:
+
+* Return types wrap in `Mono<...>` — single resources become
+  `Mono<ResponseEntity<T>>`, list endpoints become
+  `Mono<ResponseEntity<Flux<T>>>`, DELETE becomes
+  `Mono<ResponseEntity<Void>>`.
+* `@RequestBody T body` becomes `@RequestBody Mono<T> body`.
+* Default 501 bodies return `Mono.just(...)`.
+* Imports `reactor.core.publisher.{Mono, Flux}`.
+* `@ApiResponse` content schemas (`@Schema(implementation = T.class)`,
+  `@ArraySchema(...)`) are unchanged — they describe the wire format,
+  not the Java method shape.
+* The sidecar `resources/openapi.yaml` is unchanged — reactive is
+  purely a Spring codegen concern.
+
+The OpenAPI generator output is not affected.
+
+Reactive apps depend on `spring-boot-starter-webflux` instead of
+`spring-boot-starter-web` (the starters are mutually exclusive).
+
 ### Class-level annotations
 
 Annotations are placed in the `annotations` block of a class definition.
