@@ -27,12 +27,12 @@ public interface {{ resource_class }}Api {
 {%- for ann in op.method_annotations %}
     {{ ann }}
 {%- endfor %}
-    default ResponseEntity<{{ op.return_type }}> {{ op.method_name }}(
+    default {{ op.method_return }} {{ op.method_name }}(
 {%- for param in op.params %}
         {{ param.annotation }} {{ param.java_type }} {{ param.java_name }}{{ "," if not loop.last else "" }}
 {%- endfor -%}
     ) {
-        return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build();
+        return {{ op.default_body }};
     }
 {% endfor %}
 }

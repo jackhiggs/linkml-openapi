@@ -1338,3 +1338,125 @@ classes:
 """)
         with pytest.raises(ValueError, match="not defined in the schema"):
             SpringServerGenerator(str(schema), package="io.example.bad").build()
+
+
+class TestReactive:
+    """Coverage for issue #80 — `--reactive` flag (Spring WebFlux output).
+
+    Mirrors openapi-generator's ``reactive: true`` Spring template:
+    return types wrap in ``Mono<>``; list endpoints become
+    ``Mono<ResponseEntity<Flux<T>>>``; ``@RequestBody`` parameters wrap
+    in ``Mono<>``; ``reactor.core.publisher.{Mono,Flux}`` are imported;
+    default 501 bodies return ``Mono.just(...)``.
+
+    The sidecar OpenAPI spec stays unchanged — reactive is purely a
+    Spring codegen concern.
+    """
+
+    @pytest.fixture(scope="class")
+    def reactive_files(self) -> dict:
+        return SpringServerGenerator(FIXTURE, package="io.example.dcat", reactive=True).build()
+
+    def test_mono_response_on_single_endpoints(self, reactive_files):
+        src = reactive_files["io/example/dcat/api/DatasetApi.java"]
+        # get / create / update return Mono<ResponseEntity<Dataset>>.
+        assert "Mono<ResponseEntity<Dataset>> getDataset" in src
+        assert "Mono<ResponseEntity<Dataset>> createDataset" in src
+        assert "Mono<ResponseEntity<Dataset>> updateDataset" in src
+
+    def test_mono_flux_response_on_list_endpoints(self, reactive_files):
+        src = reactive_files["io/example/dcat/api/DatasetApi.java"]
+        # List endpoints use Mono<ResponseEntity<Flux<T>>>.
+        assert "Mono<ResponseEntity<Flux<Dataset>>> listDatasets" in src
+        # No leftover blocking List<...> return.
+        assert "ResponseEntity<List<Dataset>>" not in src
+
+    def test_mono_response_entity_void_on_delete(self, reactive_files):
+        src = reactive_files["io/example/dcat/api/DatasetApi.java"]
+        assert "Mono<ResponseEntity<Void>> deleteDataset" in src
+
+    def test_request_body_wrapped_in_mono(self, reactive_files):
+        src = reactive_files["io/example/dcat/api/DatasetApi.java"]
+        # POST / PUT @RequestBody types are Mono<T>.
+        assert "@Valid @RequestBody Mono<Dataset> body" in src
+        # No unwrapped @RequestBody T body left behind.
+        assert "@Valid @RequestBody Dataset body" not in src
+
+    def test_default_method_body_uses_mono_just(self, reactive_files):
+        src = reactive_files["io/example/dcat/api/DatasetApi.java"]
+        assert "return Mono.just(ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build());" in src
+        # No blocking returns.
+        assert "return ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build();" not in src
+
+    def test_reactor_imports_added(self, reactive_files):
+        src = reactive_files["io/example/dcat/api/DatasetApi.java"]
+        assert "import reactor.core.publisher.Mono;" in src
+        assert "import reactor.core.publisher.Flux;" in src
+
+    def test_sidecar_openapi_spec_unchanged_by_reactive(self, tmp_path):
+        """Reactive is a Java codegen concern. The sidecar OpenAPI spec
+        emitted alongside the controllers must be byte-identical to the
+        non-reactive sidecar (so springdoc's runtime view matches and
+        downstream consumers see the same wire spec)."""
+        blocking = SpringServerGenerator(
+            FIXTURE, package="io.example.dcat", reactive=False
+        )._render_openapi_spec()
+        reactive = SpringServerGenerator(
+            FIXTURE, package="io.example.dcat", reactive=True
+        )._render_openapi_spec()
+        assert blocking == reactive
+
+    def test_default_off_produces_byte_identical_output(self, files, reactive_files):
+        """Without --reactive, output matches today's blocking shape exactly
+        (the ``files`` module-scoped fixture builds with no flag set)."""
+        non_reactive_api = files["io/example/dcat/api/DatasetApi.java"]
+        # The non-reactive path uses ResponseEntity<T> / no Mono.
+        assert "ResponseEntity<Dataset> getDataset" in non_reactive_api
+        assert "Mono<" not in non_reactive_api
+        assert "reactor.core.publisher" not in non_reactive_api
+
+    def test_schema_annotation_drives_reactive_when_no_kwarg(self, tmp_path):
+        """`openapi.reactive: "true"` at the schema level enables reactive
+        output when the kwarg is not passed."""
+        schema = """
+id: https://example.org/rx
+name: rx
+default_range: string
+annotations:
+  openapi.reactive: "true"
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        schema_path = tmp_path / "rx.yaml"
+        schema_path.write_text(schema)
+        files = SpringServerGenerator(str(schema_path), package="io.example.rx").build()
+        api = files["io/example/rx/api/CatalogApi.java"]
+        assert "Mono<ResponseEntity<Catalog>> getCatalog" in api
+        assert "import reactor.core.publisher.Mono;" in api
+
+    def test_kwarg_overrides_schema_annotation(self, tmp_path):
+        """An explicit ``reactive=False`` kwarg overrides a schema-level
+        ``openapi.reactive: "true"`` annotation."""
+        schema = """
+id: https://example.org/rx2
+name: rx2
+default_range: string
+annotations:
+  openapi.reactive: "true"
+classes:
+  Catalog:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      id: { identifier: true, required: true }
+"""
+        schema_path = tmp_path / "rx2.yaml"
+        schema_path.write_text(schema)
+        files = SpringServerGenerator(
+            str(schema_path), package="io.example.rx2", reactive=False
+        ).build()
+        api = files["io/example/rx2/api/CatalogApi.java"]
+        assert "ResponseEntity<Catalog> getCatalog" in api
+        assert "Mono<" not in api

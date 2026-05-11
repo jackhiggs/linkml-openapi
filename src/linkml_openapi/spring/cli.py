@@ -51,6 +51,23 @@ from linkml_openapi.spring.generator import SpringServerGenerator
         "prefix on its `paths:` keys to match springdoc's runtime view."
     ),
 )
+@click.option(
+    "--reactive/--no-reactive",
+    "reactive",
+    default=None,
+    help=(
+        "Emit Spring WebFlux (reactive) controllers instead of blocking "
+        "Spring MVC. Wraps every return type in `Mono<...>`, list endpoints "
+        "in `Mono<ResponseEntity<Flux<T>>>`, `@RequestBody` parameters in "
+        "`Mono<...>`; imports `reactor.core.publisher.{Mono,Flux}`. "
+        "The sidecar OpenAPI spec is unchanged — reactive is purely a "
+        "codegen concern (mirrors openapi-generator's `reactive: true` "
+        "Spring template). Defaults to the schema-level `openapi.reactive` "
+        "annotation, or off (today's blocking output) if neither is set. "
+        "Reactive apps depend on `spring-boot-starter-webflux` instead of "
+        "`spring-boot-starter-web`."
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
 def cli(
     yamlfile,
@@ -58,10 +75,15 @@ def cli(
     package: str,
     path_prefix: str | None,
     path_style: str | None,
+    reactive: bool | None,
 ) -> None:
     """Generate Spring server source files directly from a LinkML schema."""
     gen = SpringServerGenerator(
-        yamlfile, package=package, path_prefix=path_prefix, path_style=path_style
+        yamlfile,
+        package=package,
+        path_prefix=path_prefix,
+        path_style=path_style,
+        reactive=reactive,
     )
     written = gen.emit(output)
     for path in written:

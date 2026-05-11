@@ -100,6 +100,15 @@ class SpringServerGenerator:
     # its ``paths:`` keys so springdoc's runtime view matches the
     # static spec.
     path_prefix: str | None = None
+    # Spring WebFlux (reactive) output. False (default) emits today's
+    # blocking Spring MVC controllers; True wraps every return type in
+    # ``Mono<>``, switches list endpoints to ``Mono<ResponseEntity<Flux<T>>>``,
+    # wraps ``@RequestBody`` parameters in ``Mono<>``, and imports the
+    # reactor types. The OpenAPI sidecar spec is unchanged — reactive is
+    # purely a Spring codegen concern (mirrors openapi-generator's
+    # ``reactive: true`` flag on its Spring template). None falls back
+    # to the schema-level ``openapi.reactive`` annotation. (#80)
+    reactive: bool | None = None
 
     _sv: SchemaView = field(init=False)
     _env: Environment = field(init=False)
@@ -124,6 +133,21 @@ class SpringServerGenerator:
         )
         self._effective_path_prefix = self._resolve_path_prefix()
         self._error_class_name = self._resolve_error_class_name()
+        self._reactive = self._resolve_reactive()
+
+    def _resolve_reactive(self) -> bool:
+        """Pick Spring WebFlux vs Spring MVC output (#80).
+
+        Resolution order: ``reactive`` kwarg → schema-level
+        ``openapi.reactive`` annotation → ``False``.
+        """
+        if self.reactive is not None:
+            return bool(self.reactive)
+        schema_anns = getattr(self._sv.schema, "annotations", None) or {}
+        for ann in schema_anns.values() if hasattr(schema_anns, "values") else schema_anns:
+            if getattr(ann, "tag", None) == "openapi.reactive":
+                return str(ann.value).strip().lower() == "true"
+        return False
 
     def _resolve_error_class_name(self) -> str:
         """Pick the Java class name for the auto-emitted RFC 7807 DTO.
@@ -588,6 +612,11 @@ public class %(class_name)s {
             )
         if self._effective_path_prefix:
             imports.add("org.springframework.web.bind.annotation.RequestMapping")
+        # Wrap return types and request bodies in Mono/Flux when
+        # ``--reactive`` is set (#80). The OpenAPI sidecar spec and
+        # ``@ApiResponse`` content schemas describe the wire format and
+        # are unchanged — only the Java method shape flips.
+        self._apply_reactive_shape(ops, imports)
         return self._env.get_template("api.java.jinja").render(
             package=self.package,
             resource_class=cls.name,
@@ -596,6 +625,47 @@ public class %(class_name)s {
             operations=ops,
             request_mapping_base=self._effective_path_prefix,
         )
+
+    def _apply_reactive_shape(self, ops: list[dict], imports: set[str]) -> None:
+        """Decorate each op with ``method_return`` and ``default_body``
+        for the Jinja template. Mirrors openapi-generator's
+        ``reactive: true`` Spring template:
+
+        * ``Mono<ResponseEntity<T>>`` for single-resource methods.
+        * ``Mono<ResponseEntity<Flux<T>>>`` for list endpoints (inner
+          ``List<T>`` becomes ``Flux<T>`` so the response body streams).
+        * ``Mono<ResponseEntity<Void>>`` for DELETE.
+        * ``@RequestBody Mono<T> body`` instead of ``@RequestBody T body``.
+        * Default 501 body becomes ``Mono.just(ResponseEntity.status(...).build())``.
+
+        With ``reactive=False`` (the default) the values match today's
+        hardcoded template — byte-identical output.
+        """
+        if self._reactive:
+            imports.add("reactor.core.publisher.Mono")
+        any_list = any(op["return_type"].startswith("List<") for op in ops)
+        if self._reactive and any_list:
+            imports.add("reactor.core.publisher.Flux")
+        for op in ops:
+            inner = op["return_type"]
+            if self._reactive:
+                if inner.startswith("List<"):
+                    element = inner[len("List<") : -1]
+                    inner_expr = f"Flux<{element}>"
+                else:
+                    inner_expr = inner
+                op["method_return"] = f"Mono<ResponseEntity<{inner_expr}>>"
+                op["default_body"] = (
+                    "Mono.just(ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build())"
+                )
+                # Wrap @RequestBody parameter types in Mono<>.
+                for param in op.get("params", []):
+                    annotation = param.get("annotation", "")
+                    if "@RequestBody" in annotation:
+                        param["java_type"] = f"Mono<{param['java_type']}>"
+            else:
+                op["method_return"] = f"ResponseEntity<{inner}>"
+                op["default_body"] = "ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build()"
 
     def _top_level_ops(
         self,
