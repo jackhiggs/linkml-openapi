@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [0.12.1] — 2026-05-12
+
+### Fixed
+
+- **Pinned `pydantic<2.13`** so the transitive `pydantic_core` stays at
+  `2.41.x` rather than `2.46.x`. Some corporate licence-scanners
+  (JPMorgan AMS, etc.) don't yet recognise `pydantic_core 2.46.x` and
+  flag it as unknown during procurement. The library only uses
+  pydantic model construction and YAML/JSON serialisation — no
+  2.13-specific features — so the cap has no functional impact.
+
 ## [0.12.0] — 2026-05-11
 
 ### Added
