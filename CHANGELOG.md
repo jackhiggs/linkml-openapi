@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
-## [Unreleased]
+## [0.13.0] — 2026-05-14
 
 ### Changed (wire-affecting)
 
@@ -44,8 +44,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   narrows `distribution` to `AcmeDistribution`; both `Distribution`
   and `AcmeDistribution` declare `openapi.path: distributions` and
   their own `openapi.tag`. Regression guard for
-  [#85](https://github.com/jackhiggs/linkml-openapi/issues/85) and
-  [#86](https://github.com/jackhiggs/linkml-openapi/issues/86).
+  [#85](https://github.com/jackhiggs/linkml-openapi/issues/85),
+  [#86](https://github.com/jackhiggs/linkml-openapi/issues/86),
+  [#88](https://github.com/jackhiggs/linkml-openapi/issues/88), and
+  [#89](https://github.com/jackhiggs/linkml-openapi/issues/89).
+
+- **Canonical-chain-only suppression for `nested_only` resources
+  with `openapi.parent_path`**
+  ([#88](https://github.com/jackhiggs/linkml-openapi/issues/88)).
+  Today a class with `openapi.nested_only: "true"` suppresses only
+  the flat top-level path; non-canonical *intermediate* nested paths
+  (single-hop emission from a non-root parent) still leak through.
+  When the class also declares `openapi.parent_path`, that's now the
+  canonical chain — any emission whose collection path isn't rooted
+  at the chain's first hop is suppressed. dcat3 example:
+  `/datasets/{id}/distributions/{id}` (single-hop) is dropped;
+  `/catalogs/{cat}/datasets/{ds}/distributions/{id}` (canonical
+  chain) remains. Schemas without `parent_path` keep today's
+  behaviour.
+
+- **`--rdf-resolved-map` flag** (`rdf_resolved_map=` kwarg) emits a
+  flattened `x-rdf-properties-resolved` map on every component
+  schema: slot name → expanded RDF predicate IRI, with inheritance
+  via `allOf` already resolved
+  ([#89](https://github.com/jackhiggs/linkml-openapi/issues/89)).
+  Lets RDF runtimes (`spring-rdf`, etc.) look up any field's
+  predicate directly on the subclass without chasing `$ref` chains.
+  Per-property `x-rdf-property` annotations are still emitted
+  alongside (back-compat). Defaults to off — byte-identical when
+  unset.
 
 ## [0.12.1] — 2026-05-12
 

@@ -227,6 +227,15 @@ class OpenAPIGenerator(Generator):
     # Default ``False`` keeps today's authoring-clarity output
     # byte-identical.
     codegen_friendly: bool = False
+    # Emit a flattened ``x-rdf-properties-resolved`` map on every
+    # component schema (#89). The map carries every slot's expanded
+    # RDF predicate IRI (inherited + local, with subclass overrides
+    # winning) so RDF runtimes don't have to chase ``allOf`` refs to
+    # build the property → IRI lookup. Defaults to off — schemas
+    # regenerate byte-identically when unset. Per-property
+    # ``x-rdf-property`` annotations are emitted in both modes
+    # (back-compat for runtimes that walk ``allOf``).
+    rdf_resolved_map: bool = False
     # Names of registered post-processors to apply (in order) after the
     # canonical spec is built but before serialisation. See
     # ``linkml_openapi.post_processors`` for the registry. Each
@@ -1193,6 +1202,32 @@ class OpenAPIGenerator(Generator):
                     slot_uri = self._x_rdf_property.get((class_name, slot_name))
                     if slot_uri:
                         slot_schema["x-rdf-property"] = slot_uri
+            # `x-rdf-properties-resolved` flat map (#89). Walks the
+            # class's *induced* slots (LinkML resolves inheritance and
+            # slot_usage in one pass) so the runtime can look up any
+            # field's RDF predicate without chasing allOf references.
+            if self.rdf_resolved_map:
+                resolved = self._resolve_rdf_properties_for_class(class_name)
+                if resolved:
+                    schema["x-rdf-properties-resolved"] = resolved
+
+    def _resolve_rdf_properties_for_class(self, class_name: str) -> dict[str, str]:
+        """Build the flattened slot_name → RDF predicate IRI map for a class.
+
+        Walks every induced slot (inherited via ``is_a`` + local +
+        ``slot_usage`` overrides); the LinkML side already resolves
+        slot_uri precedence. Omits slots with no ``slot_uri``.
+        """
+        cls = self.schemaview.get_class(class_name)
+        if cls is None:
+            return {}
+        resolved: dict[str, str] = {}
+        for slot in self._induced_slots_iter(class_name):
+            if slot.slot_uri:
+                # Coerce LinkML's ``SlotDefinitionName`` to plain ``str``
+                # so PyYAML's safe-dumper can serialise the map.
+                resolved[str(slot.name)] = str(self.schemaview.expand_curie(slot.slot_uri))
+        return resolved
 
     # --- Operation builders ------------------------------------------------
 
@@ -2255,6 +2290,44 @@ class OpenAPIGenerator(Generator):
             return override.strip()
         return f"{_to_snake_case(class_name)}_id"
 
+    def _suppress_non_canonical_nested(self, target_class_name: str, collection_path: str) -> bool:
+        """True when this nested-composition emission for ``target``
+        should be skipped because the collection path doesn't sit
+        under the canonical chain (#88).
+
+        Requires both:
+          * ``target.openapi.nested_only: "true"``
+          * ``target.openapi.parent_path`` set to a non-empty chain
+
+        The canonical chain's root class is the first hop's class
+        (``Catalog`` in ``Catalog.dataset/Dataset.distribution``). The
+        URL segment for that root comes from its ``openapi.path``.
+        Any ``collection_path`` not prefixed by ``/<root_segment>/`` is
+        a non-canonical intermediate — suppress.
+
+        Without ``parent_path``, ``nested_only`` only suppresses the
+        flat top-level path (today's behaviour for unannotated chains).
+        """
+        target_cls = self.schemaview.get_class(target_class_name)
+        if target_cls is None:
+            return False
+        nested_only = _is_truthy(self._class_annotation(target_cls, "openapi.nested_only") or False)
+        if not nested_only:
+            return False
+        parent_path = self._class_annotation(target_cls, "openapi.parent_path")
+        if not parent_path:
+            return False
+        # Canonical chain root = first hop's class.
+        first_hop = parent_path.split("/", 1)[0].strip()
+        if "." not in first_hop:
+            return False
+        canonical_root_class = first_hop.split(".", 1)[0].strip()
+        root_cls = self.schemaview.get_class(canonical_root_class)
+        if root_cls is None:
+            return False
+        root_segment = self._get_path_segment(root_cls)
+        return not collection_path.lstrip("/").startswith(f"{root_segment}/")
+
     def _class_tag(self, class_name: str) -> str:
         """OpenAPI ``tags`` value to use for a class's operations.
 
@@ -2786,6 +2859,19 @@ class OpenAPIGenerator(Generator):
         # an already-being-emitted target short-circuits before any
         # paths are added.
         if target_class_name in self._composition_emission_stack:
+            return
+        # Canonical-only suppression (#88): when the target class
+        # declares both ``openapi.nested_only: "true"`` and an
+        # ``openapi.parent_path`` chain, the canonical URL is rooted
+        # at the chain's first hop (e.g. ``/catalogs/...``). Any
+        # collection-path being emitted that doesn't start with that
+        # root is a non-canonical intermediate (e.g.
+        # ``/datasets/{ds}/distributions`` for the Catalog-rooted
+        # chain) — suppress. The same recursive walk inside the
+        # canonical chain reaches this method with a chain-rooted
+        # ``collection_path``, so it passes through and emits the
+        # collection at the canonical depth.
+        if self._suppress_non_canonical_nested(target_class_name, collection_path):
             return
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)

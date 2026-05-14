@@ -244,10 +244,15 @@ class TestComposition:
         # $ref — not a oneOf wrapper.
         assert prop["items"] == {"$ref": "#/components/schemas/Distribution"}
 
-    def test_nested_distribution_collection_path_emitted(self, spec):
-        """Composition produces nested CRUD paths under the parent."""
-        assert "/datasets/{id}/distributions" in spec["paths"]
-        assert "/datasets/{id}/distributions/{distribution_id}" in spec["paths"]
+    def test_distribution_canonical_chain_only(self, spec):
+        """Per #88, Distribution declares both ``openapi.nested_only: "true"``
+        and ``openapi.parent_path: "Catalog.dataset/Dataset.distribution"``,
+        so the *only* nested path is the canonical chain rooted at
+        Catalog. The non-canonical intermediate single-hop under
+        Dataset (``/datasets/{id}/distributions/...``) is suppressed."""
+        assert "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}" in spec["paths"]
+        assert "/datasets/{id}/distributions" not in spec["paths"]
+        assert "/datasets/{id}/distributions/{distribution_id}" not in spec["paths"]
 
     @staticmethod
     def _ref_target(prop: dict) -> str | None:

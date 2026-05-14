@@ -1,3 +1,3 @@
 """LinkML to OpenAPI 3.1 generator."""
 
-__version__ = "0.12.1"
+__version__ = "0.13.0"
