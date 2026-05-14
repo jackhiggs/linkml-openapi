@@ -1206,20 +1206,21 @@ class TestDeepNestedPaths:
     """Coverage for issue #32 — N-level parent chains and override layers."""
 
     def test_two_level_deep_item_path_emits(self):
-        """Dataset2 chain [(Catalog2, datasets)] → /catalogs2/{catalog2Id}/datasets/{dataset2Id}."""
+        """Dataset2 chain [(Catalog2, datasets)] →
+        /catalogs2/{catalog2Id}/datasets2/{dataset2Id}."""
         spec = _generate()
-        assert "/catalogs2/{catalog2Id}/datasets/{dataset2Id}" in spec["paths"]
+        assert "/catalogs2/{catalog2Id}/datasets2/{dataset2Id}" in spec["paths"]
 
     def test_three_level_deep_item_path_emits(self):
         """Distribution2 chain [(Catalog2, datasets), (Dataset2, distributions)]."""
         spec = _generate()
-        path = "/catalogs2/{catalog2Id}/datasets/{dataset2Id}/distributions/{dist2Id}"
+        path = "/catalogs2/{catalog2Id}/datasets2/{dataset2Id}/distributions2/{dist2Id}"
         assert path in spec["paths"]
 
     def test_three_level_deep_item_has_full_crud(self):
         """Deep item path carries the leaf's CRUD (Distribution2 declares default ops)."""
         spec = _generate()
-        path = "/catalogs2/{catalog2Id}/datasets/{dataset2Id}/distributions/{dist2Id}"
+        path = "/catalogs2/{catalog2Id}/datasets2/{dataset2Id}/distributions2/{dist2Id}"
         item = spec["paths"][path]
         # Default operations include get / put / delete (no patch unless asked).
         assert "get" in item
@@ -1229,7 +1230,7 @@ class TestDeepNestedPaths:
     def test_three_level_deep_path_carries_all_ancestor_params(self):
         """Every ancestor's identifier shows up as a path parameter."""
         spec = _generate()
-        path = "/catalogs2/{catalog2Id}/datasets/{dataset2Id}/distributions/{dist2Id}"
+        path = "/catalogs2/{catalog2Id}/datasets2/{dataset2Id}/distributions2/{dist2Id}"
         params = spec["paths"][path].get("parameters", [])
         names = {p["name"] for p in params if p["in"] == "path"}
         assert {"catalog2Id", "dataset2Id", "dist2Id"} <= names
@@ -1240,7 +1241,7 @@ class TestDeepNestedPaths:
         # Catalog2's own item path uses the override.
         assert "/catalogs2/{catalog2Id}" in spec["paths"]
         # And the same name shows up wherever Catalog2 appears as an ancestor.
-        deep = "/catalogs2/{catalog2Id}/datasets/{dataset2Id}"
+        deep = "/catalogs2/{catalog2Id}/datasets2/{dataset2Id}"
         assert deep in spec["paths"]
 
     def test_default_path_id_remains_snake_case(self):
@@ -1261,7 +1262,8 @@ class TestDeepNestedPaths:
         assert "/distributions2/{dist2Id}" not in spec["paths"]
         # …but the deep path is still there.
         assert (
-            "/catalogs2/{catalog2Id}/datasets/{dataset2Id}/distributions/{dist2Id}" in spec["paths"]
+            "/catalogs2/{catalog2Id}/datasets2/{dataset2Id}/distributions2/{dist2Id}"
+            in spec["paths"]
         )
 
     def test_leaf_schema_has_no_ancestor_id_fields(self):
@@ -1849,24 +1851,30 @@ class TestCompositionAndTagEnhancements:
 
     # --- Enhancement 5: openapi.tag --------------------------------------
 
-    def test_nested_composition_inherits_parent_tag(self):
-        """Per #68, single-hop nested composition endpoints inherit the
-        *parent* class's `openapi.tag` so Swagger UI groups them with the
-        rest of the parent's surface."""
+    def test_target_explicit_tag_wins_for_nested_composition(self):
+        """Per #86, when the target (range) class declares an explicit
+        `openapi.tag`, nested-composition ops on the parent inherit
+        *the target's* tag rather than the parent's. The author's
+        explicit tag on a class is the canonical group for that class's
+        operations regardless of which URL reaches them."""
         spec = _generate()
-        # /libraries/{id}/books — Library is the parent (openapi.tag: Library);
-        # the operation is tagged Library, NOT Book (the target's tag).
+        # /libraries/{id}/books — target BookEntry has openapi.tag: Book
+        # (explicit), so the op is tagged Book — not Library (the parent's
+        # tag); the #68 parent-default only kicks in when the target has
+        # no explicit annotation.
         list_book_op = spec["paths"]["/libraries/{libraryId}/books"]["get"]
-        assert list_book_op["tags"] == ["Library"]
+        assert list_book_op["tags"] == ["Book"]
 
-    def test_deep_chained_path_uses_immediate_url_parent_tag(self):
-        """Deep-chain item paths inherit the *immediate URL parent*'s tag —
-        the last chain hop's class — not the leaf class (#68)."""
+    def test_deep_chained_path_uses_target_tag_when_explicit(self):
+        """Per #86, deep-chain item paths use the leaf class's explicit
+        `openapi.tag` when set, overriding the #68 immediate-URL-parent
+        default."""
         spec = _generate()
-        # /libraries/{id}/books/{id}/chapters → immediate parent in the URL
-        # is BookEntry (openapi.tag: Book), not Library or Chapter.
+        # /libraries/{id}/books/{id}/chapters → leaf ChapterEntry has
+        # openapi.tag: Chapter (explicit), so the op is tagged Chapter —
+        # not Book (the immediate URL parent's tag).
         chapter_coll = spec["paths"]["/libraries/{libraryId}/books/{bookId}/chapters"]["get"]
-        assert chapter_coll["tags"] == ["Book"]
+        assert chapter_coll["tags"] == ["Chapter"]
 
     def test_openapi_tag_default_is_class_name(self):
         """Without the annotation, the tag is still the class name (backward compat)."""
@@ -2337,6 +2345,94 @@ classes:
       id: { identifier: true, required: true }
 """
         _generate_from_string_raises(schema, match="have no representation")
+
+
+class TestRangeClassPathSegmentAndTargetTag:
+    """Coverage for #85 (range class `openapi.path` drives nested URL
+    segment) and #86 (target class's explicit `openapi.tag` wins over
+    parent-tag default) — exercised against the `dcat3-acme.yaml`
+    fixture, an anonymised company-overlay extension of stock DCAT-3."""
+
+    @staticmethod
+    def _spec() -> dict:
+        gen = OpenAPIGenerator(str(FIXTURES / "dcat3-acme.yaml"))
+        return yaml.safe_load(gen.serialize())
+
+    # --- #85: URL segment from range class's openapi.path ---
+
+    def test_nested_segment_uses_range_class_openapi_path_stock_dcat(self):
+        """`Dataset.distribution` slot ranges on `Distribution` which has
+        `openapi.path: distributions`. The nested URL segment is the
+        class's plural noun, not the singular slot name."""
+        spec = self._spec()
+        assert "/datasets/{id}/distributions" in spec["paths"]
+        assert "/datasets/{id}/distributions/{distribution_id}" in spec["paths"]
+        # And the singular slot-name version does NOT leak through.
+        assert "/datasets/{id}/distribution" not in spec["paths"]
+
+    def test_nested_segment_uses_range_class_openapi_path_acme_overlay(self):
+        """`AcmeDataset.distribution` narrows the range to
+        `AcmeDistribution` (`openapi.path: distributions`). The URL
+        picks up the range class's path."""
+        spec = self._spec()
+        assert "/acme-datasets/{id}/distributions" in spec["paths"]
+        assert "/acme-datasets/{id}/distributions/{acme_distribution_id}" in spec["paths"]
+        assert "/acme-datasets/{id}/distribution" not in spec["paths"]
+
+    def test_jsonbody_property_key_is_still_slot_name_singular(self):
+        """The decoupling: URL is plural (from class), JSON property
+        key is singular (the slot name `distribution`). Both DCAT-3
+        semantic alignment and RESTful URL convention are honoured at
+        the same time."""
+        spec = self._spec()
+        dataset = spec["components"]["schemas"]["Dataset"]
+        # Walk the allOf to find the local properties block.
+        local = next((p for p in dataset.get("allOf", []) if "properties" in p), dataset)
+        props = local.get("properties", dataset.get("properties", {}))
+        assert "distribution" in props, f"expected singular 'distribution' key, got {list(props)}"
+
+    def test_rdf_property_extension_unchanged(self):
+        """`x-rdf-property` comes from `slot_uri`; the new URL-segment
+        rule must not touch it."""
+        spec = self._spec()
+        dataset = spec["components"]["schemas"]["Dataset"]
+        local = next((p for p in dataset.get("allOf", []) if "properties" in p), dataset)
+        props = local.get("properties", dataset.get("properties", {}))
+        prop = props["distribution"]
+        # `slot_uri: dcat:distribution` → x-rdf-property: full IRI
+        assert prop.get("x-rdf-property") == "http://www.w3.org/ns/dcat#distribution"
+
+    # --- #86: target class's explicit openapi.tag wins ---
+
+    def test_target_tag_wins_on_nested_composition(self):
+        """`Distribution` has `openapi.tag: Distributions` explicitly;
+        nested ops at `/datasets/{id}/distributions` inherit that tag
+        rather than the parent `Dataset.openapi.tag: Datasets`."""
+        spec = self._spec()
+        op = spec["paths"]["/datasets/{id}/distributions"]["get"]
+        assert op["tags"] == ["Distributions"]
+
+    def test_target_tag_wins_on_acme_overlay(self):
+        """`AcmeDistribution.openapi.tag: AcmeDistributions` wins over
+        `AcmeDataset.openapi.tag: AcmeDatasets` on nested ops."""
+        spec = self._spec()
+        op = spec["paths"]["/acme-datasets/{id}/distributions"]["get"]
+        assert op["tags"] == ["AcmeDistributions"]
+
+    def test_target_tag_wins_on_deep_chain(self):
+        """Distribution is `nested_only` and reachable via the deep chain
+        `Dataset.distribution`. The leaf's explicit `openapi.tag` wins
+        over the immediate URL parent (#68 default)."""
+        spec = self._spec()
+        # The deep-chained item path emitted under Dataset's chain.
+        op = spec["paths"]["/datasets/{dataset_id}/distributions/{id}"]["get"]
+        assert op["tags"] == ["Distributions"]
+
+    def test_flat_path_keeps_class_tag(self):
+        """Top-level CRUD on `/datasets` keeps `Datasets` (unchanged)."""
+        spec = self._spec()
+        op = spec["paths"]["/datasets"]["get"]
+        assert op["tags"] == ["Datasets"]
 
 
 class TestRequestUpdateClass:

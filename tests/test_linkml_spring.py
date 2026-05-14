@@ -200,12 +200,12 @@ class TestApiSurface:
 
     def test_inlined_composition_emits_nested_crud(self, files):
         """Dataset.distribution is inlined: true → nested CRUD on
-        /datasets/{id}/distribution + /datasets/{id}/distribution/{id}.
+        /datasets/{id}/distributions + /datasets/{id}/distributions/{id}.
         Methods reflect the embedded payload type (Distribution)."""
         src = files["io/example/dcat/api/DatasetApi.java"]
-        assert '@GetMapping(value = "/datasets/{id}/distribution"' in src
-        assert '@PostMapping(value = "/datasets/{id}/distribution"' in src
-        assert '@GetMapping(value = "/datasets/{id}/distribution/{DistributionId}"' in src
+        assert '@GetMapping(value = "/datasets/{id}/distributions"' in src
+        assert '@PostMapping(value = "/datasets/{id}/distributions"' in src
+        assert '@GetMapping(value = "/datasets/{id}/distributions/{DistributionId}"' in src
         assert "ResponseEntity<Distribution>" in src
         assert "List<Distribution>" in src
 
@@ -361,10 +361,10 @@ class TestQueryParams:
 
     def test_query_params_attached_to_composition_list(self, files):
         """Dataset.distribution is inlined: true → composition list at
-        /datasets/{id}/distribution. The list endpoint carries Distribution's
+        /datasets/{id}/distributions. The list endpoint carries Distribution's
         query params (auto-inferred from Distribution's scalar slots)."""
         src = files["io/example/dcat/api/DatasetApi.java"]
-        assert "/datasets/{id}/distribution" in src
+        assert "/datasets/{id}/distributions" in src
         list_method_start = src.find("listDatasetDistribution")
         list_method_end = src.find(") {", list_method_start)
         list_method_signature = src[list_method_start:list_method_end]
@@ -696,7 +696,7 @@ class TestDeepChainedPaths:
         leaf is {id}."""
         src = files["io/example/dcat/api/DistributionApi.java"]
         assert (
-            '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution/{id}"'
+            '@GetMapping(value = "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"'
             in src
         )
 
@@ -708,9 +708,9 @@ class TestDeepChainedPaths:
 
     def test_dataset_chain_depth_one(self, files):
         """Dataset's parent chain is just [(Catalog, dataset)] — a single
-        hop. The deep URL is /catalogs/{catalog_id}/dataset/{id}."""
+        hop. The deep URL is /catalogs/{catalog_id}/datasets/{id}."""
         src = files["io/example/dcat/api/DatasetApi.java"]
-        assert '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{id}"' in src
+        assert '@GetMapping(value = "/catalogs/{catalog_id}/datasets/{id}"' in src
         assert "getDatasetViaCatalog" in src
 
     def test_deep_path_params_in_order(self, files):
@@ -729,11 +729,11 @@ class TestDeepChainedPaths:
         """No collection-level GET/POST on the deep chained URL."""
         src = files["io/example/dcat/api/DistributionApi.java"]
         assert (
-            '@PostMapping(value = "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution",'
+            '@PostMapping(value = "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions",'
             not in src
         )
         assert (
-            '@GetMapping(value = "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution",'
+            '@GetMapping(value = "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions",'
             not in src
         )
 

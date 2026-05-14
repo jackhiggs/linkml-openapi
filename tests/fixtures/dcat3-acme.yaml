@@ -1,0 +1,69 @@
+id: https://example.org/dcat3-acme
+name: dcat3_acme
+default_range: string
+
+prefixes:
+  dcat: http://www.w3.org/ns/dcat#
+  dct:  http://purl.org/dc/terms/
+  acme: https://example.com/acme/
+
+classes:
+  # --- Stock DCAT-3 subset ---
+
+  Dataset:
+    class_uri: dcat:Dataset
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+      openapi.tag: Datasets
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+      distribution:
+        slot_uri: dcat:distribution
+        range: Distribution
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+
+  Distribution:
+    class_uri: dcat:Distribution
+    annotations:
+      openapi.resource: "true"
+      openapi.path: distributions
+      openapi.tag: Distributions
+      openapi.nested_only: "true"
+      openapi.parent_path: "Dataset.distribution"
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+      mediaType: uri
+
+  # --- Acme company overlay (fictional) ---
+
+  AcmeDataset:
+    is_a: Dataset
+    class_uri: acme:AcmeDataset
+    annotations:
+      openapi.resource: "true"
+      openapi.path: acme-datasets
+      openapi.tag: AcmeDatasets
+    slot_usage:
+      distribution:
+        range: AcmeDistribution   # narrowed from Distribution
+    attributes:
+      dataLineage: string
+      confidentialityClassification: string
+
+  AcmeDistribution:
+    is_a: Distribution
+    class_uri: acme:AcmeDistribution
+    annotations:
+      openapi.resource: "true"
+      openapi.path: distributions
+      openapi.tag: AcmeDistributions
+      openapi.nested_only: "true"
+      openapi.parent_path: "AcmeDataset.distribution"
+    attributes:
+      s3BucketUri: uri
+      kafkaTopic: string
