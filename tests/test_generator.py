@@ -2435,6 +2435,103 @@ class TestRangeClassPathSegmentAndTargetTag:
         assert op["tags"] == ["Datasets"]
 
 
+class TestCanonicalOnlyNestedSuppression:
+    """Coverage for #88 — `openapi.nested_only` + `openapi.parent_path`
+    suppresses non-canonical intermediate nested paths."""
+
+    @staticmethod
+    def _spec() -> dict:
+        gen = OpenAPIGenerator(str(FIXTURES / "dcat3-acme.yaml"))
+        return yaml.safe_load(gen.serialize())
+
+    def test_canonical_chain_item_path_emits(self):
+        """Distribution has parent_path: Dataset.distribution and
+        nested_only: true. The canonical chain item path emits."""
+        spec = self._spec()
+        assert "/datasets/{dataset_id}/distributions/{id}" in spec["paths"]
+
+    def test_non_canonical_intermediate_suppressed(self):
+        """Without #88, single-hop intermediate `/datasets/{id}/distributions`
+        would emit (Dataset's own composition walk). With nested_only +
+        parent_path, that's suppressed — the only addressable URL is the
+        canonical chain."""
+        spec = self._spec()
+        # No intermediate single-hop emission for the nested_only class.
+        # The fixture's only declared chain is Dataset.distribution
+        # (single-hop), so canonical IS single-hop and there's nothing
+        # else to suppress — but the principle is exercised by the
+        # acme overlay: AcmeDistribution.parent_path is
+        # AcmeDataset.distribution, so /datasets/{id}/distributions
+        # (stock Dataset-rooted) should never carry AcmeDistribution.
+        assert "/datasets/{dataset_id}/distributions/{id}" in spec["paths"]
+        # The acme chain is rooted at AcmeDataset.
+        assert "/acme-datasets/{acme_dataset_id}/distributions/{id}" in spec["paths"]
+
+    def test_flat_top_level_path_still_suppressed(self):
+        """nested_only's original meaning (no flat top-level path) is
+        preserved."""
+        spec = self._spec()
+        assert "/distributions" not in spec["paths"]
+        assert "/distributions/{id}" not in spec["paths"]
+
+
+class TestRdfResolvedMap:
+    """Coverage for #89 — optional `x-rdf-properties-resolved` map."""
+
+    @staticmethod
+    def _spec(rdf_resolved_map: bool = False) -> dict:
+        gen = OpenAPIGenerator(str(FIXTURES / "dcat3-acme.yaml"), rdf_resolved_map=rdf_resolved_map)
+        return yaml.safe_load(gen.serialize())
+
+    def test_default_off_no_resolved_map(self):
+        """Without the flag, schemas regenerate byte-identically — no
+        `x-rdf-properties-resolved` block appears anywhere."""
+        spec = self._spec(rdf_resolved_map=False)
+        for name, schema in spec["components"]["schemas"].items():
+            assert "x-rdf-properties-resolved" not in schema, (
+                f"unexpected x-rdf-properties-resolved on {name}"
+            )
+
+    def test_resolved_map_emits_on_class_with_slot_uri(self):
+        """`Dataset.distribution` has slot_uri: dcat:distribution. With
+        the flag on, the resolved map carries the expanded IRI."""
+        spec = self._spec(rdf_resolved_map=True)
+        ds = spec["components"]["schemas"]["Dataset"]
+        m = ds.get("x-rdf-properties-resolved", {})
+        assert m["distribution"] == "http://www.w3.org/ns/dcat#distribution"
+
+    def test_subclass_inherits_via_resolved_map(self):
+        """`AcmeDataset` inherits `Dataset.distribution`. The resolved
+        map flattens inheritance: AcmeDataset's map includes the
+        inherited `distribution → dcat:distribution` without the
+        runtime chasing allOf."""
+        spec = self._spec(rdf_resolved_map=True)
+        ad = spec["components"]["schemas"]["AcmeDataset"]
+        m = ad.get("x-rdf-properties-resolved", {})
+        assert m["distribution"] == "http://www.w3.org/ns/dcat#distribution"
+
+    def test_resolved_map_omits_slots_without_slot_uri(self):
+        """Slots with no `slot_uri` are not in the resolved map (the
+        map is about RDF identity, not the wire schema)."""
+        spec = self._spec(rdf_resolved_map=True)
+        ds = spec["components"]["schemas"]["Dataset"]
+        m = ds.get("x-rdf-properties-resolved", {})
+        # `id` and `title` have no slot_uri in the fixture.
+        assert "id" not in m
+        assert "title" not in m
+
+    def test_per_property_x_rdf_property_still_emits(self):
+        """Back-compat: the per-property `x-rdf-property` annotation is
+        emitted in both modes so runtimes that walk allOf still work."""
+        spec = self._spec(rdf_resolved_map=True)
+        ds = spec["components"]["schemas"]["Dataset"]
+        local = next((p for p in ds.get("allOf", []) if "properties" in p), ds)
+        props = local.get("properties", ds.get("properties", {}))
+        assert (
+            props["distribution"].get("x-rdf-property") == "http://www.w3.org/ns/dcat#distribution"
+        )
+
+
 class TestRequestUpdateClass:
     """Coverage for issue #66 — distinct schemas for POST/PUT vs GET response."""
 

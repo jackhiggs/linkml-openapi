@@ -123,6 +123,22 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
     ),
 )
 @click.option(
+    "--rdf-resolved-map",
+    "rdf_resolved_map",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit a flattened `x-rdf-properties-resolved` map on every "
+        "component schema — slot name → expanded RDF predicate IRI, "
+        "with inheritance via `allOf` already resolved. Lets RDF "
+        "runtimes (spring-rdf, etc.) look up any field's predicate "
+        "directly on the subclass schema without chasing `$ref` chains. "
+        "Per-property `x-rdf-property` annotations are emitted in both "
+        "modes (back-compat). Defaults to off — schemas regenerate "
+        "byte-identically when unset."
+    ),
+)
+@click.option(
     "--post-process",
     "post_process",
     default=None,
