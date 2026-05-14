@@ -1087,16 +1087,31 @@ class OpenAPIGenerator(Generator):
     def _render_slot_segment(self, parent_cls: ClassDefinition | None, slot: SlotDefinition) -> str:
         """Render the URL segment for a slot used in a nested path.
 
-        Honours the slot's `openapi.path_segment` annotation (verbatim)
-        when set; otherwise applies the active path-style to the slot
-        name. The slot identifier in the OpenAPI body, operation IDs,
-        tags, and `x-rdf-property` extensions are untouched — only the
-        URL segment changes.
+        Resolution precedence (most specific first):
+
+        1. Slot-level ``openapi.path_segment`` (in ``slot_usage``) —
+           taken verbatim.
+        2. Range class's ``openapi.path`` (#85) — when the slot's range
+           is a class with that annotation, the class's URL noun drives
+           the segment so authors can keep slot names singular
+           (matching the underlying vocabulary, e.g. ``dcat:distribution``)
+           while serving plural REST URLs (``/distributions``).
+        3. Active path-style applied to the slot name (today's default).
+
+        The slot identifier in the OpenAPI body, operation IDs, tags,
+        and ``x-rdf-property`` extensions are untouched — only the URL
+        segment changes.
         """
         if parent_cls is not None:
             override = self._get_slot_annotation(parent_cls, slot.name, "openapi.path_segment")
             if override:
                 return override.strip()
+        if slot.range:
+            range_cls = self.schemaview.get_class(slot.range)
+            if range_cls is not None:
+                range_path = self._class_annotation(range_cls, "openapi.path")
+                if range_path:
+                    return range_path.strip().lstrip("/")
         return self._apply_path_style(slot.name)
 
     def _get_path_segment(self, cls: ClassDefinition) -> str:
@@ -2244,16 +2259,46 @@ class OpenAPIGenerator(Generator):
         """OpenAPI ``tags`` value to use for a class's operations.
 
         Defaults to the class name (current behaviour); the
-        ``openapi.tag`` class annotation overrides it. Composition- and
-        reference-derived nested operations call this with the *target*
-        class so all "Dataset" operations end up under one Swagger UI
-        group regardless of where in the URL hierarchy they emit.
+        ``openapi.tag`` class annotation overrides it.
         """
         cls = self.schemaview.get_class(class_name)
         override = self._class_annotation(cls, "openapi.tag") if cls else None
         if override:
             return override.strip()
         return class_name
+
+    def _nested_op_tag(
+        self,
+        parent_class_name: str,
+        target_class_name: str | None = None,
+        slot: SlotDefinition | None = None,
+    ) -> str:
+        """Resolve the OpenAPI tag for a nested-composition / reference /
+        deep-chain operation.
+
+        Resolution precedence (most specific first), per #86:
+
+        1. **Slot-level ``openapi.tag``** in ``slot_usage`` — schema
+           author opts a single relationship out of the class-level
+           defaults.
+        2. **Target class's explicit ``openapi.tag``** — when set, the
+           author has declared the canonical Swagger UI group for
+           ``T``-operations regardless of which URL reaches them.
+        3. **Parent class's tag** (#68 default) — keeps nested ops
+           grouped with the rest of the parent's surface when no
+           target-level signal is present.
+        """
+        if slot is not None:
+            parent_cls = self.schemaview.get_class(parent_class_name)
+            slot_tag = self._get_slot_annotation(parent_cls, slot.name, "openapi.tag")
+            if slot_tag:
+                return slot_tag.strip()
+        if target_class_name:
+            target_cls = self.schemaview.get_class(target_class_name)
+            target_tag = self._class_annotation(target_cls, "openapi.tag") if target_cls else None
+            if target_tag:
+                return target_tag.strip()
+        return self._class_tag(parent_class_name)
 
     def _resolve_item_path_vars(
         self,
@@ -2593,13 +2638,13 @@ class OpenAPIGenerator(Generator):
         chain_suffix = "_via_" + "_".join(_to_snake_case(p) for p, _ in chain)
         deep_paths = {deep_item_path: deep_item}
         self._suffix_operation_ids(deep_paths, chain_suffix)
-        # Re-tag deep-chain operations to the *immediate URL parent* (the
-        # last chain hop's class) so Swagger UI groups them with the rest
-        # of the parent's nested ops rather than under the leaf's tag
-        # (#68). The leaf's flat-path operations keep the leaf's tag.
+        # Re-tag deep-chain operations. Default groups them with the
+        # immediate URL parent (#68); an explicit `openapi.tag` on the
+        # leaf class wins over that (#86), so author-declared canonical
+        # groups for `T` survive being reached through a deep chain.
         if chain:
-            parent_tag = self._class_tag(chain[-1][0])
-            self._retag_path_operations(deep_paths, parent_tag)
+            tag = self._nested_op_tag(chain[-1][0], class_name)
+            self._retag_path_operations(deep_paths, tag)
         return deep_paths
 
     @staticmethod
@@ -2746,11 +2791,10 @@ class OpenAPIGenerator(Generator):
         media_types = self._get_media_types(target_cls)
         target_ref = self._class_response_ref(target_class_name)
         array_schema = Schema(type=DataType.ARRAY, items=target_ref)
-        # Nested composition operations group under the *parent* class's
-        # tag (Swagger UI groups by tag). All operations under
-        # /<parent>/{id}/... live with the rest of the parent's surface
-        # rather than scattering across the child's tag (#68).
-        op_tag = self._class_tag(parent_class_name)
+        # Nested composition op tag: slot's `openapi.tag` →
+        # target class's explicit `openapi.tag` → parent class's tag
+        # (#86 layers explicit target-side override on top of #68).
+        op_tag = self._nested_op_tag(parent_class_name, target_class_name, slot)
         slot_seg = slot.name
 
         collection = PathItem(parameters=list(parent_path_params))
@@ -2926,9 +2970,9 @@ class OpenAPIGenerator(Generator):
         link_ref = Reference(ref="#/components/schemas/ResourceLink")
         # Body accepts a single link or a batch — clients prefer batch.
         link_body_schema = Schema(oneOf=[link_ref, Schema(type=DataType.ARRAY, items=link_ref)])
-        # Reference attach/detach operations group under the *parent*
-        # class's tag for the same reason as composition (#68).
-        op_tag = self._class_tag(parent_class_name)
+        # Reference attach/detach op tag follows the same precedence as
+        # composition (#86 over #68).
+        op_tag = self._nested_op_tag(parent_class_name, target_class_name, slot)
         slot_seg = slot.name
 
         collection = PathItem(parameters=list(parent_path_params))

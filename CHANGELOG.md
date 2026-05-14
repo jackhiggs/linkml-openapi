@@ -6,6 +6,47 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [Unreleased]
+
+### Changed (wire-affecting)
+
+- **Nested-composition URL segment now comes from the range class's
+  `openapi.path`** when set, not the slot name
+  ([#85](https://github.com/jackhiggs/linkml-openapi/issues/85)).
+  Resolution: slot-level `openapi.path_segment` →
+  **range class's `openapi.path`** (new) → slot name with active
+  path-style. Decouples slot name (singular, matching vocabulary like
+  `dcat:distribution`) from REST URL noun (plural, e.g.
+  `/distributions`). JSON body property key remains the slot name;
+  `x-rdf-property` from `slot_uri` is unchanged.
+  *Wire impact*: schemas with `openapi.path` declared on classes that
+  appear as composition targets see nested URLs change. The dcat3
+  fixture: `/catalogs/{id}/dataset/{ds}/distribution/{id}` →
+  `/catalogs/{id}/datasets/{ds}/distributions/{id}`.
+  `examples/{bookstore,minimal,petstore}/openapi.yaml` are unaffected
+  (no `openapi.path` on their classes).
+
+- **Target class's explicit `openapi.tag` wins over the parent-tag
+  default** for nested composition / reference / deep-chain
+  operations ([#86](https://github.com/jackhiggs/linkml-openapi/issues/86)).
+  Resolution: slot's `openapi.tag` (new) → target's explicit
+  `openapi.tag` → parent's tag (the
+  [#68](https://github.com/jackhiggs/linkml-openapi/issues/68)
+  default). Schemas without explicit `openapi.tag` on target classes
+  keep today's parent-tag grouping; schemas that *do* declare
+  `openapi.tag` on a target now have nested ops Swagger-UI-grouped
+  under the canonical class group.
+
+### Added
+
+- **`tests/fixtures/dcat3-acme.yaml`** — anonymised company-overlay
+  fixture exercising both wire changes. `AcmeDataset extends Dataset`
+  narrows `distribution` to `AcmeDistribution`; both `Distribution`
+  and `AcmeDistribution` declare `openapi.path: distributions` and
+  their own `openapi.tag`. Regression guard for
+  [#85](https://github.com/jackhiggs/linkml-openapi/issues/85) and
+  [#86](https://github.com/jackhiggs/linkml-openapi/issues/86).
+
 ## [0.12.1] — 2026-05-12
 
 ### Fixed

@@ -246,8 +246,8 @@ class TestComposition:
 
     def test_nested_distribution_collection_path_emitted(self, spec):
         """Composition produces nested CRUD paths under the parent."""
-        assert "/datasets/{id}/distribution" in spec["paths"]
-        assert "/datasets/{id}/distribution/{distribution_id}" in spec["paths"]
+        assert "/datasets/{id}/distributions" in spec["paths"]
+        assert "/datasets/{id}/distributions/{distribution_id}" in spec["paths"]
 
     @staticmethod
     def _ref_target(prop: dict) -> str | None:
@@ -511,7 +511,7 @@ class TestPolymorphicResponses:
             # Distribution is `nested_only`: the canonical URL is the deep
             # chained one under its parent Catalog → Dataset, not a flat
             # `/distributions/{id}`.
-            "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution/{id}",
+            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}",
         ],
     )
     def test_non_polymorphic_class_endpoint_uses_plain_ref(self, spec, path):
@@ -542,7 +542,7 @@ class TestPathEmission:
             # Distribution carries `openapi.nested_only: "true"` — the
             # canonical URL is the deep chain under Catalog → Dataset, and
             # the flat `/distributions[/...]` surface is suppressed.
-            "/catalogs/{catalog_id}/dataset/{dataset_id}/distribution/{id}",
+            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}",
             "/catalog-records",
             "/catalog-records/{id}",
         ],

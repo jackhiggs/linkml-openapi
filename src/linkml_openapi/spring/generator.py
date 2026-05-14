@@ -1395,7 +1395,11 @@ public class %(class_name)s {
 
         Priority:
         1. ``openapi.path_segment`` slot annotation — verbatim.
-        2. Slot name with active path-style applied.
+        2. Range class's ``openapi.path`` (#85) — when set, the class's
+           URL noun drives the segment so authors can keep slot names
+           singular (matching the underlying vocabulary, e.g.
+           ``dcat:distribution``) while serving plural REST URLs.
+        3. Slot name with active path-style applied.
         """
         if parent_cls is not None:
             explicit = self._get_slot_annotation_compat(
@@ -1403,6 +1407,12 @@ public class %(class_name)s {
             )
             if explicit:
                 return explicit.strip()
+        if slot.range:
+            range_cls = self._sv.get_class(slot.range)
+            if range_cls is not None:
+                range_path = self._class_annotation(range_cls, "openapi.path")
+                if range_path:
+                    return range_path.strip().lstrip("/")
         return self._apply_path_style(slot.name)
 
     def _induced_slots(self, class_name: str) -> list[SlotDefinition]:
