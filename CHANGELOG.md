@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
-## [Unreleased]
+## [0.14.0] — 2026-05-15
 
 ### Added
 
@@ -39,8 +39,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   had no property to match). Now the injection pass includes the
   root when it's concrete. Abstract roots still omit the property
   (today's behaviour preserved).
-
-### Fixed
 
 - **`slot_usage` narrowing on inherited slot now materialises on the
   child schema** ([#92](https://github.com/jackhiggs/linkml-openapi/issues/92)).
