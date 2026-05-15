@@ -10,6 +10,22 @@ prefixes:
 classes:
   # --- Stock DCAT-3 subset ---
 
+  Catalog:
+    class_uri: dcat:Catalog
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+      openapi.tag: Catalogs
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+      dataset:
+        slot_uri: dcat:dataset
+        range: Dataset
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+
   Dataset:
     class_uri: dcat:Dataset
     annotations:
@@ -33,13 +49,30 @@ classes:
       openapi.path: distributions
       openapi.tag: Distributions
       openapi.nested_only: "true"
-      openapi.parent_path: "Dataset.distribution"
+      openapi.parent_path: "Catalog.dataset/Dataset.distribution"
     attributes:
       id: { identifier: true, required: true }
       title: string
       mediaType: uri
 
   # --- Acme company overlay (fictional) ---
+  # Two-hop chain exercising slot_usage narrowing in the middle hop:
+  #   Catalog → dataset (range narrowed via AcmeDataset.slot_usage to
+  #   AcmeDataset) → distribution (narrowed via
+  #   AcmeDataset.slot_usage to AcmeDistribution)
+
+  AcmeCatalog:
+    is_a: Catalog
+    class_uri: acme:AcmeCatalog
+    annotations:
+      openapi.resource: "true"
+      openapi.path: acme-catalogs
+      openapi.tag: AcmeCatalogs
+    slot_usage:
+      dataset:
+        range: AcmeDataset   # narrowed from Dataset
+    attributes:
+      regulator: string
 
   AcmeDataset:
     is_a: Dataset
@@ -63,7 +96,8 @@ classes:
       openapi.path: distributions
       openapi.tag: AcmeDistributions
       openapi.nested_only: "true"
-      openapi.parent_path: "AcmeDataset.distribution"
+      openapi.parent_path: "AcmeCatalog.dataset/AcmeDataset.distribution"
     attributes:
       s3BucketUri: uri
       kafkaTopic: string
+
