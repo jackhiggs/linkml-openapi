@@ -236,6 +236,13 @@ class OpenAPIGenerator(Generator):
     # ``x-rdf-property`` annotations are emitted in both modes
     # (back-compat for runtimes that walk ``allOf``).
     rdf_resolved_map: bool = False
+    # Emit a top-level ``x-namespaces`` map (CURIE prefix → expanded
+    # IRI) on the spec, taken from the LinkML schema's ``prefixes:``
+    # block (#98). Lets RDF runtimes build JSON-LD ``@context`` blocks
+    # / Turtle prefixes from a single source of truth without
+    # re-parsing the LinkML schema. Default off — schemas regenerate
+    # byte-identically when unset.
+    emit_namespaces: bool = False
     # Names of registered post-processors to apply (in order) after the
     # canonical spec is built but before serialisation. See
     # ``linkml_openapi.post_processors`` for the registry. Each
@@ -318,6 +325,8 @@ class OpenAPIGenerator(Generator):
         self._strip_invalid_parameter_fields(raw)
         self._coerce_numeric_constraints(raw)
         self._inject_rdf_extensions(raw)
+        if self.emit_namespaces:
+            self._inject_namespaces(raw)
         if self.post_processors:
             from linkml_openapi.post_processors import apply as _apply_post
 
@@ -1219,6 +1228,15 @@ class OpenAPIGenerator(Generator):
                 resolved = self._resolve_rdf_properties_for_class(class_name)
                 if resolved:
                     schema["x-rdf-properties-resolved"] = resolved
+                # Companion `x-ranges-resolved` map (#99): slot name →
+                # list of resolved range class names (concrete
+                # descendants of the induced range, after inheritance
+                # + slot_usage narrowing). Lets runtimes know which
+                # concrete classes a property could deserialise to
+                # without walking allOf / oneOf themselves.
+                ranges = self._resolve_ranges_for_class(class_name)
+                if ranges:
+                    schema["x-ranges-resolved"] = ranges
 
     def _resolve_rdf_properties_for_class(self, class_name: str) -> dict[str, str]:
         """Build the flattened slot_name → RDF predicate IRI map for a class.
@@ -1237,6 +1255,58 @@ class OpenAPIGenerator(Generator):
                 # so PyYAML's safe-dumper can serialise the map.
                 resolved[str(slot.name)] = str(self.schemaview.expand_curie(slot.slot_uri))
         return resolved
+
+    def _resolve_ranges_for_class(self, class_name: str) -> dict[str, list[str]]:
+        """Build the flattened slot_name → [range class names] map (#99).
+
+        Walks each induced slot; for class-typed ranges, expands to the
+        list of concrete classes a payload property could deserialise
+        to (the range itself plus concrete descendants). Skips slots
+        whose range is a scalar / enum / built-in type.
+        """
+        cls = self.schemaview.get_class(class_name)
+        if cls is None:
+            return {}
+        ranges: dict[str, list[str]] = {}
+        for slot in self._induced_slots_iter(class_name):
+            if not slot.range:
+                continue
+            range_cls = self.schemaview.get_class(slot.range)
+            if range_cls is None:
+                continue
+            descendants = self._concrete_descendants_including_self(slot.range)
+            if descendants:
+                ranges[str(slot.name)] = [str(d) for d in descendants]
+        return ranges
+
+    def _inject_namespaces(self, raw: dict) -> None:
+        """Emit the LinkML schema's prefix map as a top-level
+        ``x-namespaces`` extension (#98).
+
+        Lets RDF runtimes (spring-rdf, JSON-LD adapters, Turtle
+        emitters) build their context / prefix declarations from a
+        single source of truth without re-parsing the LinkML schema.
+        Wire-format-agnostic — the runtime decides whether to render
+        as JSON-LD ``@context``, Turtle ``@prefix``, or RDF/XML
+        namespace declarations.
+
+        Schemas with no ``prefixes:`` block emit no ``x-namespaces``.
+        """
+        prefixes = getattr(self.schemaview.schema, "prefixes", None) or {}
+        ns: dict[str, str] = {}
+        for entry in prefixes.values() if hasattr(prefixes, "values") else prefixes:
+            # Each entry is a Prefix model (or dict); both have
+            # ``prefix_prefix`` + ``prefix_reference`` attrs / keys.
+            pfx = getattr(entry, "prefix_prefix", None) or (
+                entry.get("prefix_prefix") if isinstance(entry, dict) else None
+            )
+            ref = getattr(entry, "prefix_reference", None) or (
+                entry.get("prefix_reference") if isinstance(entry, dict) else None
+            )
+            if pfx and ref:
+                ns[str(pfx)] = str(ref)
+        if ns:
+            raw["x-namespaces"] = ns
 
     # --- Operation builders ------------------------------------------------
 
@@ -1840,8 +1910,20 @@ class OpenAPIGenerator(Generator):
 
             mapping: dict[str, str] = {}
             seen: dict[str, str] = {}
-            for sub_name in concrete:
+            # When the polymorphic root is itself concrete (not abstract /
+            # mixin and carries its own ``openapi.type_value``), include
+            # it in the injection so the wire payload satisfies the
+            # discriminator. The use-site (`_class_response_ref`) already
+            # includes the root in the ``oneOf`` + ``mapping`` for this
+            # case; without injection here the root's component schema
+            # has no ``resourceType`` property to dispatch against (#95).
+            inject_candidates = list(concrete)
+            if not cls.abstract and not cls.mixin and self._type_value(cls):
+                inject_candidates.insert(0, class_name)
+            for sub_name in inject_candidates:
                 tv = self._type_value(sv.get_class(sub_name))
+                if tv is None:
+                    continue
                 if tv in seen:
                     raise ValueError(
                         f"Duplicate openapi.type_value {tv!r} on classes "

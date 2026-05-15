@@ -2369,8 +2369,7 @@ class TestRangeClassPathSegmentAndTargetTag:
         spec = self._spec()
         assert "/catalogs/{id}/datasets/{dataset_id}/distributions" in spec["paths"]
         assert (
-            "/catalogs/{id}/datasets/{dataset_id}/distributions/{distribution_id}"
-            in spec["paths"]
+            "/catalogs/{id}/datasets/{dataset_id}/distributions/{distribution_id}" in spec["paths"]
         )
         # Singular slot-name version is not emitted at any depth.
         assert not any("/distribution/" in p or p.endswith("/distribution") for p in spec["paths"])
@@ -2381,10 +2380,7 @@ class TestRangeClassPathSegmentAndTargetTag:
         up the range class's path; canonical chain rooted at
         AcmeCatalog."""
         spec = self._spec()
-        assert (
-            "/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions"
-            in spec["paths"]
-        )
+        assert "/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions" in spec["paths"]
         assert (
             "/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions/{acme_distribution_id}"
             in spec["paths"]
@@ -2427,9 +2423,9 @@ class TestRangeClassPathSegmentAndTargetTag:
         """`AcmeDistribution.openapi.tag: AcmeDistributions` wins over
         AcmeCatalog / AcmeDataset tags on nested ops."""
         spec = self._spec()
-        op = spec["paths"][
-            "/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions"
-        ]["get"]
+        op = spec["paths"]["/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions"][
+            "get"
+        ]
         assert op["tags"] == ["AcmeDistributions"]
 
     def test_target_tag_wins_on_deep_chain(self):
@@ -2437,9 +2433,7 @@ class TestRangeClassPathSegmentAndTargetTag:
         chain. The leaf's explicit `openapi.tag` wins over the
         immediate URL parent (#68 default)."""
         spec = self._spec()
-        op = spec["paths"][
-            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"
-        ]["get"]
+        op = spec["paths"]["/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"]["get"]
         assert op["tags"] == ["Distributions"]
 
     def test_flat_path_keeps_class_tag(self):
@@ -2462,10 +2456,7 @@ class TestCanonicalOnlyNestedSuppression:
         """Distribution has parent_path: Catalog.dataset/Dataset.distribution
         and nested_only: true. The full canonical chain item path emits."""
         spec = self._spec()
-        assert (
-            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"
-            in spec["paths"]
-        )
+        assert "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}" in spec["paths"]
 
     def test_non_canonical_intermediate_suppressed(self):
         """Without #88, intermediate single-hop `/datasets/{id}/distributions`
@@ -2478,10 +2469,7 @@ class TestCanonicalOnlyNestedSuppression:
         assert "/datasets/{id}/distributions/{distribution_id}" not in spec["paths"]
         assert "/acme-datasets/{id}/distributions" not in spec["paths"]
         # Canonical chains kept.
-        assert (
-            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"
-            in spec["paths"]
-        )
+        assert "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}" in spec["paths"]
         assert (
             "/acme-catalogs/{acme_catalog_id}/acme-datasets/{acme_dataset_id}/distributions/{id}"
             in spec["paths"]
@@ -2642,6 +2630,132 @@ class TestSlotUsageNarrowingMaterialises:
         if local is not None:
             assert "title" not in local.get("properties", {})
             assert "mediaType" not in local.get("properties", {})
+
+
+class TestNonAbstractDiscriminatorRoot:
+    """Coverage for #95 — when the polymorphic root is concrete (not
+    abstract / mixin) and carries its own ``openapi.type_value``, the
+    root's component schema must also carry the discriminator field —
+    otherwise wire payloads for the root fail the discriminator
+    dispatch."""
+
+    _SCHEMA = """
+id: https://example.org/na
+name: na
+default_range: string
+classes:
+  Resource:
+    # NOT abstract — instantiable directly
+    annotations:
+      openapi.resource: "true"
+      openapi.discriminator: resourceType
+      openapi.type_value: Resource
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+  Dataset:
+    is_a: Resource
+    annotations:
+      openapi.resource: "true"
+      openapi.type_value: Dataset
+    attributes:
+      description: string
+"""
+
+    def test_concrete_root_has_resource_type_property(self):
+        spec = _generate_from_string(self._SCHEMA)
+        resource = spec["components"]["schemas"]["Resource"]
+        props = resource.get("properties") or {}
+        rt = props.get("resourceType")
+        assert rt is not None, (
+            "concrete polymorphic root must declare the discriminator "
+            "field; today's spec is wire-inconsistent without it"
+        )
+        assert rt == {"type": "string", "enum": ["Resource"], "default": "Resource"}
+
+    def test_subclass_still_pins_its_own_value(self):
+        spec = _generate_from_string(self._SCHEMA)
+        dataset = spec["components"]["schemas"]["Dataset"]
+        local = next((p for p in dataset.get("allOf", []) if "properties" in p), dataset)
+        props = local.get("properties", dataset.get("properties", {}))
+        rt = props["resourceType"]
+        assert rt == {"type": "string", "enum": ["Dataset"], "default": "Dataset"}
+
+    def test_abstract_root_still_omits_property(self):
+        """Sanity: when the root IS abstract, no property is injected
+        (the dcat3 fixture's behaviour stays unchanged)."""
+        schema = self._SCHEMA.replace(
+            "Resource:\n    # NOT abstract — instantiable directly\n    annotations:",
+            "Resource:\n    abstract: true\n    annotations:",
+        )
+        spec = _generate_from_string(schema)
+        resource = spec["components"]["schemas"]["Resource"]
+        props = resource.get("properties") or {}
+        assert "resourceType" not in props
+
+
+class TestEmitNamespaces:
+    """Coverage for #98 — top-level `x-namespaces` prefix map."""
+
+    @staticmethod
+    def _spec(emit_namespaces: bool = False) -> dict:
+        gen = OpenAPIGenerator(str(FIXTURES / "dcat3-acme.yaml"), emit_namespaces=emit_namespaces)
+        return yaml.safe_load(gen.serialize())
+
+    def test_default_off(self):
+        spec = self._spec(emit_namespaces=False)
+        assert "x-namespaces" not in spec
+
+    def test_emits_full_prefix_map(self):
+        spec = self._spec(emit_namespaces=True)
+        ns = spec.get("x-namespaces", {})
+        # dcat3-acme declares dcat, dct, acme — all should be present.
+        assert ns.get("dcat") == "http://www.w3.org/ns/dcat#"
+        assert ns.get("dct") == "http://purl.org/dc/terms/"
+        assert ns.get("acme") == "https://example.com/acme/"
+
+
+class TestRangesResolved:
+    """Coverage for #99 — `x-ranges-resolved` companion map alongside
+    `x-rdf-properties-resolved`."""
+
+    @staticmethod
+    def _spec(rdf_resolved_map: bool = False) -> dict:
+        gen = OpenAPIGenerator(str(FIXTURES / "dcat3-acme.yaml"), rdf_resolved_map=rdf_resolved_map)
+        return yaml.safe_load(gen.serialize())
+
+    def test_default_off(self):
+        """No `x-ranges-resolved` blocks appear without the flag."""
+        spec = self._spec(rdf_resolved_map=False)
+        for name, schema in spec["components"]["schemas"].items():
+            assert "x-ranges-resolved" not in schema, f"unexpected on {name}"
+
+    def test_wide_range_on_parent(self):
+        """`Dataset.distribution` ranges on Distribution which has one
+        concrete descendant (AcmeDistribution). The resolved map lists
+        both."""
+        spec = self._spec(rdf_resolved_map=True)
+        ds = spec["components"]["schemas"]["Dataset"]
+        rr = ds.get("x-ranges-resolved", {})
+        assert sorted(rr.get("distribution", [])) == ["AcmeDistribution", "Distribution"]
+
+    def test_narrowed_range_on_subclass(self):
+        """`AcmeDataset.slot_usage.distribution.range: AcmeDistribution`
+        narrows the inherited slot — the resolved map reflects the
+        narrowing (only AcmeDistribution)."""
+        spec = self._spec(rdf_resolved_map=True)
+        ad = spec["components"]["schemas"]["AcmeDataset"]
+        rr = ad.get("x-ranges-resolved", {})
+        assert rr.get("distribution") == ["AcmeDistribution"]
+
+    def test_scalar_ranges_omitted(self):
+        """Slots whose range is a scalar (string/int/uri) are not in
+        the map — only class-typed ranges."""
+        spec = self._spec(rdf_resolved_map=True)
+        ds = spec["components"]["schemas"]["Dataset"]
+        rr = ds.get("x-ranges-resolved", {})
+        assert "id" not in rr
+        assert "title" not in rr
 
 
 class TestRequestUpdateClass:
