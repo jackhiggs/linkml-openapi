@@ -134,8 +134,26 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
         "runtimes (spring-rdf, etc.) look up any field's predicate "
         "directly on the subclass schema without chasing `$ref` chains. "
         "Per-property `x-rdf-property` annotations are emitted in both "
-        "modes (back-compat). Defaults to off — schemas regenerate "
-        "byte-identically when unset."
+        "modes (back-compat). Also emits an `x-ranges-resolved` map "
+        "(slot name → list of resolved range class names) so runtimes "
+        "can deserialise into typed objects without walking `allOf` / "
+        "`oneOf`. Defaults to off — schemas regenerate byte-identically "
+        "when unset."
+    ),
+)
+@click.option(
+    "--emit-namespaces",
+    "emit_namespaces",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit a top-level `x-namespaces` map on the spec (CURIE prefix "
+        "→ expanded IRI) drawn from the LinkML schema's `prefixes:` "
+        "block. Lets RDF runtimes build JSON-LD `@context` blocks / "
+        "Turtle `@prefix` declarations / RDF-XML namespaces from a "
+        "single source of truth without re-parsing the LinkML schema. "
+        "Defaults to off — schemas regenerate byte-identically when "
+        "unset."
     ),
 )
 @click.option(

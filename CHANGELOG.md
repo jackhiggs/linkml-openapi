@@ -8,6 +8,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`--emit-namespaces` flag** (`emit_namespaces=` kwarg) — emits a
+  top-level `x-namespaces` map (CURIE prefix → expanded IRI) on the
+  spec, drawn from the LinkML schema's `prefixes:` block
+  ([#98](https://github.com/jackhiggs/linkml-openapi/issues/98)). RDF
+  runtimes build JSON-LD `@context` blocks / Turtle `@prefix` decls /
+  RDF-XML namespaces from a single source of truth without re-parsing
+  the LinkML schema. Default off; byte-identical when unset.
+- **`x-ranges-resolved` companion map** alongside
+  `x-rdf-properties-resolved` (also gated behind `--rdf-resolved-map`)
+  — slot name → list of concrete range class names, with `is_a` +
+  `slot_usage` narrowing already resolved
+  ([#99](https://github.com/jackhiggs/linkml-openapi/issues/99)). Lets
+  runtimes deserialise into typed objects without chasing
+  `oneOf`/`$ref`. `AcmeDataset.distribution` resolves to
+  `[AcmeDistribution]` (narrowed), `Dataset.distribution` to
+  `[Distribution, AcmeDistribution]` (wide).
+
+### Fixed
+
+- **Concrete polymorphic root now gets its discriminator field
+  injected** ([#95](https://github.com/jackhiggs/linkml-openapi/issues/95)).
+  When the root class is not `abstract: true` and has its own
+  `openapi.type_value`, the use-site `oneOf` + `discriminator
+  mapping` already included it — but the root's component schema was
+  missing the `resourceType` property declaration, making the spec
+  wire-inconsistent (a `{"resourceType": "Resource", ...}` payload
+  had no property to match). Now the injection pass includes the
+  root when it's concrete. Abstract roots still omit the property
+  (today's behaviour preserved).
+
 ### Fixed
 
 - **`slot_usage` narrowing on inherited slot now materialises on the
