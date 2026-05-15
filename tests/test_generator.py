@@ -2363,21 +2363,32 @@ class TestRangeClassPathSegmentAndTargetTag:
     def test_nested_segment_uses_range_class_openapi_path_stock_dcat(self):
         """`Dataset.distribution` slot ranges on `Distribution` which has
         `openapi.path: distributions`. The nested URL segment is the
-        class's plural noun, not the singular slot name."""
+        class's plural noun, not the singular slot name. With #88's
+        canonical-only suppression the URL appears under the canonical
+        chain (Catalog → Dataset → Distribution)."""
         spec = self._spec()
-        assert "/datasets/{id}/distributions" in spec["paths"]
-        assert "/datasets/{id}/distributions/{distribution_id}" in spec["paths"]
-        # And the singular slot-name version does NOT leak through.
-        assert "/datasets/{id}/distribution" not in spec["paths"]
+        assert "/catalogs/{id}/datasets/{dataset_id}/distributions" in spec["paths"]
+        assert (
+            "/catalogs/{id}/datasets/{dataset_id}/distributions/{distribution_id}"
+            in spec["paths"]
+        )
+        # Singular slot-name version is not emitted at any depth.
+        assert not any("/distribution/" in p or p.endswith("/distribution") for p in spec["paths"])
 
     def test_nested_segment_uses_range_class_openapi_path_acme_overlay(self):
         """`AcmeDataset.distribution` narrows the range to
-        `AcmeDistribution` (`openapi.path: distributions`). The URL
-        picks up the range class's path."""
+        `AcmeDistribution` (`openapi.path: distributions`); URL picks
+        up the range class's path; canonical chain rooted at
+        AcmeCatalog."""
         spec = self._spec()
-        assert "/acme-datasets/{id}/distributions" in spec["paths"]
-        assert "/acme-datasets/{id}/distributions/{acme_distribution_id}" in spec["paths"]
-        assert "/acme-datasets/{id}/distribution" not in spec["paths"]
+        assert (
+            "/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions"
+            in spec["paths"]
+        )
+        assert (
+            "/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions/{acme_distribution_id}"
+            in spec["paths"]
+        )
 
     def test_jsonbody_property_key_is_still_slot_name_singular(self):
         """The decoupling: URL is plural (from class), JSON property
@@ -2406,26 +2417,29 @@ class TestRangeClassPathSegmentAndTargetTag:
 
     def test_target_tag_wins_on_nested_composition(self):
         """`Distribution` has `openapi.tag: Distributions` explicitly;
-        nested ops at `/datasets/{id}/distributions` inherit that tag
-        rather than the parent `Dataset.openapi.tag: Datasets`."""
+        nested ops on the canonical chain inherit that tag rather than
+        the parent `Catalog`/`Dataset` tag."""
         spec = self._spec()
-        op = spec["paths"]["/datasets/{id}/distributions"]["get"]
+        op = spec["paths"]["/catalogs/{id}/datasets/{dataset_id}/distributions"]["get"]
         assert op["tags"] == ["Distributions"]
 
     def test_target_tag_wins_on_acme_overlay(self):
         """`AcmeDistribution.openapi.tag: AcmeDistributions` wins over
-        `AcmeDataset.openapi.tag: AcmeDatasets` on nested ops."""
+        AcmeCatalog / AcmeDataset tags on nested ops."""
         spec = self._spec()
-        op = spec["paths"]["/acme-datasets/{id}/distributions"]["get"]
+        op = spec["paths"][
+            "/acme-catalogs/{id}/acme-datasets/{acme_dataset_id}/distributions"
+        ]["get"]
         assert op["tags"] == ["AcmeDistributions"]
 
     def test_target_tag_wins_on_deep_chain(self):
-        """Distribution is `nested_only` and reachable via the deep chain
-        `Dataset.distribution`. The leaf's explicit `openapi.tag` wins
-        over the immediate URL parent (#68 default)."""
+        """Distribution is `nested_only` and reachable via the deep
+        chain. The leaf's explicit `openapi.tag` wins over the
+        immediate URL parent (#68 default)."""
         spec = self._spec()
-        # The deep-chained item path emitted under Dataset's chain.
-        op = spec["paths"]["/datasets/{dataset_id}/distributions/{id}"]["get"]
+        op = spec["paths"][
+            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"
+        ]["get"]
         assert op["tags"] == ["Distributions"]
 
     def test_flat_path_keeps_class_tag(self):
@@ -2445,27 +2459,33 @@ class TestCanonicalOnlyNestedSuppression:
         return yaml.safe_load(gen.serialize())
 
     def test_canonical_chain_item_path_emits(self):
-        """Distribution has parent_path: Dataset.distribution and
-        nested_only: true. The canonical chain item path emits."""
+        """Distribution has parent_path: Catalog.dataset/Dataset.distribution
+        and nested_only: true. The full canonical chain item path emits."""
         spec = self._spec()
-        assert "/datasets/{dataset_id}/distributions/{id}" in spec["paths"]
+        assert (
+            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"
+            in spec["paths"]
+        )
 
     def test_non_canonical_intermediate_suppressed(self):
-        """Without #88, single-hop intermediate `/datasets/{id}/distributions`
+        """Without #88, intermediate single-hop `/datasets/{id}/distributions`
         would emit (Dataset's own composition walk). With nested_only +
-        parent_path, that's suppressed — the only addressable URL is the
-        canonical chain."""
+        parent_path, that path is suppressed — only the canonical chain
+        rooted at Catalog (or AcmeCatalog) survives."""
         spec = self._spec()
-        # No intermediate single-hop emission for the nested_only class.
-        # The fixture's only declared chain is Dataset.distribution
-        # (single-hop), so canonical IS single-hop and there's nothing
-        # else to suppress — but the principle is exercised by the
-        # acme overlay: AcmeDistribution.parent_path is
-        # AcmeDataset.distribution, so /datasets/{id}/distributions
-        # (stock Dataset-rooted) should never carry AcmeDistribution.
-        assert "/datasets/{dataset_id}/distributions/{id}" in spec["paths"]
-        # The acme chain is rooted at AcmeDataset.
-        assert "/acme-datasets/{acme_dataset_id}/distributions/{id}" in spec["paths"]
+        # Intermediate single-hop paths suppressed.
+        assert "/datasets/{id}/distributions" not in spec["paths"]
+        assert "/datasets/{id}/distributions/{distribution_id}" not in spec["paths"]
+        assert "/acme-datasets/{id}/distributions" not in spec["paths"]
+        # Canonical chains kept.
+        assert (
+            "/catalogs/{catalog_id}/datasets/{dataset_id}/distributions/{id}"
+            in spec["paths"]
+        )
+        assert (
+            "/acme-catalogs/{acme_catalog_id}/acme-datasets/{acme_dataset_id}/distributions/{id}"
+            in spec["paths"]
+        )
 
     def test_flat_top_level_path_still_suppressed(self):
         """nested_only's original meaning (no flat top-level path) is
@@ -2530,6 +2550,98 @@ class TestRdfResolvedMap:
         assert (
             props["distribution"].get("x-rdf-property") == "http://www.w3.org/ns/dcat#distribution"
         )
+
+
+class TestSlotUsageNarrowingMaterialises:
+    """Coverage for #92 — when a subclass narrows an inherited slot
+    via ``slot_usage`` (e.g. ``slot_usage.distribution.range:
+    AcmeDistribution``), the narrowing must materialise in the
+    subclass's emitted schema (override the inherited wide ``oneOf``)
+    rather than silently letting the child inherit the parent's
+    unnarrowed shape. Exercises a two-hop chain through the
+    ``dcat3-acme.yaml`` fixture."""
+
+    @staticmethod
+    def _spec() -> dict:
+        gen = OpenAPIGenerator(str(FIXTURES / "dcat3-acme.yaml"))
+        return yaml.safe_load(gen.serialize())
+
+    def test_parent_keeps_wide_oneof(self):
+        """The base class still carries the polymorphic ``oneOf`` at
+        the use site so any parent instance can hold either subtype."""
+        spec = self._spec()
+        dataset = spec["components"]["schemas"]["Dataset"]
+        dist = dataset["properties"]["distribution"]
+        items = dist["items"]
+        assert "oneOf" in items
+        refs = sorted(r["$ref"].rsplit("/", 1)[-1] for r in items["oneOf"])
+        assert refs == ["AcmeDistribution", "Distribution"]
+
+    def test_subclass_narrows_distribution(self):
+        """``AcmeDataset.slot_usage.distribution.range: AcmeDistribution``
+        produces a local property override in AcmeDataset's allOf
+        block — items become a bare ``$ref AcmeDistribution`` instead
+        of inheriting Dataset's ``oneOf``."""
+        spec = self._spec()
+        acme = spec["components"]["schemas"]["AcmeDataset"]
+        # Find the local block inside allOf that carries properties.
+        local = next((p for p in acme["allOf"] if "properties" in p), None)
+        assert local is not None, "AcmeDataset should re-declare the narrowed slot"
+        dist = local["properties"]["distribution"]
+        items = dist["items"]
+        assert items == {"$ref": "#/components/schemas/AcmeDistribution"}, (
+            f"expected narrowed $ref AcmeDistribution, got {items}"
+        )
+
+    def test_subclass_narrows_dataset_in_acme_catalog(self):
+        """Same fix applied to a different chain hop:
+        ``AcmeCatalog.slot_usage.dataset.range: AcmeDataset`` narrows
+        the inherited Catalog.dataset slot."""
+        spec = self._spec()
+        ac = spec["components"]["schemas"]["AcmeCatalog"]
+        local = next((p for p in ac["allOf"] if "properties" in p), None)
+        assert local is not None
+        ds = local["properties"]["dataset"]
+        items = ds["items"]
+        assert items == {"$ref": "#/components/schemas/AcmeDataset"}, (
+            f"expected narrowed $ref AcmeDataset, got {items}"
+        )
+
+    def test_narrowed_slot_keeps_rdf_property(self):
+        """The local re-emission of the narrowed slot still carries
+        ``x-rdf-property`` from ``slot_uri`` — narrowing doesn't drop
+        the RDF predicate."""
+        spec = self._spec()
+        acme = spec["components"]["schemas"]["AcmeDataset"]
+        local = next((p for p in acme["allOf"] if "properties" in p), None)
+        dist = local["properties"]["distribution"]
+        assert dist.get("x-rdf-property") == "http://www.w3.org/ns/dcat#distribution"
+
+    def test_two_hop_canonical_chain_emits(self):
+        """End-to-end: the path generated through the narrowed
+        two-hop chain (``AcmeCatalog → AcmeDataset → AcmeDistribution``)
+        is emitted because ``openapi.parent_path`` resolves through
+        the inherited+narrowed slots."""
+        spec = self._spec()
+        assert (
+            "/acme-catalogs/{acme_catalog_id}/acme-datasets/{acme_dataset_id}/distributions/{id}"
+            in spec["paths"]
+        )
+
+    def test_subclass_without_narrowing_still_inherits_via_allof(self):
+        """Sanity: a subclass that doesn't declare ``slot_usage`` for
+        the inherited slot still inherits it via ``allOf`` (no local
+        re-emission). The fix only kicks in on actual range
+        narrowing."""
+        spec = self._spec()
+        # AcmeDistribution extends Distribution and doesn't narrow any
+        # inherited slot — so its allOf local block should not carry
+        # ``title`` or ``mediaType`` (those are inherited as-is).
+        ad = spec["components"]["schemas"]["AcmeDistribution"]
+        local = next((p for p in ad["allOf"] if "properties" in p), None)
+        if local is not None:
+            assert "title" not in local.get("properties", {})
+            assert "mediaType" not in local.get("properties", {})
 
 
 class TestRequestUpdateClass:

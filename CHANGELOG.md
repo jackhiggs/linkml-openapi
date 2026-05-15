@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [Unreleased]
+
+### Fixed
+
+- **`slot_usage` narrowing on inherited slot now materialises on the
+  child schema** ([#92](https://github.com/jackhiggs/linkml-openapi/issues/92)).
+  Before: a subclass that declared
+  `slot_usage.<slot>.range: <SubRange>` silently kept the parent's
+  wider `oneOf` on the wire — the child inherited the unnarrowed
+  shape via `allOf` and the narrowing was lost. After: the subclass
+  re-emits the slot locally in its `allOf` block with the narrowed
+  range, so `AcmeDataset.distribution` materialises as
+  `$ref: AcmeDistribution` instead of inheriting Dataset's
+  `oneOf: [Distribution, AcmeDistribution]`. The slot's
+  `x-rdf-property` is preserved on the re-emitted local copy.
+
+### Changed
+
+- **`tests/fixtures/dcat3-acme.yaml`** extended to a two-hop chain
+  (`AcmeCatalog → AcmeDataset → AcmeDistribution`, narrowed at both
+  hops via `slot_usage`) as a permanent regression guard for #92.
+
 ## [0.13.0] — 2026-05-14
 
 ### Changed (wire-affecting)

@@ -631,7 +631,7 @@ class OpenAPIGenerator(Generator):
         ``flatten_inheritance``.
         """
         if cls.is_a and not self.flatten_inheritance:
-            parent_slot_names = set(self._induced_slots_by_name(cls.is_a))
+            parent_slots_by_name = {s.name: s for s in self._induced_slots_iter(cls.is_a)}
             local_properties: dict[str, Schema | Reference] = {}
             local_required: list[str] = []
             for slot in self._induced_slots_iter(cls.name):
@@ -640,7 +640,16 @@ class OpenAPIGenerator(Generator):
                 self._record_rdf_slot_uri(cls.name, slot)
                 if self._is_slot_body_excluded(cls, slot):
                     continue
-                if slot.name not in parent_slot_names:
+                # Emit locally when:
+                # * the slot is new on this class (not inherited), OR
+                # * the subclass narrowed an inherited slot via
+                #   ``slot_usage`` (e.g. range narrowed to a subclass) —
+                #   without re-emitting locally, the child inherits the
+                #   parent's wider ``oneOf`` and the narrowing is lost
+                #   on the wire (#92).
+                parent_slot = parent_slots_by_name.get(slot.name)
+                is_narrowed = parent_slot is not None and self._slot_was_narrowed(slot, parent_slot)
+                if slot.name not in parent_slots_by_name or is_narrowed:
                     local_properties[slot.name] = self._slot_to_schema(slot)
                     if slot.required:
                         local_required.append(slot.name)
@@ -1400,6 +1409,30 @@ class OpenAPIGenerator(Generator):
         if slot.range and slot.range in self._excluded_classes:
             return True
         return False
+
+    def _slot_was_narrowed(self, child_slot: SlotDefinition, parent_slot: SlotDefinition) -> bool:
+        """True when the child class narrowed an inherited slot's range
+        via ``slot_usage`` (#92).
+
+        Detected by comparing the induced slot's range on the child vs
+        the parent. LinkML resolves ``slot_usage`` inline so the
+        narrowed range shows up on the child's induced slot; a parent
+        with ``range: Distribution`` and a child with
+        ``slot_usage.distribution.range: AcmeDistribution`` produces
+        child.range == "AcmeDistribution" != parent.range ==
+        "Distribution".
+
+        Returns False when ranges match (no narrowing). Cardinality
+        / required / format changes are not considered "narrowed" here
+        — they don't change the response shape's class enough to
+        warrant re-emitting; only range narrowing materially affects
+        the inherited ``oneOf``.
+        """
+        return bool(
+            child_slot.range
+            and parent_slot.range
+            and str(child_slot.range) != str(parent_slot.range)
+        )
 
     def _is_slot_body_excluded(self, cls: ClassDefinition, slot: SlotDefinition) -> bool:
         """True when the slot is excluded from the parent class's body schema.
