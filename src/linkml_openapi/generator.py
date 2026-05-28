@@ -243,6 +243,14 @@ class OpenAPIGenerator(Generator):
     # re-parsing the LinkML schema. Default off — schemas regenerate
     # byte-identically when unset.
     emit_namespaces: bool = False
+    # Extra HTTP status codes (4xx / 5xx) to declare on every emitted
+    # operation, drawn from ``openapi.error_responses`` schema annotation
+    # or the ``--error-responses`` CLI flag. None falls back to the
+    # schema annotation; an empty list means "skip injection" even when
+    # the schema declares one (CLI explicit override). Each code is
+    # described with its standard IANA reason phrase and references
+    # the same body schema as today's ``404`` / ``422`` (#104).
+    error_responses: list[int] | None = None
     # Names of registered post-processors to apply (in order) after the
     # canonical spec is built but before serialisation. See
     # ``linkml_openapi.post_processors`` for the registry. Each
@@ -272,6 +280,17 @@ class OpenAPIGenerator(Generator):
         # :meth:`emit_name_mappings` write a sibling file the user
         # passes to ``openapi-generator-cli``.
         self._codegen_name_mappings: dict[str, str] = {}
+        # Subclass names that materially narrowed an inherited slot's
+        # range via ``slot_usage`` (#92). Tracked per-build so the
+        # discriminator pass (#106) can detect when a polymorphic root
+        # has a narrowing descendant — emitting a schema-level
+        # discriminator on the root in that case produces uncompilable
+        # Java under openapi-generator's inheritance-based template
+        # (covariant return types). When ``--codegen-friendly`` is on
+        # and the root has any narrowing descendant, the schema-level
+        # discriminator block is skipped and dispatch falls back to
+        # use-site ``oneOf`` (which Jackson handles fine).
+        self._narrowing_subclasses: set[str] = set()
         # Multi-level composition recursion happens inside
         # `_add_composition_paths`; the stack tracks which composition
         # targets are currently being emitted so a cyclic
@@ -282,6 +301,11 @@ class OpenAPIGenerator(Generator):
         # None when error_schema is off. Cached per-build so each operation
         # builder doesn't re-resolve.
         self._error_class_name: str | None = self._resolve_error_class()
+        # Extra HTTP error codes to inject on every operation (#104).
+        # CLI / kwarg wins over the ``openapi.error_responses`` schema
+        # annotation; ``None`` means "use the schema annotation if any";
+        # an explicit empty list means "skip injection regardless".
+        self._extra_error_codes: list[int] = self._resolve_error_response_codes()
         # Resolve the active path-style: CLI / Python kwarg wins over the
         # schema-level annotation, which falls back to `"snake_case"`. We
         # validate once here so per-call-site renderers can just check the
@@ -563,6 +587,23 @@ class OpenAPIGenerator(Generator):
         if self._needs_resource_link and "ResourceLink" not in schemas:
             schemas["ResourceLink"] = self._build_resource_link_schema()
 
+        # Drop empty PathItems — those whose every operation slot
+        # (get/put/post/patch/delete) is ``None`` and which have no
+        # ``$ref``. They emit invalid OpenAPI (a path with only
+        # ``parameters:`` declared is structurally invalid; most
+        # validators reject it). Surfaces when
+        # ``openapi.path_template`` produces a deep-item path but
+        # ``openapi.operations`` lists only collection-level ops, or
+        # when an auto-derived flat item path has no item-level ops
+        # to attach (#109).
+        paths = {url: item for url, item in paths.items() if self._path_item_has_operations(item)}
+
+        # Merge schema-level / CLI ``openapi.error_responses`` codes
+        # into every operation. Default-off (codes list is empty) so
+        # schemas without the annotation regenerate byte-identically
+        # (#104).
+        self._apply_extra_error_responses(paths)
+
         # Apply the path prefix to every emitted `paths:` key. Single
         # transformation point so composition / chain / templated /
         # synthetic-inverse paths all pick it up uniformly. Validates
@@ -658,6 +699,9 @@ class OpenAPIGenerator(Generator):
                 #   on the wire (#92).
                 parent_slot = parent_slots_by_name.get(slot.name)
                 is_narrowed = parent_slot is not None and self._slot_was_narrowed(slot, parent_slot)
+                if is_narrowed:
+                    # Track narrowing for the discriminator pass (#106).
+                    self._narrowing_subclasses.add(cls.name)
                 if slot.name not in parent_slots_by_name or is_narrowed:
                     local_properties[slot.name] = self._slot_to_schema(slot)
                     if slot.required:
@@ -843,8 +887,18 @@ class OpenAPIGenerator(Generator):
         sv = self.schemaview
         excluded = self._excluded_classes
 
+        def _exposed(name: str) -> bool:
+            # #110 — `openapi.expose: "false"` keeps the class as a
+            # referenceable component schema (other paths can `$ref`
+            # it) but suppresses path emission for that class itself.
+            cls = sv.get_class(name)
+            if cls is None:
+                return True
+            expose = self._class_annotation(cls, "openapi.expose")
+            return not (expose is not None and expose.strip().lower() == "false")
+
         if self.resource_filter:
-            result = [c for c in self.resource_filter if c not in excluded]
+            result = [c for c in self.resource_filter if c not in excluded and _exposed(c)]
         else:
             annotated = [
                 name
@@ -853,6 +907,7 @@ class OpenAPIGenerator(Generator):
                 and _is_truthy(
                     self._class_annotation(sv.get_class(name), "openapi.resource") or False
                 )
+                and _exposed(name)
             ]
             if annotated:
                 result = annotated
@@ -864,6 +919,7 @@ class OpenAPIGenerator(Generator):
                     and not sv.get_class(name).abstract
                     and not sv.get_class(name).mixin
                     and list(self._induced_slots_iter(name))
+                    and _exposed(name)
                 ]
         self._resource_classes_cache = result
         return result
@@ -1367,6 +1423,100 @@ class OpenAPIGenerator(Generator):
             )
         return custom
 
+    # IANA standard reason phrases for the 4xx / 5xx codes we expect
+    # authors to declare via ``openapi.error_responses`` (#104). Any
+    # unrecognised code falls back to ``f"HTTP {code}"``.
+    _HTTP_REASON_PHRASES: ClassVar[dict[int, str]] = {
+        400: "Bad request",
+        401: "Unauthorized",
+        402: "Payment required",
+        403: "Forbidden",
+        404: "Not found",
+        405: "Method not allowed",
+        406: "Not acceptable",
+        408: "Request timeout",
+        409: "Conflict",
+        410: "Gone",
+        412: "Precondition failed",
+        413: "Payload too large",
+        415: "Unsupported media type",
+        422: "Validation error",
+        423: "Locked",
+        424: "Failed dependency",
+        428: "Precondition required",
+        429: "Too many requests",
+        451: "Unavailable for legal reasons",
+        500: "Server error",
+        501: "Not implemented",
+        502: "Bad gateway",
+        503: "Service unavailable",
+        504: "Gateway timeout",
+    }
+
+    def _resolve_error_response_codes(self) -> list[int]:
+        """Resolve the list of extra error codes from CLI/kwarg or
+        schema annotation. CLI wins; an explicit empty list means
+        "skip injection regardless." Returns [] when nothing is set,
+        which keeps today's output byte-identical."""
+        if self.error_responses is not None:
+            codes = list(self.error_responses)
+        else:
+            raw = self._schema_annotation("openapi.error_responses")
+            if not raw:
+                return []
+            codes = []
+            for token in raw.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    codes.append(int(token))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"openapi.error_responses contains non-integer token "
+                        f"{token!r}; expected comma-separated HTTP status codes."
+                    ) from exc
+        for code in codes:
+            if not (400 <= code <= 599):
+                raise ValueError(
+                    f"openapi.error_responses code {code} is outside the 4xx/5xx "
+                    "range; only client- and server-error codes are accepted."
+                )
+        # De-duplicate while preserving the declared order.
+        seen: set[int] = set()
+        unique: list[int] = []
+        for code in codes:
+            if code in seen:
+                continue
+            seen.add(code)
+            unique.append(code)
+        return unique
+
+    def _http_reason(self, code: int) -> str:
+        """Standard reason phrase for an HTTP status code (#104)."""
+        return self._HTTP_REASON_PHRASES.get(code, f"HTTP {code}")
+
+    def _apply_extra_error_responses(self, paths: dict[str, PathItem]) -> None:
+        """Merge ``openapi.error_responses`` codes into every operation
+        on every emitted PathItem (#104). Existing responses for the
+        same code are preserved (the schema author's per-op override
+        wins over the global list)."""
+        if not self._extra_error_codes:
+            return
+        methods = ("get", "put", "post", "patch", "delete", "options", "head", "trace")
+        for item in paths.values():
+            for method in methods:
+                op = getattr(item, method, None)
+                if op is None:
+                    continue
+                responses = dict(op.responses or {})
+                for code in self._extra_error_codes:
+                    key = str(code)
+                    if key in responses:
+                        continue
+                    responses[key] = self._error_response(self._http_reason(code))
+                op.responses = responses
+
     # --- Profiles --------------------------------------------------------
 
     _PROFILE_LIST_KEYS = ("exclude_classes", "exclude_slots", "include_classes", "include_slots")
@@ -1679,7 +1829,19 @@ class OpenAPIGenerator(Generator):
         # The parent carries its own ``discriminator`` block (attached
         # in ``_apply_discriminators``) so codegens dispatch correctly
         # without inline ``oneOf`` at the use site (#64).
-        if self.codegen_friendly:
+        # **But** when any descendant narrowed an inherited slot via
+        # ``slot_usage``, the parent-discriminator strategy collides
+        # with Java covariance (#106) — ``_apply_discriminators`` then
+        # skips the parent's discriminator block, and we must fall
+        # back to inline ``oneOf`` here too so dispatch still works.
+        has_narrowing = any(d in self._narrowing_subclasses for d in descendants)
+        opt_out = False
+        cls = sv.get_class(class_name)
+        if cls is not None:
+            opt_out = (
+                self._class_annotation(cls, "openapi.codegen_inheritance") or ""
+            ).strip().lower() == "false"
+        if self.codegen_friendly and not has_narrowing and not opt_out:
             return Reference(ref=f"#/components/schemas/{class_name}")
         oneof = [Reference(ref=f"#/components/schemas/{n}") for n in descendants]
         schema = Schema(oneOf=oneof)
@@ -1920,28 +2082,58 @@ class OpenAPIGenerator(Generator):
             inject_candidates = list(concrete)
             if not cls.abstract and not cls.mixin and self._type_value(cls):
                 inject_candidates.insert(0, class_name)
+            # When the discriminator's propertyName matches the root's
+            # ``openapi.legacy_type_field``, the wire payload carries
+            # the legacy value (e.g. ``com.example.Dataset``) — not the
+            # simple class name. Switch the mapping keys to follow the
+            # wire so dispatch actually resolves (#107).
+            root_legacy_field = self._class_annotation(cls, "openapi.legacy_type_field")
+            use_legacy_keys = root_legacy_field is not None and root_legacy_field.strip() == field
             for sub_name in inject_candidates:
-                tv = self._type_value(sv.get_class(sub_name))
+                sub_cls = sv.get_class(sub_name)
+                tv = self._type_value(sub_cls)
                 if tv is None:
                     continue
-                if tv in seen:
+                if use_legacy_keys:
+                    legacy_value = self._class_annotation(sub_cls, "openapi.legacy_type_value")
+                    mapping_key = legacy_value.strip() if legacy_value else tv
+                else:
+                    mapping_key = tv
+                if mapping_key in seen:
                     raise ValueError(
-                        f"Duplicate openapi.type_value {tv!r} on classes "
-                        f"{seen[tv]!r} and {sub_name!r}; values must be unique "
+                        f"Duplicate discriminator value {mapping_key!r} on classes "
+                        f"{seen[mapping_key]!r} and {sub_name!r}; values must be unique "
                         "across a discriminator group."
                     )
-                seen[tv] = sub_name
-                mapping[tv] = f"#/components/schemas/{sub_name}"
+                seen[mapping_key] = sub_name
+                mapping[mapping_key] = f"#/components/schemas/{sub_name}"
 
-            for tv, sub_name in seen.items():
-                self._inject_subclass_type_value(schemas, sub_name, field, tv)
+            # The injection still pins the wire field with the same
+            # value used as the mapping key — legacy value when the
+            # discriminator is the legacy field, type_value otherwise.
+            for key, sub_name in seen.items():
+                self._inject_subclass_type_value(schemas, sub_name, field, key)
 
             # Codegen-friendly mode: attach the ``discriminator`` block
             # (with ``mapping``) to the parent's component schema so a
             # use-site ``$ref`` to the parent carries dispatch info for
             # codegens. Default mode keeps the dispatch info inline at
             # the use sites only (today's authoring-clarity output).
-            if self.codegen_friendly:
+            # **Skip** when any descendant narrows an inherited slot
+            # via ``slot_usage`` (#106): openapi-generator's Java
+            # template then generates a covariant subtype field
+            # (``List<FusionDistribution>`` overriding
+            # ``List<Distribution>``) that doesn't compile. Falling
+            # back to use-site ``oneOf`` keeps Jackson dispatch working
+            # without the inheritance collision. Authors who want the
+            # discriminator regardless can drop ``slot_usage`` and
+            # rely on use-site oneOf only.
+            descendants = self._concrete_descendants_including_self(class_name)
+            has_narrowing = any(d in self._narrowing_subclasses for d in descendants)
+            opt_out = (
+                self._class_annotation(cls, "openapi.codegen_inheritance") or ""
+            ).strip().lower() == "false"
+            if self.codegen_friendly and not has_narrowing and not opt_out:
                 parent_schema = schemas.get(class_name)
                 if isinstance(parent_schema, Schema):
                     parent_schema.discriminator = Discriminator(
@@ -2098,11 +2290,19 @@ class OpenAPIGenerator(Generator):
             return
         local = self._writable_local_schema(schema)
         properties = dict(local.properties or {})
-        properties[field] = Schema(
-            type=DataType.STRING,
-            enum=[value],
-            default=value,
-        )
+        # Codegen-friendly: drop the single-value ``enum`` so codegens
+        # don't synthesise a one-element enum per subtype. Matches the
+        # primary discriminator's behaviour (#64) — extending it to
+        # ``openapi.legacy_type_field`` was the missing consistency
+        # leg (#108).
+        if self.codegen_friendly:
+            properties[field] = Schema(type=DataType.STRING, default=value)
+        else:
+            properties[field] = Schema(
+                type=DataType.STRING,
+                enum=[value],
+                default=value,
+            )
         local.properties = properties
         required = list(local.required or [])
         if field not in required:
@@ -2111,21 +2311,155 @@ class OpenAPIGenerator(Generator):
         if codegen_name:
             self._codegen_name_mappings[field] = codegen_name
 
-    def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
-        media_types = self._get_media_types(cls)
-        array_schema = Schema(
+    # --- Pagination & list envelope (#105) ------------------------------
+
+    # Pagination dialects: schema-author tag → list of (param name,
+    # OpenAPI type, description). Both ``openapi.pagination`` and
+    # ``openapi.list_query_params`` are read off the target class; the
+    # same setting applies whether the list is top-level CRUD or a
+    # nested composition/reference op (one source of truth).
+    _PAGINATION_DIALECTS: ClassVar[dict[str, list[tuple[str, str, str]]]] = {
+        "cursor": [
+            ("cursor", "string", "Opaque cursor returned by a previous page."),
+            ("pageSize", "integer", "Maximum number of items per page."),
+        ],
+        "page-size": [
+            ("page", "integer", "1-indexed page number."),
+            ("size", "integer", "Page size."),
+        ],
+        "page-offset": [
+            ("offset", "integer", "Zero-based offset into the result set."),
+            ("limit", "integer", "Maximum number of items to return."),
+        ],
+        "none": [],
+    }
+
+    def _list_response_items_schema(self, class_name: str) -> Schema:
+        """The default 200 schema for a list op — an array whose
+        ``items`` is the resource's response ref. Extracted so the
+        envelope wrapper (#105) shares the same items shape."""
+        return Schema(
             type=DataType.ARRAY,
             items=self._class_response_ref(class_name),
         )
+
+    def _list_response_schema(self, cls: ClassDefinition, class_name: str) -> Schema | Reference:
+        """Resolve the 200-response schema for a list op. When the
+        class declares ``openapi.list_envelope: <ClassName>`` the
+        response becomes a ``$ref`` to the envelope class (which must
+        exist in the schema); otherwise it's today's bare array
+        (#105). The envelope class is responsible for declaring the
+        array slot that points at the listed resource type."""
+        envelope = self._class_annotation(cls, "openapi.list_envelope")
+        if not envelope:
+            return self._list_response_items_schema(class_name)
+        envelope = envelope.strip()
+        if self.schemaview.get_class(envelope) is None:
+            raise ValueError(
+                f"openapi.list_envelope on {class_name!r} refers to undefined "
+                f"class {envelope!r}; add the class to the schema or remove "
+                "the annotation."
+            )
+        return Reference(ref=f"#/components/schemas/{envelope}")
+
+    def _pagination_params(self, cls: ClassDefinition) -> list[Parameter]:
+        """Build query Parameters for the dialect declared by
+        ``openapi.pagination``. Unknown dialects raise; ``none`` /
+        unset emits no parameters."""
+        dialect = self._class_annotation(cls, "openapi.pagination")
+        if not dialect:
+            return []
+        dialect = dialect.strip()
+        if dialect not in self._PAGINATION_DIALECTS:
+            raise ValueError(
+                f"openapi.pagination on {cls.name!r}: unknown dialect "
+                f"{dialect!r}; expected one of "
+                f"{sorted(self._PAGINATION_DIALECTS)}."
+            )
+        return [
+            Parameter(
+                name=name,
+                param_in=ParameterLocation.QUERY,
+                required=False,
+                description=description,
+                param_schema=Schema(type=DataType(otype)),
+            )
+            for name, otype, description in self._PAGINATION_DIALECTS[dialect]
+        ]
+
+    def _extra_list_query_params(self, cls: ClassDefinition) -> list[Parameter]:
+        """Decode ``openapi.list_query_params`` (JSON array string) into
+        Parameter objects. Each entry is ``{name, type, description?}``
+        plus optional ``required: true/false``. Unparseable JSON or
+        unknown OpenAPI scalar types raise (#105)."""
+        raw = self._class_annotation(cls, "openapi.list_query_params")
+        if not raw:
+            return []
+        import json
+
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: value must be a "
+                f"JSON array of `{{name, type, description?}}` objects; got "
+                f"{raw!r} ({exc})."
+            ) from exc
+        if not isinstance(decoded, list):
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: expected a JSON "
+                f"array, got {type(decoded).__name__}."
+            )
+        params: list[Parameter] = []
+        valid_types = {"string", "integer", "number", "boolean", "array"}
+        for idx, entry in enumerate(decoded):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: entry {idx} is not a JSON object."
+                )
+            name = entry.get("name")
+            otype = entry.get("type")
+            if not name or not otype:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: entry "
+                    f"{idx} must declare `name` and `type`."
+                )
+            if otype not in valid_types:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: entry "
+                    f"{idx} type {otype!r} is not one of {sorted(valid_types)}."
+                )
+            params.append(
+                Parameter(
+                    name=str(name),
+                    param_in=ParameterLocation.QUERY,
+                    required=bool(entry.get("required", False)),
+                    description=entry.get("description"),
+                    param_schema=Schema(type=DataType(otype)),
+                )
+            )
+        return params
+
+    def _list_extras(self, cls: ClassDefinition) -> list[Parameter]:
+        """Combined pagination + extra-list-query-params builder, used
+        by every list-op emission site (top-level, composition, ref,
+        chain). Resolved off the target class so the same paging /
+        filtering shape applies wherever the resource is listed."""
+        return self._pagination_params(cls) + self._extra_list_query_params(cls)
+
+    def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
+        media_types = self._get_media_types(cls)
+        response_schema = self._list_response_schema(cls, class_name)
+        params = list(self._make_query_params(cls)) + self._list_extras(cls)
         return Operation(
             summary=f"List {_to_path_segment(class_name).replace('_', ' ')}",
             operationId=f"list_{_to_path_segment(class_name)}",
             tags=[self._class_tag(class_name)],
-            parameters=self._make_query_params(cls),
+            parameters=params,
             responses={
                 "200": Response(
                     description=f"List of {class_name} objects",
-                    content=self._content_for(array_schema, media_types),
+                    content=self._content_for(response_schema, media_types),
                 )
             },
         )
@@ -2844,6 +3178,18 @@ class OpenAPIGenerator(Generator):
                 if op is not None:
                     op.tags = [tag]
 
+    @staticmethod
+    def _path_item_has_operations(item: PathItem) -> bool:
+        """True when a PathItem declares at least one HTTP operation
+        or a ``$ref``. False for parameters-only PathItems, which are
+        structurally invalid OpenAPI (#109)."""
+        if getattr(item, "ref", None):
+            return True
+        for method in ("get", "put", "post", "patch", "delete", "options", "head", "trace"):
+            if getattr(item, method, None) is not None:
+                return True
+        return False
+
     _PATH_TEMPLATE_PLACEHOLDER_RE = PATH_TEMPLATE_PLACEHOLDER_RE
 
     @staticmethod
@@ -2991,7 +3337,11 @@ class OpenAPIGenerator(Generator):
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)
         target_ref = self._class_response_ref(target_class_name)
-        array_schema = Schema(type=DataType.ARRAY, items=target_ref)
+        # Honour ``openapi.list_envelope`` on the target (#105) — the
+        # nested list shares the envelope shape with the top-level
+        # list op so clients see a uniform paged structure.
+        list_response_schema = self._list_response_schema(target_cls, target_class_name)
+        list_extras = self._list_extras(target_cls)
         # Nested composition op tag: slot's `openapi.tag` →
         # target class's explicit `openapi.tag` → parent class's tag
         # (#86 layers explicit target-side override on top of #68).
@@ -3003,10 +3353,11 @@ class OpenAPIGenerator(Generator):
             summary=f"List {target_class_name} composed in {parent_class_name}.{slot.name}",
             operationId=f"list_{_to_snake_case(parent_class_name)}_{slot_seg}",
             tags=[op_tag],
+            parameters=list_extras or None,
             responses={
                 "200": Response(
                     description=f"{target_class_name} list",
-                    content=self._content_for(array_schema, media_types),
+                    content=self._content_for(list_response_schema, media_types),
                 ),
                 "404": self._error_response("Parent not found"),
             },
@@ -3165,8 +3516,9 @@ class OpenAPIGenerator(Generator):
 
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)
-        target_ref = self._class_response_ref(target_class_name)
-        array_schema = Schema(type=DataType.ARRAY, items=target_ref)
+        # Envelope-aware list response (#105).
+        list_response_schema = self._list_response_schema(target_cls, target_class_name)
+        list_extras = self._list_extras(target_cls)
 
         link_ref = Reference(ref="#/components/schemas/ResourceLink")
         # Body accepts a single link or a batch — clients prefer batch.
@@ -3181,10 +3533,11 @@ class OpenAPIGenerator(Generator):
             summary=f"List {target_class_name} attached to {parent_class_name}.{slot.name}",
             operationId=f"list_{_to_snake_case(parent_class_name)}_{slot_seg}",
             tags=[op_tag],
+            parameters=list_extras or None,
             responses={
                 "200": Response(
                     description=f"{target_class_name} list",
-                    content=self._content_for(array_schema, media_types),
+                    content=self._content_for(list_response_schema, media_types),
                 ),
                 "404": self._error_response("Parent not found"),
             },

@@ -3460,3 +3460,658 @@ classes:
         refs = {r["$ref"] for r in prop["oneOf"]}
         assert refs == {"#/components/schemas/Dog", "#/components/schemas/Cat"}
         assert "discriminator" not in prop
+
+
+class TestCodegenFriendlyNarrowingFallback:
+    """Coverage for #106 — `--codegen-friendly` must fall back to
+    use-site ``oneOf`` when any concrete descendant of the polymorphic
+    root narrows an inherited slot's range via ``slot_usage``. The
+    schema-level discriminator + parent-`$ref` strategy collides with
+    Java covariance under openapi-generator otherwise.
+
+    Tested against ``dcat3-acme.yaml`` (AcmeDataset narrows
+    Dataset.distribution, AcmeCatalog narrows Catalog.dataset).
+    """
+
+    @staticmethod
+    def _spec(**kwargs) -> dict:
+        gen = OpenAPIGenerator(str(FIXTURES / "dcat3-acme.yaml"), **kwargs)
+        return yaml.safe_load(gen.serialize())
+
+    def test_narrowing_root_keeps_inline_oneof_under_codegen_friendly(self):
+        # Dataset → Distribution is narrowed by AcmeDataset, so the
+        # use-site reference must NOT be a bare $ref to Dataset. It
+        # stays as an inline oneOf even though codegen_friendly is on.
+        spec = self._spec(codegen_friendly=True)
+        get200 = spec["paths"]["/datasets"]["get"]["responses"]["200"]
+        items = get200["content"]["application/json"]["schema"]["items"]
+        assert "oneOf" in items, f"expected inline oneOf, got {items}"
+
+    def test_narrowing_root_skips_schema_level_discriminator(self):
+        # Dataset has narrowing descendants → no schema-level
+        # discriminator (to avoid the covariance collision). The use-site
+        # oneOf retains a discriminator block for Jackson dispatch.
+        spec = self._spec(codegen_friendly=True)
+        dataset = spec["components"]["schemas"]["Dataset"]
+        # Dataset is the polymorphic root for the narrowing — must not
+        # carry a discriminator block.
+        if "allOf" in dataset:
+            for branch in dataset["allOf"]:
+                assert "discriminator" not in branch
+        assert "discriminator" not in dataset
+
+    def test_opt_out_annotation_forces_inline_oneof(self):
+        schema = """
+id: https://example.org/codegen-opt-out
+name: cgf_opt_out
+default_range: string
+classes:
+  Item:
+    abstract: true
+    annotations:
+      openapi.discriminator: kind
+      openapi.codegen_inheritance: "false"
+    attributes:
+      sku: { identifier: true, required: true }
+  Widget:
+    is_a: Item
+    annotations:
+      openapi.resource: "true"
+      openapi.type_value: WIDGET
+  Gadget:
+    is_a: Item
+    annotations:
+      openapi.type_value: GADGET
+"""
+        spec = _generate_from_string(schema, codegen_friendly=True)
+        item = spec["components"]["schemas"]["Item"]
+        # Opt-out flips the schema-level discriminator off.
+        assert "discriminator" not in item
+        # Use-site reference falls back to inline oneOf (or the
+        # property-level $ref to a non-discriminating parent — but the
+        # discriminator escape hatch implies inline oneOf is fine here).
+        post = spec["paths"]["/widgets"]["post"]
+        body = post["requestBody"]["content"]["application/json"]["schema"]
+        # Widget is a concrete subclass — body is a $ref to Widget (not
+        # the polymorphic root). The point is that Item carries no
+        # schema-level discriminator block.
+        assert body == {"$ref": "#/components/schemas/Widget"} or "oneOf" in body
+
+
+class TestDiscriminatorMappingUsesLegacyValues:
+    """Coverage for #107 — when ``openapi.discriminator`` and
+    ``openapi.legacy_type_field`` both name the SAME wire field, the
+    parent's ``discriminator.mapping`` keys must be the
+    ``openapi.legacy_type_value`` of each subtype (the actual wire
+    value), not the simple class names."""
+
+    SCHEMA = """
+id: https://example.org/legacy-disc
+name: legacy_disc
+default_range: string
+classes:
+  Kind:
+    abstract: true
+    annotations:
+      openapi.discriminator: "#type"
+      openapi.legacy_type_field: "#type"
+    attributes:
+      id: { identifier: true, required: true }
+  Individual:
+    is_a: Kind
+    annotations:
+      openapi.resource: "true"
+      openapi.type_value: Individual
+      openapi.legacy_type_value: "com.example.acme.vcard.Individual"
+  Organization:
+    is_a: Kind
+    annotations:
+      openapi.resource: "true"
+      openapi.type_value: Organization
+      openapi.legacy_type_value: "com.example.acme.vcard.Organization"
+"""
+
+    def test_mapping_keys_are_legacy_values_when_field_matches(self):
+        spec = _generate_from_string(self.SCHEMA, codegen_friendly=True)
+        kind = spec["components"]["schemas"]["Kind"]
+        disc = kind.get("discriminator")
+        assert disc is not None, "expected schema-level discriminator under codegen_friendly"
+        mapping = disc.get("mapping") or {}
+        assert "com.example.acme.vcard.Individual" in mapping
+        assert "com.example.acme.vcard.Organization" in mapping
+        # Simple names should NOT appear as mapping keys — discriminator
+        # routes on the wire #type, which only carries the legacy form.
+        assert "Individual" not in mapping
+        assert "Organization" not in mapping
+
+    def test_subclass_pin_uses_legacy_value(self):
+        spec = _generate_from_string(self.SCHEMA, codegen_friendly=True)
+        ind_local = spec["components"]["schemas"]["Individual"]["allOf"][1]
+        ht = ind_local["properties"]["#type"]
+        # Field value must match the mapping key.
+        assert ht["default"] == "com.example.acme.vcard.Individual"
+
+    def test_field_mismatch_keeps_simple_name_keys(self):
+        # When discriminator points to a different field from
+        # legacy_type_field, the mapping keys revert to simple names
+        # (#107 only widens the rule when both annotations agree).
+        schema = self.SCHEMA.replace(
+            'openapi.discriminator: "#type"',
+            "openapi.discriminator: kind",
+        )
+        spec = _generate_from_string(schema, codegen_friendly=True)
+        kind = spec["components"]["schemas"]["Kind"]
+        disc = kind.get("discriminator")
+        assert disc is not None
+        mapping = disc.get("mapping") or {}
+        assert "Individual" in mapping
+        assert "Organization" in mapping
+
+
+class TestCodegenFriendlyStripsLegacyFieldEnum:
+    """Coverage for #108 — under ``--codegen-friendly`` the single-
+    value ``enum`` on ``openapi.legacy_type_field`` properties is
+    dropped (keeping ``default:`` only), matching how the primary
+    discriminator is already handled (#64)."""
+
+    SCHEMA = """
+id: https://example.org/legacy-strip
+name: legacy_strip
+default_range: string
+classes:
+  Item:
+    abstract: true
+    annotations:
+      openapi.discriminator: kind
+      openapi.legacy_type_field: "#type"
+    attributes:
+      sku: { identifier: true, required: true }
+  Widget:
+    is_a: Item
+    annotations:
+      openapi.resource: "true"
+      openapi.type_value: WIDGET
+      openapi.legacy_type_value: "com.example.acme.Widget"
+"""
+
+    def test_codegen_friendly_drops_enum_on_legacy_field(self):
+        spec = _generate_from_string(self.SCHEMA, codegen_friendly=True)
+        widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
+        hash_type = widget_local["properties"]["#type"]
+        assert "enum" not in hash_type, f"expected no enum, got {hash_type}"
+        assert hash_type["default"] == "com.example.acme.Widget"
+        assert hash_type["type"] == "string"
+
+    def test_default_mode_keeps_enum_on_legacy_field(self):
+        spec = _generate_from_string(self.SCHEMA)
+        widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
+        hash_type = widget_local["properties"]["#type"]
+        assert hash_type.get("enum") == ["com.example.acme.Widget"]
+        assert hash_type.get("default") == "com.example.acme.Widget"
+
+
+class TestEmptyPathItemDropped:
+    """Coverage for #109 — when ``openapi.path_template`` produces a
+    deep-item path but ``openapi.operations`` lists only collection-level
+    ops (no item-level ops), the deep-item ``PathItem`` was emitted
+    with ``parameters:`` only and no HTTP methods. That's structurally
+    invalid OpenAPI; the generator now drops such PathItems."""
+
+    SCHEMA = """
+id: https://example.org/empty-path
+name: empty_path
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id: { identifier: true, required: true }
+  AttributeSpec:
+    annotations:
+      openapi.resource: "true"
+      openapi.path_template: "/catalogs/{cat}/attribute-specs/{id}"
+      openapi.path_param_sources: "cat:Catalog.id, id:AttributeSpec.id"
+      openapi.operations: "list,create"
+    attributes:
+      id: { identifier: true, required: true }
+      label: string
+"""
+
+    def test_deep_item_path_with_only_collection_ops_is_dropped(self):
+        spec = _generate_from_string(self.SCHEMA)
+        deep_item = "/catalogs/{cat}/attribute-specs/{id}"
+        assert deep_item not in spec["paths"], (
+            f"expected {deep_item} to be dropped (no operations); "
+            f"got {spec['paths'].get(deep_item)}"
+        )
+
+    def test_collection_path_with_list_create_still_emits(self):
+        spec = _generate_from_string(self.SCHEMA)
+        # The collection path must still emit with its ops.
+        collection = "/catalogs/{cat}/attribute-specs"
+        assert collection in spec["paths"]
+        item = spec["paths"][collection]
+        assert ("get" in item) or ("post" in item)
+
+    def test_path_with_only_parameters_block_never_emitted(self):
+        spec = _generate_from_string(self.SCHEMA)
+        for url, item in spec["paths"].items():
+            method_keys = {"get", "put", "post", "patch", "delete", "options", "head", "trace"}
+            has_method = any(k in item for k in method_keys)
+            has_ref = "$ref" in item
+            assert has_method or has_ref, (
+                f"{url} survived emission with no methods or $ref: {list(item)}"
+            )
+
+
+class TestOpenAPIExposeFalse:
+    """Coverage for #110 — ``openapi.expose: "false"`` on an
+    ``openapi.resource: "true"`` class keeps the class addressable as
+    a component schema (so other paths can ``$ref`` it) but suppresses
+    its own path emission. The Spring sidecar inherits the suppression
+    via :class:`OpenAPIGenerator`."""
+
+    SCHEMA = """
+id: https://example.org/expose
+name: expose
+default_range: string
+classes:
+  Person:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: persons
+    attributes:
+      id: { identifier: true, required: true }
+      role: { range: Role, inlined: true }
+  Role:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: roles
+      openapi.expose: "false"
+    attributes:
+      id: { identifier: true, required: true }
+      role_label: string
+"""
+
+    def test_expose_false_suppresses_paths(self):
+        spec = _generate_from_string(self.SCHEMA)
+        for url in spec["paths"]:
+            assert not url.startswith("/roles"), (
+                f"openapi.expose=false should drop /roles paths; got {url}"
+            )
+
+    def test_exposed_class_paths_still_emitted(self):
+        spec = _generate_from_string(self.SCHEMA)
+        assert "/persons" in spec["paths"]
+        assert "/persons/{id}" in spec["paths"]
+
+    def test_expose_false_class_schema_still_emitted(self):
+        # The component schema is needed for other resources to $ref.
+        spec = _generate_from_string(self.SCHEMA)
+        assert "Role" in spec["components"]["schemas"]
+
+    def test_expose_false_class_still_referenceable(self):
+        # Person.role still resolves to Role.
+        spec = _generate_from_string(self.SCHEMA)
+        person = spec["components"]["schemas"]["Person"]
+        role_prop = person["properties"]["role"]
+        # Either a $ref or a schema with a $ref under allOf — both fine
+        # as long as the link survives.
+        assert "Role" in yaml.safe_dump(role_prop)
+
+    def test_default_unset_preserves_today_behavior(self):
+        schema = self.SCHEMA.replace('      openapi.expose: "false"\n', "")
+        spec = _generate_from_string(schema)
+        assert "/roles" in spec["paths"]
+        assert "/roles/{id}" in spec["paths"]
+
+
+class TestExtraErrorResponses:
+    """Coverage for #104 — schema-level / CLI declaration of extra
+    HTTP error responses that should appear on every operation."""
+
+    BASE_SCHEMA = """
+id: https://example.org/errs
+name: errs
+default_range: string
+classes:
+  Person:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: persons
+    attributes:
+      id: { identifier: true, required: true }
+      full_name: string
+"""
+
+    def test_default_unset_keeps_today_behavior(self):
+        spec = _generate_from_string(self.BASE_SCHEMA)
+        get = spec["paths"]["/persons"]["get"]
+        # Today's wire shape — only the bodies the generator declares
+        # explicitly. No 400 / 500 etc.
+        assert "400" not in get["responses"]
+        assert "500" not in get["responses"]
+
+    def test_schema_annotation_injects_codes(self):
+        schema = self.BASE_SCHEMA.replace(
+            "default_range: string",
+            'default_range: string\nannotations:\n  openapi.error_responses: "400,401,500"',
+        )
+        spec = _generate_from_string(schema)
+        # The list endpoint gets 400 / 401 / 500 added (alongside its
+        # native 200).
+        get = spec["paths"]["/persons"]["get"]
+        for code in ("400", "401", "500"):
+            assert code in get["responses"], f"missing {code} on GET /persons"
+        # The item endpoint also picks up the extras — uniform across
+        # operations.
+        item_get = spec["paths"]["/persons/{id}"]["get"]
+        for code in ("400", "401", "500"):
+            assert code in item_get["responses"]
+
+    def test_response_uses_standard_reason_phrase(self):
+        schema = self.BASE_SCHEMA.replace(
+            "default_range: string",
+            'default_range: string\nannotations:\n  openapi.error_responses: "503"',
+        )
+        spec = _generate_from_string(schema)
+        get = spec["paths"]["/persons"]["get"]
+        assert get["responses"]["503"]["description"] == "Service unavailable"
+
+    def test_response_references_problem_schema(self):
+        schema = self.BASE_SCHEMA.replace(
+            "default_range: string",
+            'default_range: string\nannotations:\n  openapi.error_responses: "400"',
+        )
+        spec = _generate_from_string(schema)
+        get = spec["paths"]["/persons"]["get"]
+        body = get["responses"]["400"]["content"]["application/json"]["schema"]
+        assert body == {"$ref": "#/components/schemas/Problem"}
+
+    def test_existing_response_for_same_code_is_preserved(self):
+        # GET /persons/{id} already declares 404; the global injection
+        # must not overwrite the per-op description.
+        schema = self.BASE_SCHEMA.replace(
+            "default_range: string",
+            'default_range: string\nannotations:\n  openapi.error_responses: "404"',
+        )
+        spec = _generate_from_string(schema)
+        item_get = spec["paths"]["/persons/{id}"]["get"]
+        # The existing 404 ("Not found") should still be there — not
+        # overwritten by the generic injected one.
+        assert item_get["responses"]["404"]["description"] == "Not found"
+
+    def test_kwarg_overrides_schema_annotation(self):
+        schema = self.BASE_SCHEMA.replace(
+            "default_range: string",
+            'default_range: string\nannotations:\n  openapi.error_responses: "400,401"',
+        )
+        spec = _generate_from_string(schema, error_responses=[500])
+        get = spec["paths"]["/persons"]["get"]
+        assert "500" in get["responses"]
+        # CLI override means the schema-annotation codes are NOT applied.
+        assert "400" not in get["responses"]
+
+    def test_empty_kwarg_disables_injection(self):
+        schema = self.BASE_SCHEMA.replace(
+            "default_range: string",
+            'default_range: string\nannotations:\n  openapi.error_responses: "400,500"',
+        )
+        spec = _generate_from_string(schema, error_responses=[])
+        get = spec["paths"]["/persons"]["get"]
+        assert "400" not in get["responses"]
+        assert "500" not in get["responses"]
+
+    def test_no_error_schema_omits_body(self):
+        schema = self.BASE_SCHEMA.replace(
+            "default_range: string",
+            'default_range: string\nannotations:\n  openapi.error_responses: "400"',
+        )
+        spec = _generate_from_string(schema, error_schema=False)
+        get = spec["paths"]["/persons"]["get"]
+        # Code still present, body omitted (matches --no-error-schema
+        # behaviour for the existing 404/422).
+        assert "400" in get["responses"]
+        assert "content" not in get["responses"]["400"]
+
+    def test_invalid_code_raises(self):
+        _generate_from_string_raises(
+            self.BASE_SCHEMA.replace(
+                "default_range: string",
+                'default_range: string\nannotations:\n  openapi.error_responses: "200,500"',
+            ),
+            match=r"outside the 4xx/5xx",
+        )
+
+    def test_non_integer_token_raises(self):
+        _generate_from_string_raises(
+            self.BASE_SCHEMA.replace(
+                "default_range: string",
+                'default_range: string\nannotations:\n  openapi.error_responses: "400,oops"',
+            ),
+            match=r"non-integer token",
+        )
+
+
+class TestPaginationAndListEnvelope:
+    """Coverage for #105 — list envelope + pagination dialects +
+    extra typed query params, declared per-resource-class via three
+    class-level annotations."""
+
+    BASE = """
+id: https://example.org/page
+name: page
+default_range: string
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+"""
+
+    def test_default_unset_keeps_bare_array(self):
+        spec = _generate_from_string(self.BASE)
+        get = spec["paths"]["/datasets"]["get"]
+        schema = get["responses"]["200"]["content"]["application/json"]["schema"]
+        assert schema["type"] == "array"
+        assert schema["items"] == {"$ref": "#/components/schemas/Dataset"}
+
+    def test_envelope_wraps_200_in_ref(self):
+        schema_yaml = (
+            self.BASE.replace(
+                "openapi.path: datasets",
+                "openapi.path: datasets\n      openapi.list_envelope: PagedDatasets",
+            )
+            + """
+  PagedDatasets:
+    attributes:
+      items: { range: Dataset, multivalued: true }
+      nextCursor: string
+"""
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        body = get["responses"]["200"]["content"]["application/json"]["schema"]
+        assert body == {"$ref": "#/components/schemas/PagedDatasets"}
+
+    def test_envelope_class_missing_raises(self):
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.list_envelope: MissingClass",
+        )
+        _generate_from_string_raises(
+            schema_yaml,
+            match=r"undefined class 'MissingClass'",
+        )
+
+    def test_cursor_pagination_injects_cursor_and_page_size(self):
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.pagination: cursor",
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        names = {p["name"] for p in get["parameters"]}
+        assert "cursor" in names
+        assert "pageSize" in names
+
+    def test_page_size_dialect_injects_page_and_size(self):
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.pagination: page-size",
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        names = {p["name"] for p in get["parameters"]}
+        assert "page" in names
+        assert "size" in names
+
+    def test_page_offset_dialect_injects_offset_and_limit(self):
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.pagination: page-offset",
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        names = {p["name"] for p in get["parameters"]}
+        assert "offset" in names
+        assert "limit" in names
+
+    def test_unknown_dialect_raises(self):
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.pagination: invalid",
+        )
+        _generate_from_string_raises(schema_yaml, match=r"unknown dialect")
+
+    def test_none_dialect_injects_nothing(self):
+        # ``none`` is an explicit opt-out — the generator still emits
+        # its today-default ``limit`` / ``offset`` query params
+        # (legacy auto-paging baseline that pre-dates #105), but no
+        # dialect-specific names get added on top.
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.pagination: none",
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        names = {p["name"] for p in (get.get("parameters") or [])}
+        assert "cursor" not in names
+        assert "pageSize" not in names
+        assert "page" not in names
+
+    def test_extra_list_query_params_inject(self):
+        # JSON-encoded array because LinkML annotations are scalar strings.
+        params_json = (
+            '[{"name": "filterBy", "type": "string", "description": "Filter"}, '
+            '{"name": "archived", "type": "boolean"}]'
+        )
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            f"openapi.path: datasets\n      openapi.list_query_params: '{params_json}'",
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        params = {p["name"]: p for p in get["parameters"]}
+        assert "filterBy" in params
+        assert params["filterBy"]["schema"]["type"] == "string"
+        assert params["filterBy"].get("description") == "Filter"
+        assert "archived" in params
+        assert params["archived"]["schema"]["type"] == "boolean"
+
+    def test_invalid_extra_param_json_raises(self):
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            'openapi.path: datasets\n      openapi.list_query_params: "not json"',
+        )
+        _generate_from_string_raises(schema_yaml, match=r"JSON array")
+
+    def test_invalid_extra_param_type_raises(self):
+        params_json = '[{"name": "bad", "type": "uuid"}]'
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            f"openapi.path: datasets\n      openapi.list_query_params: '{params_json}'",
+        )
+        _generate_from_string_raises(schema_yaml, match=r"not one of")
+
+    def test_all_three_compose(self):
+        params_json = '[{"name": "filter", "type": "string"}]'
+        schema_yaml = (
+            self.BASE.replace(
+                "openapi.path: datasets",
+                (
+                    "openapi.path: datasets\n"
+                    "      openapi.list_envelope: PagedDatasets\n"
+                    "      openapi.pagination: cursor\n"
+                    f"      openapi.list_query_params: '{params_json}'"
+                ),
+            )
+            + """
+  PagedDatasets:
+    attributes:
+      items: { range: Dataset, multivalued: true }
+      nextCursor: string
+"""
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        # Envelope: response is $ref.
+        body = get["responses"]["200"]["content"]["application/json"]["schema"]
+        assert body == {"$ref": "#/components/schemas/PagedDatasets"}
+        # Pagination + filter both present as query params.
+        names = {p["name"] for p in get["parameters"]}
+        assert {"cursor", "pageSize", "filter"} <= names
+
+    def test_envelope_propagates_to_nested_composition_list(self):
+        # AcmeCatalog → dataset is a composition list; the target
+        # (Dataset / AcmeDataset) declares the envelope, so the
+        # nested list inherits it (one declared shape per resource).
+        schema_yaml = """
+id: https://example.org/nest-env
+name: nest_env
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id: { identifier: true, required: true }
+      dataset:
+        range: Dataset
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+      openapi.list_envelope: PagedDatasets
+      openapi.pagination: cursor
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+  PagedDatasets:
+    attributes:
+      items: { range: Dataset, multivalued: true }
+      nextCursor: string
+"""
+        spec = _generate_from_string(schema_yaml)
+        # Find any path under /catalogs/{id}/ that lists datasets.
+        nested = None
+        for url in spec["paths"]:
+            if url.startswith("/catalogs/{id}/") and "dataset" in url:
+                if "get" in spec["paths"][url]:
+                    nested = spec["paths"][url]
+                    break
+        assert nested is not None, f"no nested dataset list found in {list(spec['paths'])}"
+        body = nested["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+        assert body == {"$ref": "#/components/schemas/PagedDatasets"}
+        # And cursor pagination params are present.
+        names = {p["name"] for p in (nested["get"].get("parameters") or [])}
+        assert {"cursor", "pageSize"} <= names

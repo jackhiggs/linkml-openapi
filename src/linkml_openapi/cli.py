@@ -57,6 +57,20 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
     ),
 )
 @click.option(
+    "--error-responses",
+    "error_responses",
+    default=None,
+    metavar="CODES",
+    help=(
+        "Comma-separated list of extra HTTP error status codes "
+        "(4xx/5xx) to declare on every operation. Overrides the "
+        "schema-level `openapi.error_responses` annotation. Each code "
+        "is described with its standard reason phrase and references "
+        "the active error class (Problem by default). Default is "
+        "unset — back-compat with today's output."
+    ),
+)
+@click.option(
     "--profile",
     default=None,
     metavar="NAME",
@@ -169,11 +183,29 @@ from linkml_openapi.generator import SUPPORTED_PATH_STYLES, OpenAPIGenerator
     ),
 )
 @click.version_option(__version__, "-V", "--version")
-def cli(yamlfile, resource_filter=(), emit_name_mappings=None, post_process=None, **kwargs):
+def cli(
+    yamlfile,
+    resource_filter=(),
+    emit_name_mappings=None,
+    post_process=None,
+    error_responses=None,
+    **kwargs,
+):
     """Generate an OpenAPI specification from a LinkML schema."""
     resource_filter = list(resource_filter) if resource_filter else None
     if post_process:
         kwargs["post_processors"] = [n.strip() for n in post_process.split(",") if n.strip()]
+    if error_responses is not None:
+        codes: list[int] = []
+        for token in error_responses.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                codes.append(int(token))
+            except ValueError as exc:
+                raise click.BadParameter(f"--error-responses: {token!r} is not an integer") from exc
+        kwargs["error_responses"] = codes
     gen = OpenAPIGenerator(yamlfile, resource_filter=resource_filter, **kwargs)
     spec = gen.serialize()
     click.echo(spec)

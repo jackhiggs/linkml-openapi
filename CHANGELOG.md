@@ -6,6 +6,89 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [Unreleased]
+
+### Added
+
+- **Standard 4xx / 5xx error response declarations** on every emitted
+  operation, via a new schema-level annotation
+  `openapi.error_responses: "400,401,403,500,503"` (or the matching
+  `--error-responses` CLI flag /
+  `error_responses=[400, 401, 403, 500, 503]` kwarg)
+  ([#104](https://github.com/jackhiggs/linkml-openapi/issues/104)).
+  Each code is described with its standard reason phrase and
+  references the same body schema as today's `404` / `422`
+  (`Problem` by default, or the schema author's
+  `openapi.error_class`). The CLI / kwarg wins over the annotation;
+  an explicit empty list means "skip injection regardless." Existing
+  per-op responses for the same code are preserved. Default unset =
+  byte-identical to today.
+- **Pagination + list envelope + per-endpoint extra query params**
+  for list operations, declared via three composable class-level
+  annotations
+  ([#105](https://github.com/jackhiggs/linkml-openapi/issues/105)):
+  `openapi.list_envelope: <ClassName>` wraps the `200` body in a
+  `$ref` to the named class (the envelope owns the array slot);
+  `openapi.pagination: cursor | page-size | page-offset | none`
+  injects standard query params for the chosen dialect; and
+  `openapi.list_query_params: '<JSON array>'` injects extra typed
+  query params (e.g. filter / sort flags). Applies to top-level CRUD
+  lists, composition lists, reference lists, and templated deep-path
+  lists — one declared shape per resource class. Default unset =
+  byte-identical (bare array + today's auto-emitted `limit` /
+  `offset`).
+- **`openapi.expose: "false"`** class-level annotation
+  ([#110](https://github.com/jackhiggs/linkml-openapi/issues/110)) —
+  keeps the class addressable as a component schema (other resources
+  can `$ref` it) but suppresses its own path emission on both
+  `gen-openapi` and `gen-spring-server`. Use when the type is part
+  of the wire contract but CRUD ownership lives in a different
+  service.
+- **`openapi.codegen_inheritance: "false"`** root-class escape hatch
+  for `--codegen-friendly`
+  ([#106](https://github.com/jackhiggs/linkml-openapi/issues/106)).
+  Forces the use-site `oneOf` fallback even when no narrowing is
+  detected — useful when the schema author already knows the
+  inheritance-based dispatch won't work for a chosen codegen.
+
+### Fixed
+
+- **`--codegen-friendly` no longer emits uncompilable Java when a
+  subtype narrows an inherited slot's range**
+  ([#106](https://github.com/jackhiggs/linkml-openapi/issues/106)).
+  Before: with `slot_usage` narrowing on an inherited slot (#92
+  emits the narrowed shape on the child schema) the parent-level
+  discriminator-based dispatch collided with openapi-generator's
+  inheritance template, producing a covariant return-type compile
+  error (`List<AcmeDistribution> getDistribution()` overriding
+  `List<Distribution>`). After: the generator detects narrowing
+  during the build and falls back to use-site `oneOf` for the
+  affected polymorphic root only. Roots without narrowing keep
+  today's parent-`$ref` strategy (which already compiles fine).
+- **`discriminator.mapping` keys now match the wire when the
+  discriminator field is `openapi.legacy_type_field`**
+  ([#107](https://github.com/jackhiggs/linkml-openapi/issues/107)).
+  When `openapi.discriminator` and `openapi.legacy_type_field` name
+  the same field (e.g., `#type`), the mapping keys are each
+  subtype's `openapi.legacy_type_value` (the actual wire value)
+  instead of the simple class name — so dispatch resolves. When the
+  two annotations name different fields, today's simple-name mapping
+  is preserved.
+- **`--codegen-friendly` now strips the single-value `enum` on
+  `openapi.legacy_type_field` properties**
+  ([#108](https://github.com/jackhiggs/linkml-openapi/issues/108)) —
+  consistency with the primary discriminator's treatment. Codegens
+  no longer materialise a one-element enum class per subtype for the
+  legacy field. Without `--codegen-friendly`, today's
+  `enum: [<value>], default: <value>` shape is preserved.
+- **Empty `PathItem` objects no longer leak into the spec**
+  ([#109](https://github.com/jackhiggs/linkml-openapi/issues/109)).
+  When `openapi.path_template` produced a deep-item path but
+  `openapi.operations` listed only collection-level ops, the
+  deep-item entry was emitted with `parameters` only and no HTTP
+  methods — structurally invalid OpenAPI. The generator now drops
+  any PathItem that declares no operation and no `$ref`.
+
 ## [0.14.0] — 2026-05-15
 
 ### Added
