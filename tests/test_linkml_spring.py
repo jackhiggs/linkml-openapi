@@ -1460,3 +1460,232 @@ classes:
         api = files["io/example/rx2/api/CatalogApi.java"]
         assert "ResponseEntity<Catalog> getCatalog" in api
         assert "Mono<" not in api
+
+
+class TestExposeFalse:
+    """``openapi.expose: "false"`` (#110) — the class still gets a
+    Java DTO (so other resources can reference its shape) but no
+    controller interface, no sidecar path entries."""
+
+    SCHEMA = """\
+id: https://example.org/expose
+name: expose_test
+default_range: string
+classes:
+  Person:
+    annotations: { openapi.resource: "true", openapi.path: people }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      role: { range: Role, inlined: true }
+  Role:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: roles
+      openapi.expose: "false"
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      role_label: { range: string }
+"""
+
+    @pytest.fixture
+    def files(self, tmp_path) -> dict:
+        fixture = tmp_path / "expose.yaml"
+        fixture.write_text(self.SCHEMA)
+        return SpringServerGenerator(str(fixture), package="io.example.expose").build()
+
+    def test_dto_still_emitted(self, files):
+        assert "io/example/expose/model/Role.java" in files
+
+    def test_controller_not_emitted(self, files):
+        assert "io/example/expose/api/RoleApi.java" not in files
+
+    def test_exposed_class_controller_still_emitted(self, files):
+        assert "io/example/expose/api/PersonApi.java" in files
+
+    def test_sidecar_omits_role_paths(self, tmp_path):
+        fixture = tmp_path / "expose.yaml"
+        fixture.write_text(self.SCHEMA)
+        out = tmp_path / "out" / "java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        SpringServerGenerator(str(fixture), package="io.example.expose").emit(str(out))
+        spec_path = tmp_path / "out" / "resources" / "openapi.yaml"
+        spec_text = spec_path.read_text()
+        assert "/people" in spec_text
+        assert "/roles" not in spec_text
+
+
+class TestExtraErrorResponses:
+    """``openapi.error_responses`` / the CLI flag declare extra
+    HTTP error codes; both the Spring controllers and the sidecar
+    OpenAPI spec advertise them so springdoc's live view matches."""
+
+    SCHEMA = """\
+id: https://example.org/errs
+name: errs_spring
+default_range: string
+annotations:
+  openapi.error_responses: "400,401,503"
+classes:
+  Person:
+    annotations: { openapi.resource: "true", openapi.path: people }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      full_name: { range: string }
+"""
+
+    def test_controllers_emit_extra_api_response_blocks(self, tmp_path):
+        fixture = tmp_path / "errs.yaml"
+        fixture.write_text(self.SCHEMA)
+        files = SpringServerGenerator(str(fixture), package="io.example.errs").build()
+        api = files["io/example/errs/api/PersonApi.java"]
+        assert 'responseCode = "400"' in api
+        assert 'responseCode = "401"' in api
+        assert 'responseCode = "503"' in api
+        # Reason phrases match the OpenAPI generator's standard
+        # IANA list — sidecar and controllers stay aligned.
+        assert "Bad request" in api
+        assert "Service unavailable" in api
+
+    def test_sidecar_inherits_extra_codes(self, tmp_path):
+        fixture = tmp_path / "errs.yaml"
+        fixture.write_text(self.SCHEMA)
+        out = tmp_path / "out" / "java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        SpringServerGenerator(str(fixture), package="io.example.errs").emit(str(out))
+        spec_text = (tmp_path / "out" / "resources" / "openapi.yaml").read_text()
+        assert "'400':" in spec_text
+        assert "'503':" in spec_text
+
+    def test_kwarg_overrides_schema_annotation(self, tmp_path):
+        fixture = tmp_path / "errs.yaml"
+        fixture.write_text(self.SCHEMA)
+        files = SpringServerGenerator(
+            str(fixture), package="io.example.errs", error_responses=[500]
+        ).build()
+        api = files["io/example/errs/api/PersonApi.java"]
+        assert 'responseCode = "500"' in api
+        # The schema-annotation codes are NOT applied under explicit
+        # kwarg override.
+        assert 'responseCode = "400"' not in api
+
+
+class TestUserDefinedErrorClass:
+    """``openapi.error_class`` (#104 follow-up) — user-defined error
+    DTO suppresses the synthesised ``Problem.java`` and routes every
+    ``@ApiResponse`` at the user's class. Sidecar inherits the same
+    class via the shared OpenAPI generator."""
+
+    SCHEMA = """\
+id: https://example.org/userr
+name: user_err
+default_range: string
+annotations:
+  openapi.error_class: AcmeError
+classes:
+  AcmeError:
+    attributes:
+      code: { identifier: true, range: string, required: true }
+      message: { range: string }
+  Person:
+    annotations: { openapi.resource: "true", openapi.path: people }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      full_name: { range: string }
+"""
+
+    def test_problem_dto_not_emitted(self, tmp_path):
+        fixture = tmp_path / "userr.yaml"
+        fixture.write_text(self.SCHEMA)
+        files = SpringServerGenerator(str(fixture), package="io.example.userr").build()
+        assert "io/example/userr/model/Problem.java" not in files
+        # The user's class is still a DTO.
+        assert "io/example/userr/model/AcmeError.java" in files
+
+    def test_controller_routes_errors_at_user_class(self, tmp_path):
+        fixture = tmp_path / "userr.yaml"
+        fixture.write_text(self.SCHEMA)
+        files = SpringServerGenerator(str(fixture), package="io.example.userr").build()
+        api = files["io/example/userr/api/PersonApi.java"]
+        assert "AcmeError.class" in api
+        assert "Problem.class" not in api
+
+    def test_undefined_error_class_raises(self, tmp_path):
+        fixture = tmp_path / "bad.yaml"
+        fixture.write_text(
+            self.SCHEMA.replace(
+                "openapi.error_class: AcmeError",
+                "openapi.error_class: Missing",
+            )
+        )
+        with pytest.raises(ValueError, match=r"undefined class 'Missing'"):
+            SpringServerGenerator(str(fixture), package="io.example.userr").build()
+
+
+class TestConcretePolymorphicRootInJsonSubTypes:
+    """When the polymorphic root is concrete (not abstract / mixin)
+    and pins its own ``openapi.type_value``, ``@JsonSubTypes`` must
+    list the root itself so Jackson can deserialise root payloads.
+    Mirrors the OpenAPI generator's #95 fix."""
+
+    SCHEMA = """\
+id: https://example.org/concrete-root
+name: concrete_root
+default_range: string
+classes:
+  Resource:
+    annotations:
+      openapi.resource: "true"
+      openapi.discriminator: resourceType
+      openapi.type_value: Resource
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      title: { range: string }
+  Dataset:
+    is_a: Resource
+    annotations:
+      openapi.resource: "true"
+      openapi.type_value: Dataset
+    attributes:
+      description: { range: string }
+"""
+
+    def test_root_appears_in_jsonsubtypes(self, tmp_path):
+        fixture = tmp_path / "cr.yaml"
+        fixture.write_text(self.SCHEMA)
+        files = SpringServerGenerator(str(fixture), package="io.example.cr").build()
+        resource_dto = files["io/example/cr/model/Resource.java"]
+        # Both the root and the subclass must be in the @JsonSubTypes block.
+        assert 'name = "Resource"' in resource_dto
+        assert "Resource.class" in resource_dto
+        assert 'name = "Dataset"' in resource_dto
+        assert "Dataset.class" in resource_dto
+
+
+class TestJavaReservedWordSanitisation:
+    """LinkML slot names that collide with Java reserved words get a
+    trailing ``_`` so the emitted Java compiles."""
+
+    SCHEMA = """\
+id: https://example.org/reserved
+name: reserved_test
+default_range: string
+classes:
+  Thing:
+    annotations: { openapi.resource: "true", openapi.path: things }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      class: { range: string }
+      default: { range: string }
+"""
+
+    def test_reserved_word_slot_compiles(self, tmp_path):
+        fixture = tmp_path / "r.yaml"
+        fixture.write_text(self.SCHEMA)
+        files = SpringServerGenerator(str(fixture), package="io.example.r").build()
+        dto = files["io/example/r/model/Thing.java"]
+        # ``class`` becomes ``class_``, ``default`` becomes ``default_``.
+        assert "private String class_" in dto
+        assert "private String default_" in dto
+        # The original wire name must be preserved on the @JsonProperty.
+        assert '@JsonProperty("class")' in dto
+        assert '@JsonProperty("default")' in dto

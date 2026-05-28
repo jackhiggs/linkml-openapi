@@ -49,7 +49,7 @@ from linkml_openapi._chains import (
     render_chain_hops,
 )
 from linkml_openapi._query_params import QueryParamSpec, walk_query_params
-from linkml_openapi.generator import _to_snake_case
+from linkml_openapi.generator import _is_falsy, _to_snake_case
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -109,6 +109,13 @@ class SpringServerGenerator:
     # ``reactive: true`` flag on its Spring template). None falls back
     # to the schema-level ``openapi.reactive`` annotation. (#80)
     reactive: bool | None = None
+    # Extra HTTP error codes (4xx/5xx) to declare on every emitted
+    # ``@ApiResponse`` block. Mirrors the OpenAPI generator's
+    # ``error_responses`` so the Spring controllers, the sidecar
+    # OpenAPI spec, and the live springdoc view all agree (#104).
+    # None falls back to the schema-level ``openapi.error_responses``
+    # annotation; an empty list explicitly disables injection.
+    error_responses: list[int] | None = None
 
     _sv: SchemaView = field(init=False)
     _env: Environment = field(init=False)
@@ -132,7 +139,17 @@ class SpringServerGenerator:
             induced_slots=self._induced_slots,
         )
         self._effective_path_prefix = self._resolve_path_prefix()
-        self._error_class_name = self._resolve_error_class_name()
+        # User-defined error class (``openapi.error_class``) wins over
+        # the auto-emitted ``Problem`` DTO. When set, ``Problem.java``
+        # is not emitted, the user's class drives the @ApiResponse
+        # implementation, and the sidecar inherits the same class via
+        # the shared OpenAPI generator.
+        self._error_user_class: str | None = self._resolve_user_error_class()
+        self._error_class_name = self._error_user_class or self._resolve_error_class_name()
+        # Extra HTTP error codes from ``openapi.error_responses`` /
+        # the CLI flag — added to every controller @ApiResponse list
+        # so the live springdoc view matches the sidecar (#104).
+        self._extra_error_codes: list[int] = self._resolve_error_response_codes()
         self._reactive = self._resolve_reactive()
 
     def _resolve_reactive(self) -> bool:
@@ -153,11 +170,9 @@ class SpringServerGenerator:
         """Pick the Java class name for the auto-emitted RFC 7807 DTO.
 
         Resolution order: schema-level ``openapi.error_class_name``
-        annotation → ``"Problem"``. ``openapi.error_class`` (which points
-        at a user-defined LinkML class) is not honoured here — when set,
-        the user's class supplies the DTO and ``Problem.java`` should not
-        be auto-emitted. The Spring emitter doesn't currently read user-
-        defined error classes, so this stays as the synthesised path.
+        annotation → ``"Problem"``. Called only on the synthesised
+        path; see :meth:`_resolve_user_error_class` for the user-
+        defined override.
         """
         schema_anns = getattr(self._sv.schema, "annotations", None) or {}
         for ann in schema_anns.values() if hasattr(schema_anns, "values") else schema_anns:
@@ -166,6 +181,104 @@ class SpringServerGenerator:
                 if value:
                     return value
         return "Problem"
+
+    def _resolve_user_error_class(self) -> str | None:
+        """Honour ``openapi.error_class`` — a schema annotation that
+        points at a user-declared LinkML class to use as the error
+        body. When set, the Spring side uses that class for every
+        ``@ApiResponse`` and skips emitting the synthesised
+        ``Problem.java`` (the user's class already supplies the DTO
+        via the normal DTO emission path). Keeps the controller
+        annotations in sync with the sidecar OpenAPI spec, which
+        already honours the same annotation."""
+        schema_anns = getattr(self._sv.schema, "annotations", None) or {}
+        for ann in schema_anns.values() if hasattr(schema_anns, "values") else schema_anns:
+            if getattr(ann, "tag", None) == "openapi.error_class":
+                value = str(ann.value).strip()
+                if value:
+                    if self._sv.get_class(value) is None:
+                        raise ValueError(
+                            f"openapi.error_class refers to undefined class "
+                            f"{value!r}; add the class to the schema or "
+                            "remove the annotation."
+                        )
+                    return value
+        return None
+
+    # IANA reason phrases for extra ``openapi.error_responses`` codes.
+    # Kept in sync with ``OpenAPIGenerator._HTTP_REASON_PHRASES`` so
+    # the controller annotations and sidecar spec match wire-for-wire.
+    _HTTP_REASON_PHRASES = {
+        400: "Bad request",
+        401: "Unauthorized",
+        402: "Payment required",
+        403: "Forbidden",
+        404: "Not found",
+        405: "Method not allowed",
+        406: "Not acceptable",
+        408: "Request timeout",
+        409: "Conflict",
+        410: "Gone",
+        412: "Precondition failed",
+        413: "Payload too large",
+        415: "Unsupported media type",
+        422: "Validation error",
+        423: "Locked",
+        424: "Failed dependency",
+        428: "Precondition required",
+        429: "Too many requests",
+        451: "Unavailable for legal reasons",
+        500: "Server error",
+        501: "Not implemented",
+        502: "Bad gateway",
+        503: "Service unavailable",
+        504: "Gateway timeout",
+    }
+
+    def _resolve_error_response_codes(self) -> list[int]:
+        """Resolve the extra HTTP codes to emit on every controller op.
+        Kwarg wins over schema annotation; an explicit empty list means
+        "skip injection." Returns the de-duped, ordered list (#104).
+        """
+        if self.error_responses is not None:
+            codes = list(self.error_responses)
+        else:
+            raw: str | None = None
+            schema_anns = getattr(self._sv.schema, "annotations", None) or {}
+            for ann in schema_anns.values() if hasattr(schema_anns, "values") else schema_anns:
+                if getattr(ann, "tag", None) == "openapi.error_responses":
+                    raw = str(ann.value)
+                    break
+            if not raw:
+                return []
+            codes = []
+            for token in raw.split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                try:
+                    codes.append(int(token))
+                except ValueError as exc:
+                    raise ValueError(
+                        f"openapi.error_responses contains non-integer "
+                        f"token {token!r}; expected comma-separated HTTP "
+                        "status codes."
+                    ) from exc
+        for code in codes:
+            if not (400 <= code <= 599):
+                raise ValueError(
+                    f"openapi.error_responses code {code} is outside the "
+                    "4xx/5xx range; only client- and server-error codes "
+                    "are accepted."
+                )
+        seen: set[int] = set()
+        unique: list[int] = []
+        for code in codes:
+            if code in seen:
+                continue
+            seen.add(code)
+            unique.append(code)
+        return unique
 
     def _resolve_path_prefix(self) -> str:
         """Pick the effective URL path prefix for this build.
@@ -243,16 +356,23 @@ class SpringServerGenerator:
         schema. Reuses :class:`OpenAPIGenerator` so the spec carries
         the same ``x-rdf-class`` / ``x-rdf-property`` / discriminator
         / legacy-type-field annotations the in-tree linkml-openapi
-        emitter produces."""
+        emitter produces.
+
+        Threads Spring-side kwargs through to the sub-generator so the
+        sidecar and the controllers agree on URL prefix, error codes,
+        and reactive/blocking shape. Any new Spring kwarg that affects
+        the OpenAPI wire shape MUST be forwarded here too — otherwise
+        the live springdoc view diverges from the static spec."""
         from linkml_openapi.generator import OpenAPIGenerator
 
-        # Pass the prefix through so the sidecar's `paths:` keys match
-        # springdoc's runtime view (which is built from the live
-        # class-level `@RequestMapping` + relative method mappings).
         return OpenAPIGenerator(
             self.schema_path,
             path_prefix=self._effective_path_prefix or None,
             path_style=self.path_style,
+            # Thread the same extra error codes (#104) so the sidecar
+            # spec advertises 400/401/etc. on the same operations the
+            # controllers do.
+            error_responses=self._extra_error_codes or None,
         ).serialize()
 
     def build(self) -> dict[str, str]:
@@ -267,7 +387,15 @@ class SpringServerGenerator:
             files[f"{package_path}/model/{class_name}.java"] = self._render_dto(cls)
             if self._is_resource(cls):
                 files[f"{package_path}/api/{class_name}Api.java"] = self._render_api(cls)
-        files[f"{package_path}/model/{self._error_class_name}.java"] = self._render_problem_dto()
+        # Only synthesise the RFC 7807 Problem DTO when the schema
+        # didn't supply its own via ``openapi.error_class`` — otherwise
+        # the user's class already came through the normal DTO loop
+        # above and a synthesised ``Problem.java`` would collide / be
+        # unused.
+        if self._error_user_class is None:
+            files[f"{package_path}/model/{self._error_class_name}.java"] = (
+                self._render_problem_dto()
+            )
         return files
 
     def _render_problem_dto(self) -> str:
@@ -392,8 +520,7 @@ public class %(class_name)s {
             # Honour `openapi.body: "false"` (#65) — slot generates the
             # nested controller endpoint but is dropped from the DTO so
             # the parent's JSON body doesn't carry the child collection.
-            body_ann = self._get_slot_annotation_compat(cls, slot_name, "openapi.body")
-            if body_ann is not None and str(body_ann).strip().lower() == "false":
+            if _is_falsy(self._get_slot_annotation_compat(cls, slot_name, "openapi.body")):
                 continue
             prop = self._slot_to_property(slot, imports)
             if prop is not None:
@@ -607,7 +734,11 @@ public class %(class_name)s {
         for op in ops:
             op.setdefault("method_annotations", []).extend(
                 _success_and_problem_responses(
-                    op["return_type"], media_types, self._error_class_name
+                    op["return_type"],
+                    media_types,
+                    self._error_class_name,
+                    self._extra_error_codes,
+                    self._HTTP_REASON_PHRASES,
                 )
             )
         if self._effective_path_prefix:
@@ -1096,7 +1227,10 @@ public class %(class_name)s {
         item_params = [_param_dict_for_placeholder(n) for n in unique_placeholders]
         cn = cls.name
         suffix = "ViaTemplate"
-        deep_url = f'"{template}"'
+        # Templates can legitimately contain quotes (rare but legal in
+        # URL paths) or backslashes — escape so the resulting
+        # ``@GetMapping(value = "...")`` stays a valid Java literal.
+        deep_url = f'"{_escape_java(template)}"'
         produces = _produces_arg(media_types)
         consumes = produces
 
@@ -1311,8 +1445,7 @@ public class %(class_name)s {
         """
         if self._class_annotation(cls, "openapi.resource") != "true":
             return False
-        expose = self._class_annotation(cls, "openapi.expose")
-        if expose is not None and expose.strip().lower() == "false":
+        if _is_falsy(self._class_annotation(cls, "openapi.expose")):
             return False
         return True
 
@@ -1581,6 +1714,17 @@ public class %(class_name)s {
         if parent is not None and self._inherited_discriminator(parent):
             return None
         subtypes = []
+        # Include the root itself when it's concrete and pins its own
+        # type value (mirrors the OpenAPI generator's #95 fix): a
+        # ``{"resourceType":"Resource", ...}`` payload otherwise has
+        # no @JsonSubTypes mapping back to the root and Jackson
+        # refuses to deserialise it.
+        if (
+            not cls.abstract
+            and not cls.mixin
+            and (self._class_annotation(cls, "openapi.type_value") is not None)
+        ):
+            subtypes.append({"class_name": cls.name, "tag": self._type_value(cls)})
         for name in self._sv.class_descendants(cls.name, reflexive=False):
             sub = self._sv.get_class(name)
             if sub is None or sub.abstract or sub.mixin:
@@ -1636,12 +1780,32 @@ def _escape_java(text: str) -> str:
     )
 
 
+# Java reserved words (JLS §3.9, including contextual keywords and
+# the literal-like ``true`` / ``false`` / ``null``). Slot or class
+# names that resolve to one of these are suffixed with ``_`` so the
+# emitted Java still compiles.
+_JAVA_RESERVED_WORDS = frozenset(
+    """abstract assert boolean break byte case catch char class const continue
+       default do double else enum extends final finally float for goto if
+       implements import instanceof int interface long native new package
+       private protected public return short static strictfp super switch
+       synchronized this throw throws transient try void volatile while
+       true false null _""".split()
+)
+
+
 def _java_identifier(s: str) -> str:
     """Sanitise ``s`` to a valid Java field identifier — keep
     alphanumerics, drop everything else (``#``, ``@``, ``-``, etc.).
-    Empty / illegal-leading-char results fall back to ``field``."""
+    Empty / illegal-leading-char results fall back to ``field``.
+    Names colliding with Java reserved words are suffixed with ``_``
+    so e.g. a LinkML slot named ``class`` becomes ``class_``."""
     out = re.sub(r"[^A-Za-z0-9_]", "", s).lstrip("0123456789")
-    return out or "field"
+    if not out:
+        return "field"
+    if out in _JAVA_RESERVED_WORDS:
+        return out + "_"
+    return out
 
 
 def _camel(s: str) -> str:
@@ -1677,7 +1841,11 @@ def _list_query_params() -> list[dict]:
 
 
 def _success_and_problem_responses(
-    return_type: str, media_types: list[str], error_class: str = "Problem"
+    return_type: str,
+    media_types: list[str],
+    error_class: str = "Problem",
+    extra_codes: list[int] | None = None,
+    reason_phrases: dict[int, str] | None = None,
 ) -> list[str]:
     """Success + RFC 7807 error responses for an operation.
 
@@ -1687,11 +1855,15 @@ def _success_and_problem_responses(
     success response fans out one ``@Content`` block per advertised
     media type so the live spec advertises every negotiated format
     under ``responses.200.content``.
+
+    ``extra_codes`` (#104) declares additional 4xx/5xx codes drawn
+    from ``openapi.error_responses`` so the controller annotations
+    match the sidecar spec.
     """
     if return_type == "Void":
         return [
             '@ApiResponse(responseCode = "204", description = "No content")',
-            *_problem_responses(error_class),
+            *_problem_responses(error_class, extra_codes, reason_phrases),
         ]
     if return_type.startswith("List<"):
         inner = return_type[len("List<") : -1]
@@ -1714,23 +1886,34 @@ def _success_and_problem_responses(
         '@ApiResponse(responseCode = "200", description = "OK",'
         f" content = {{{', '.join(contents)}}})"
     )
-    return [success, *_problem_responses(error_class)]
+    return [success, *_problem_responses(error_class, extra_codes, reason_phrases)]
 
 
-def _problem_responses(error_class: str = "Problem") -> list[str]:
+def _problem_responses(
+    error_class: str = "Problem",
+    extra_codes: list[int] | None = None,
+    reason_phrases: dict[int, str] | None = None,
+) -> list[str]:
     """RFC 7807 error contract — same Problem-shaped DTO under
-    ``application/problem+json`` for 404/422/500 across every
-    operation. ``error_class`` is the Java type used for the error
-    body (defaults to ``Problem``; configurable via
-    ``openapi.error_class_name``)."""
+    ``application/problem+json`` across every error response.
+
+    The 404 / 422 / 500 trio is always declared (today's contract).
+    ``extra_codes`` (#104) adds further codes from
+    ``openapi.error_responses``; duplicates with the baseline trio
+    are dropped silently so the wire shape matches the sidecar."""
+    baseline = {
+        404: "Not found",
+        422: "Validation error",
+        500: "Server error",
+    }
+    codes: dict[int, str] = dict(baseline)
+    for code in extra_codes or ():
+        if code in codes:
+            continue
+        codes[code] = (reason_phrases or {}).get(code, f"HTTP {code}")
     return [
-        '@ApiResponse(responseCode = "404", description = "Not found",'
+        f'@ApiResponse(responseCode = "{code}", description = "{description}",'
         ' content = @Content(mediaType = "application/problem+json",'
-        f" schema = @Schema(implementation = {error_class}.class)))",
-        '@ApiResponse(responseCode = "422", description = "Validation error",'
-        ' content = @Content(mediaType = "application/problem+json",'
-        f" schema = @Schema(implementation = {error_class}.class)))",
-        '@ApiResponse(responseCode = "500", description = "Server error",'
-        ' content = @Content(mediaType = "application/problem+json",'
-        f" schema = @Schema(implementation = {error_class}.class)))",
+        f" schema = @Schema(implementation = {error_class}.class)))"
+        for code, description in codes.items()
     ]

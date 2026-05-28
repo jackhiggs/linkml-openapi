@@ -68,6 +68,21 @@ from linkml_openapi.spring.generator import SpringServerGenerator
         "`spring-boot-starter-web`."
     ),
 )
+@click.option(
+    "--error-responses",
+    "error_responses",
+    default=None,
+    metavar="CODES",
+    help=(
+        "Comma-separated list of extra HTTP error status codes "
+        "(4xx/5xx) to declare on every controller `@ApiResponse` "
+        "block. Overrides the schema-level `openapi.error_responses` "
+        "annotation. Each code is described with its standard reason "
+        "phrase and references the active error class (Problem by "
+        "default). Threaded through to the sidecar OpenAPI spec so "
+        "springdoc's runtime view matches."
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
 def cli(
     yamlfile,
@@ -76,14 +91,27 @@ def cli(
     path_prefix: str | None,
     path_style: str | None,
     reactive: bool | None,
+    error_responses: str | None,
 ) -> None:
     """Generate Spring server source files directly from a LinkML schema."""
+    parsed_codes: list[int] | None = None
+    if error_responses is not None:
+        parsed_codes = []
+        for token in error_responses.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                parsed_codes.append(int(token))
+            except ValueError as exc:
+                raise click.BadParameter(f"--error-responses: {token!r} is not an integer") from exc
     gen = SpringServerGenerator(
         yamlfile,
         package=package,
         path_prefix=path_prefix,
         path_style=path_style,
         reactive=reactive,
+        error_responses=parsed_codes,
     )
     written = gen.emit(output)
     for path in written:

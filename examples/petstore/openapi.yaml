@@ -510,6 +510,44 @@ paths:
       - Owner
       summary: List Pet attached to Owner.pets
       operationId: list_owner_pets
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+          description: Name of the pet
+        name: name
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          allOf:
+          - $ref: '#/components/schemas/PetStatus'
+          description: Current availability status
+        name: status
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
       responses:
         '200':
           description: Pet list

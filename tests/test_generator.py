@@ -4115,3 +4115,124 @@ classes:
         # And cursor pagination params are present.
         names = {p["name"] for p in (nested["get"].get("parameters") or [])}
         assert {"cursor", "pageSize"} <= names
+
+
+class TestPaginationDialectSuppressesLegacyLimitOffset:
+    """Coverage for the #105 follow-up: when a class declares
+    ``openapi.pagination``, the generator no longer emits the legacy
+    ``limit`` / ``offset`` baseline. The dialect's own params own the
+    paging contract for that endpoint."""
+
+    BASE = """
+id: https://example.org/page-no-dup
+name: page_no_dup
+default_range: string
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+"""
+
+    def test_cursor_dialect_suppresses_limit_and_offset(self):
+        schema = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.pagination: cursor",
+        )
+        spec = _generate_from_string(schema)
+        params = spec["paths"]["/datasets"]["get"]["parameters"]
+        names = [p["name"] for p in params]
+        assert names.count("limit") == 0
+        assert names.count("offset") == 0
+        assert "cursor" in names
+        assert "pageSize" in names
+
+    def test_page_offset_dialect_does_not_duplicate_offset_limit(self):
+        # The `page-offset` dialect uses the same param names as the
+        # legacy baseline; without the suppression they'd appear twice
+        # (invalid OpenAPI — duplicate name + in:query).
+        schema = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n      openapi.pagination: page-offset",
+        )
+        spec = _generate_from_string(schema)
+        names = [p["name"] for p in spec["paths"]["/datasets"]["get"]["parameters"]]
+        assert names.count("limit") == 1
+        assert names.count("offset") == 1
+
+    def test_unset_keeps_legacy_limit_offset(self):
+        spec = _generate_from_string(self.BASE)
+        names = [p["name"] for p in spec["paths"]["/datasets"]["get"]["parameters"]]
+        assert "limit" in names
+        assert "offset" in names
+
+
+class TestNestedListInheritsFilters:
+    """Coverage for the #105 follow-up: composition / reference list
+    operations now inherit the target class's filter / sort / extra
+    query params (and pagination dialect), matching the top-level CRUD
+    list's behaviour. Before the fix, only `list_extras` reached
+    nested sites."""
+
+    SCHEMA = """
+id: https://example.org/nest-filter
+name: nest_filter
+default_range: string
+classes:
+  Catalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id: { identifier: true, required: true }
+      dataset:
+        range: Dataset
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+    attributes:
+      id: { identifier: true, required: true }
+      title: string
+"""
+
+    def test_nested_list_carries_target_classs_filter_params(self):
+        spec = _generate_from_string(self.SCHEMA)
+        # Top-level list emits limit/offset/title (auto-inferred).
+        top_names = {p["name"] for p in spec["paths"]["/datasets"]["get"]["parameters"]}
+        assert {"limit", "offset", "title"} <= top_names
+        # Nested composition list under /catalogs/{id}/dataset must
+        # carry the same shape.
+        nested_url = next(
+            url for url in spec["paths"] if url.startswith("/catalogs/{id}/") and "dataset" in url
+        )
+        nested_get = spec["paths"][nested_url]["get"]
+        nested_names = {p["name"] for p in (nested_get.get("parameters") or [])}
+        assert {"limit", "offset", "title"} <= nested_names
+
+
+class TestCodegenFriendlyNarrowingDetectedInFlattenMode:
+    """Coverage for the #106 follow-up: narrowing detection runs in
+    a dedicated pre-pass so the discriminator pass sees narrowing
+    even when ``flatten_inheritance=True`` causes the per-class
+    emission to skip the ``allOf`` branch where inline detection
+    used to live."""
+
+    def test_narrowing_set_populated_under_flatten_inheritance(self):
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        gen = OpenAPIGenerator(
+            str(FIXTURES / "dcat3-acme.yaml"),
+            flatten_inheritance=True,
+            codegen_friendly=True,
+        )
+        # Force the pre-pass by invoking serialize, then inspect state.
+        gen.serialize()
+        assert "AcmeDataset" in gen._narrowing_subclasses
+        assert "AcmeCatalog" in gen._narrowing_subclasses

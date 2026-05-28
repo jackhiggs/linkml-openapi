@@ -133,6 +133,22 @@ def _is_truthy(value: object) -> bool:
     return str(value).lower() == "true"
 
 
+def _is_falsy(value: object | None) -> bool:
+    """Check if an annotation value represents a boolean false.
+
+    ``None`` (annotation absent) is NOT falsy — distinguish "the
+    author explicitly opted out" from "the author didn't say anything."
+    Use this for opt-out annotations (``openapi.expose: "false"``,
+    ``openapi.codegen_inheritance: "false"``, etc.) so the falsy
+    parsing rule is identical across the file.
+    """
+    if value is None:
+        return False
+    if isinstance(value, bool):
+        return not value
+    return str(value).strip().lower() == "false"
+
+
 def _to_path_segment(name: str) -> str:
     """Convert class name to URL path segment: CamelCase → snake_case → plural."""
     return _pluralize(_to_snake_case(name))
@@ -343,6 +359,12 @@ class OpenAPIGenerator(Generator):
         # iteration in `_build_openapi` can ask for its canonical chain in
         # O(1) instead of re-walking the relationship graph.
         self._parent_chains_index = self._collect_parent_chains()
+        # Detect ``slot_usage`` range narrowing across the whole schema
+        # in a single pre-pass so the discriminator pass (#106) sees
+        # the full picture regardless of whether per-class emission
+        # happens via the ``allOf`` branch or the ``flatten_inheritance``
+        # branch of ``_class_to_schema``.
+        self._detect_narrowing_subclasses()
         spec = self._build_openapi()
         raw = json.loads(spec.model_dump_json(by_alias=True, exclude_none=True))
         raw["openapi"] = self.openapi_version
@@ -596,6 +618,11 @@ class OpenAPIGenerator(Generator):
         # ``openapi.operations`` lists only collection-level ops, or
         # when an auto-derived flat item path has no item-level ops
         # to attach (#109).
+        # Order matters: filter empty PathItems BEFORE injecting extra
+        # error responses. If we injected first, an otherwise-invalid
+        # operation-less PathItem could survive emission with only the
+        # synthetic 4xx/5xx responses attached, which is still
+        # structurally invalid (responses without a method holder).
         paths = {url: item for url, item in paths.items() if self._path_item_has_operations(item)}
 
         # Merge schema-level / CLI ``openapi.error_responses`` codes
@@ -699,9 +726,6 @@ class OpenAPIGenerator(Generator):
                 #   on the wire (#92).
                 parent_slot = parent_slots_by_name.get(slot.name)
                 is_narrowed = parent_slot is not None and self._slot_was_narrowed(slot, parent_slot)
-                if is_narrowed:
-                    # Track narrowing for the discriminator pass (#106).
-                    self._narrowing_subclasses.add(cls.name)
                 if slot.name not in parent_slots_by_name or is_narrowed:
                     local_properties[slot.name] = self._slot_to_schema(slot)
                     if slot.required:
@@ -894,8 +918,7 @@ class OpenAPIGenerator(Generator):
             cls = sv.get_class(name)
             if cls is None:
                 return True
-            expose = self._class_annotation(cls, "openapi.expose")
-            return not (expose is not None and expose.strip().lower() == "false")
+            return not _is_falsy(self._class_annotation(cls, "openapi.expose"))
 
         if self.resource_filter:
             result = [c for c in self.resource_filter if c not in excluded and _exposed(c)]
@@ -1210,8 +1233,6 @@ class OpenAPIGenerator(Generator):
         if explicit is not None:
             return explicit.lstrip("/")
         if _is_irregular_plural_hint(cls.name):
-            import warnings
-
             warnings.warn(
                 f"Class {cls.name!r} has an irregular English plural that the "
                 "default pluralizer cannot handle correctly. Set "
@@ -1551,8 +1572,6 @@ class OpenAPIGenerator(Generator):
             elif key in self._PROFILE_STR_KEYS:
                 profile[key] = value
             else:
-                import warnings
-
                 warnings.warn(
                     f"Unknown profile key {key!r} in annotation {tag!r}; "
                     "expected one of "
@@ -1582,6 +1601,28 @@ class OpenAPIGenerator(Generator):
         p = profiles[self.profile]
         excluded_classes = set(p.get("exclude_classes", []))
         excluded_slots = set(p.get("exclude_slots", []))
+        # ``include_classes`` / ``include_slots`` (when declared)
+        # invert the surface: everything NOT in the list is excluded.
+        # The two forms compose with their ``exclude_*`` counterparts —
+        # a class can be both included and explicitly excluded; the
+        # exclusion wins (matches the "drift on a slot annotation
+        # surfaces loudly" philosophy: be conservative).
+        sv = self.schemaview
+        include_classes = p.get("include_classes")
+        if include_classes:
+            include_set = set(include_classes)
+            for class_name in sv.all_classes():
+                if class_name not in include_set:
+                    excluded_classes.add(class_name)
+        include_slots = p.get("include_slots")
+        if include_slots:
+            include_set = set(include_slots)
+            for class_name in sv.all_classes():
+                if class_name in excluded_classes:
+                    continue
+                for slot in self._induced_slots_iter(class_name):
+                    if slot.name not in include_set:
+                        excluded_slots.add(slot.name)
         self._raise_on_drift(excluded_classes, excluded_slots)
         return excluded_classes, excluded_slots, p.get("description")
 
@@ -1654,6 +1695,26 @@ class OpenAPIGenerator(Generator):
             and str(child_slot.range) != str(parent_slot.range)
         )
 
+    def _detect_narrowing_subclasses(self) -> None:
+        """Walk every is_a relationship and record subclasses that
+        materially narrowed an inherited slot's range. Runs unconditionally
+        in ``__post_init__`` so the discriminator pass (#106) gets the
+        right answer regardless of whether the per-class emission later
+        takes the ``allOf`` branch or the ``flatten_inheritance`` branch
+        of ``_class_to_schema``.
+        """
+        sv = self.schemaview
+        for class_name in sv.all_classes():
+            cls = sv.get_class(class_name)
+            if cls is None or not cls.is_a:
+                continue
+            parent_slots_by_name = {s.name: s for s in self._induced_slots_iter(cls.is_a)}
+            for slot in self._induced_slots_iter(class_name):
+                parent_slot = parent_slots_by_name.get(slot.name)
+                if parent_slot is not None and self._slot_was_narrowed(slot, parent_slot):
+                    self._narrowing_subclasses.add(class_name)
+                    break
+
     def _is_slot_body_excluded(self, cls: ClassDefinition, slot: SlotDefinition) -> bool:
         """True when the slot is excluded from the parent class's body schema.
 
@@ -1674,8 +1735,7 @@ class OpenAPIGenerator(Generator):
                 "makes sense on class-ranged slots — there's no nested endpoint to "
                 "preserve otherwise."
             )
-        nested_ann = self._get_slot_annotation(cls, slot.name, "openapi.nested")
-        if nested_ann is not None and nested_ann.strip().lower() == "false":
+        if _is_falsy(self._get_slot_annotation(cls, slot.name, "openapi.nested")):
             raise ValueError(
                 f'Slot {cls.name}.{slot.name!r} is annotated both `openapi.body: "false"` '
                 'and `openapi.nested: "false"`. The slot would have no representation '
@@ -1838,9 +1898,7 @@ class OpenAPIGenerator(Generator):
         opt_out = False
         cls = sv.get_class(class_name)
         if cls is not None:
-            opt_out = (
-                self._class_annotation(cls, "openapi.codegen_inheritance") or ""
-            ).strip().lower() == "false"
+            opt_out = _is_falsy(self._class_annotation(cls, "openapi.codegen_inheritance"))
         if self.codegen_friendly and not has_narrowing and not opt_out:
             return Reference(ref=f"#/components/schemas/{class_name}")
         oneof = [Reference(ref=f"#/components/schemas/{n}") for n in descendants]
@@ -1935,21 +1993,6 @@ class OpenAPIGenerator(Generator):
                 f"annotation on a class in the cycle to acknowledge it is "
                 f"intentional."
             )
-
-    def _is_in_polymorphic_chain(self, cls: ClassDefinition) -> bool:
-        """True if ``cls`` or any ancestor declares a discriminator.
-
-        Drives the flatten-vs-allOf decision in :meth:`_class_to_schema`:
-        polymorphic chains flatten so each concrete schema can pin its
-        own discriminator without ``allOf`` intersection conflicts.
-        """
-        sv = self.schemaview
-        cur: ClassDefinition | None = cls
-        while cur is not None:
-            if self._discriminator_field(cur) is not None:
-                return True
-            cur = sv.get_class(cur.is_a) if cur.is_a else None
-        return False
 
     def _inherited_discriminator_field(self, class_name: str) -> str | None:
         """Walk the ``is_a`` chain looking for a discriminator declaration.
@@ -2130,9 +2173,7 @@ class OpenAPIGenerator(Generator):
             # rely on use-site oneOf only.
             descendants = self._concrete_descendants_including_self(class_name)
             has_narrowing = any(d in self._narrowing_subclasses for d in descendants)
-            opt_out = (
-                self._class_annotation(cls, "openapi.codegen_inheritance") or ""
-            ).strip().lower() == "false"
+            opt_out = _is_falsy(self._class_annotation(cls, "openapi.codegen_inheritance"))
             if self.codegen_friendly and not has_narrowing and not opt_out:
                 parent_schema = schemas.get(class_name)
                 if isinstance(parent_schema, Schema):
@@ -2395,8 +2436,6 @@ class OpenAPIGenerator(Generator):
         raw = self._class_annotation(cls, "openapi.list_query_params")
         if not raw:
             return []
-        import json
-
         try:
             decoded = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -2440,17 +2479,10 @@ class OpenAPIGenerator(Generator):
             )
         return params
 
-    def _list_extras(self, cls: ClassDefinition) -> list[Parameter]:
-        """Combined pagination + extra-list-query-params builder, used
-        by every list-op emission site (top-level, composition, ref,
-        chain). Resolved off the target class so the same paging /
-        filtering shape applies wherever the resource is listed."""
-        return self._pagination_params(cls) + self._extra_list_query_params(cls)
-
     def _make_list_operation(self, cls: ClassDefinition, class_name: str) -> Operation:
         media_types = self._get_media_types(cls)
         response_schema = self._list_response_schema(cls, class_name)
-        params = list(self._make_query_params(cls)) + self._list_extras(cls)
+        params = self._list_operation_params(cls)
         return Operation(
             summary=f"List {_to_path_segment(class_name).replace('_', ' ')}",
             operationId=f"list_{_to_path_segment(class_name)}",
@@ -3337,11 +3369,12 @@ class OpenAPIGenerator(Generator):
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)
         target_ref = self._class_response_ref(target_class_name)
-        # Honour ``openapi.list_envelope`` on the target (#105) — the
-        # nested list shares the envelope shape with the top-level
-        # list op so clients see a uniform paged structure.
+        # Honour ``openapi.list_envelope`` / ``openapi.pagination`` /
+        # ``openapi.list_query_params`` on the target (#105) so the
+        # nested list shares the envelope, filter, and pagination
+        # shape with the target's top-level CRUD list.
         list_response_schema = self._list_response_schema(target_cls, target_class_name)
-        list_extras = self._list_extras(target_cls)
+        list_op_params = self._list_operation_params(target_cls)
         # Nested composition op tag: slot's `openapi.tag` →
         # target class's explicit `openapi.tag` → parent class's tag
         # (#86 layers explicit target-side override on top of #68).
@@ -3353,7 +3386,7 @@ class OpenAPIGenerator(Generator):
             summary=f"List {target_class_name} composed in {parent_class_name}.{slot.name}",
             operationId=f"list_{_to_snake_case(parent_class_name)}_{slot_seg}",
             tags=[op_tag],
-            parameters=list_extras or None,
+            parameters=list_op_params or None,
             responses={
                 "200": Response(
                     description=f"{target_class_name} list",
@@ -3516,9 +3549,10 @@ class OpenAPIGenerator(Generator):
 
         target_cls = self.schemaview.get_class(target_class_name)
         media_types = self._get_media_types(target_cls)
-        # Envelope-aware list response (#105).
+        # Envelope / pagination / extras-aware list response (#105) —
+        # same composition as composition list ops + top-level CRUD.
         list_response_schema = self._list_response_schema(target_cls, target_class_name)
-        list_extras = self._list_extras(target_cls)
+        list_op_params = self._list_operation_params(target_cls)
 
         link_ref = Reference(ref="#/components/schemas/ResourceLink")
         # Body accepts a single link or a batch — clients prefer batch.
@@ -3533,7 +3567,7 @@ class OpenAPIGenerator(Generator):
             summary=f"List {target_class_name} attached to {parent_class_name}.{slot.name}",
             operationId=f"list_{_to_snake_case(parent_class_name)}_{slot_seg}",
             tags=[op_tag],
-            parameters=list_extras or None,
+            parameters=list_op_params or None,
             responses={
                 "200": Response(
                     description=f"{target_class_name} list",
@@ -3580,14 +3614,13 @@ class OpenAPIGenerator(Generator):
         )
         paths[item_path] = item
 
-    def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
-        """Generate query parameters for the list endpoint.
-
-        Delegates capability parsing, auto-inference, and validation to
-        `_query_params.walk_query_params`. This method only renders
-        Parameter objects — wire shape stays unchanged.
-        """
-        params: list[Parameter] = [
+    @staticmethod
+    def _legacy_pagination_params() -> list[Parameter]:
+        """The historical ``limit`` / ``offset`` query params that the
+        generator has always auto-emitted on list endpoints. Carved out
+        of ``_make_query_params`` so the new pagination dialects (#105)
+        can suppress these without duplicating wire fields."""
+        return [
             Parameter(
                 name="limit",
                 param_in=ParameterLocation.QUERY,
@@ -3599,6 +3632,16 @@ class OpenAPIGenerator(Generator):
                 param_schema=Schema(type=DataType.INTEGER, default=0),
             ),
         ]
+
+    def _make_query_params(self, cls: ClassDefinition) -> list[Parameter]:
+        """Filter / sort query parameters for a list endpoint, driven
+        by slot-level ``openapi.query_param`` annotations and the
+        schema-level ``openapi.auto_query_params`` default. Does NOT
+        include pagination params — pagination is composed in
+        ``_list_operation_params`` so the legacy ``limit``/``offset``
+        and the #105 dialects don't both land on the same operation.
+        """
+        params: list[Parameter] = []
         surface = walk_query_params(
             self.schemaview,
             cls,
@@ -3615,6 +3658,27 @@ class OpenAPIGenerator(Generator):
         if surface.sort_tokens:
             params.append(self._make_sort_param(surface.sort_tokens))
         return params
+
+    def _list_operation_params(self, cls: ClassDefinition) -> list[Parameter]:
+        """Single composition point for every list-op emission site
+        (top-level CRUD, composition, reference, templated deep-path).
+        Combines, in order:
+
+        1. Pagination — dialect from ``openapi.pagination`` if declared,
+           else the legacy ``limit``/``offset`` baseline.
+        2. Filter / sort params from slot annotations + auto-inference.
+        3. Extra typed query params from
+           ``openapi.list_query_params`` (#105).
+
+        Authors who declare a dialect get only that dialect's params;
+        no duplication of ``limit``/``offset`` against ``offset`` /
+        ``limit`` from ``page-offset`` (#105 follow-up).
+        """
+        if self._class_annotation(cls, "openapi.pagination"):
+            pagination = self._pagination_params(cls)
+        else:
+            pagination = self._legacy_pagination_params()
+        return pagination + self._make_query_params(cls) + self._extra_list_query_params(cls)
 
     def _render_query_param_for_spec(self, spec: QueryParamSpec) -> list[Parameter]:
         """Render one QueryParamSpec into one or more Parameter objects.

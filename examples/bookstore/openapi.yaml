@@ -169,6 +169,42 @@ paths:
       - Book
       summary: List Author attached to Book.authors
       operationId: list_book_authors
+      parameters:
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 100
+        name: limit
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: integer
+          default: 0
+        name: offset
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+        name: name
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
+      - required: false
+        deprecated: false
+        schema:
+          type: string
+          description: Short biography
+        name: biography
+        in: query
+        allowEmptyValue: false
+        allowReserved: false
       responses:
         '200':
           description: Author list
