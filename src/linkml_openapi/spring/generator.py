@@ -151,6 +151,87 @@ class SpringServerGenerator:
         # so the live springdoc view matches the sidecar (#104).
         self._extra_error_codes: list[int] = self._resolve_error_response_codes()
         self._reactive = self._resolve_reactive()
+        # Reject schema input that would inject Java syntax at code-
+        # generation time. Run after every resolution step so error
+        # messages can reference the user-visible annotation that
+        # produced the bad value.
+        self._validate_schema_security()
+
+    def _validate_schema_security(self) -> None:
+        """Reject class names, slot names, and annotation values that
+        contain characters which would inject Java syntax at
+        code-generation time. Runs once in ``__post_init__``; the
+        cost is a single linear walk of the schema.
+
+        Catches both honest mistakes (slot named ``user-name``) and
+        adversarial input (a class named ``X"); System.exit(0); //``).
+        Validation is deliberately strict: ASCII identifiers only, no
+        Unicode letter classes — sidesteps bidi attacks and any
+        normalisation surprises downstream.
+        """
+        sv = self._sv
+        # Schema-level annotations whose values land in identifier
+        # slots — must be validated independently of the per-class
+        # walk below.
+        schema_anns = getattr(sv.schema, "annotations", None) or {}
+        items = schema_anns.values() if hasattr(schema_anns, "values") else schema_anns
+        for ann in items:
+            tag = getattr(ann, "tag", None)
+            if tag == "openapi.error_class_name":
+                _validate_identifier(str(ann.value).strip(), "openapi.error_class_name")
+        for class_name in sv.all_classes():
+            cls = sv.get_class(class_name)
+            if cls is None:
+                continue
+            _validate_identifier(class_name, "class name")
+            # `openapi.error_class_name` lands as a Java class name
+            # (file path, identifier slot, `@Schema(implementation =
+            # X.class)`). Must be a strict identifier.
+            ecn = self._class_annotation(cls, "openapi.error_class_name")
+            if ecn is not None:
+                _validate_identifier(ecn.strip(), "openapi.error_class_name", owner=class_name)
+            # The next four annotations carry WIRE-side values (JSON
+            # property names or polymorphic-tag values). They land
+            # inside Java string literals and JSON-property
+            # annotations; the alphabet is intentionally permissive
+            # (CURIEs, FQNs, ``#type``, hash-prefixed JSON-LD
+            # keywords). We only reject characters that can't be
+            # safely embedded in a Java literal — quotes, backslashes,
+            # newlines, and ``*/`` (would close any Javadoc that
+            # echoes the value).
+            for ann_tag in (
+                "openapi.type_value",
+                "openapi.legacy_type_field",
+                "openapi.legacy_type_value",
+                "openapi.discriminator",
+            ):
+                val = self._class_annotation(cls, ann_tag)
+                if val is not None and (any(c in val for c in '"\\\n\r') or "*/" in val):
+                    raise ValueError(
+                        f"{ann_tag} on {class_name!r} contains characters "
+                        "that can't be safely embedded in Java source "
+                        "(quote, backslash, newline, or javadoc-close "
+                        "``*/``)."
+                    )
+            # Path-shaped annotations.
+            for ann_tag in ("openapi.path", "openapi.path_segment", "openapi.path_template"):
+                val = self._class_annotation(cls, ann_tag)
+                if val is not None:
+                    _validate_path_literal(val.strip(), ann_tag, owner=class_name)
+            for slot in self._induced_slots(class_name):
+                # Slot names land in `@JsonProperty("…")` (string
+                # literal) AND in javadoc descriptions (e.g.
+                # ``"GET /<slot.name> — list ..."``). The literal
+                # path needs no quote / backslash / newline; the
+                # javadoc path additionally needs no ``*/`` (would
+                # close the comment early). Reject both at once.
+                if any(c in slot.name for c in '"\\\n\r') or "*/" in slot.name:
+                    raise ValueError(
+                        f"Slot name {slot.name!r} on class {class_name!r} "
+                        "contains characters that can't be safely embedded "
+                        "in Java source (quote, backslash, newline, or "
+                        "javadoc-close ``*/``)."
+                    )
 
     def _resolve_reactive(self) -> bool:
         """Pick Spring WebFlux vs Spring MVC output (#80).
@@ -330,10 +411,26 @@ class SpringServerGenerator:
 
         Returns the list of files written.
         """
-        out = Path(output_dir)
+        out = Path(output_dir).resolve()
+        out.mkdir(parents=True, exist_ok=True)
         written: list[Path] = []
         for relpath, source in self.build().items():
-            target = out / relpath
+            target = (out / relpath).resolve()
+            # Path-traversal guard: refuse to write outside the
+            # caller's chosen output directory even if `relpath`
+            # contains `..` segments produced by an upstream
+            # ``package`` or class name that snuck through identifier
+            # validation. Belt-and-braces: validation should have
+            # rejected the bad input already, but a regression in the
+            # validator must not turn into arbitrary-file-write.
+            try:
+                target.relative_to(out)
+            except ValueError as exc:
+                raise ValueError(
+                    f"Refusing to write {relpath!r}: resolves to {target} "
+                    f"which is outside the output tree {out}. This usually "
+                    "indicates a malformed class name or package."
+                ) from exc
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(source)
             written.append(target)
@@ -345,6 +442,7 @@ class SpringServerGenerator:
         # parent doesn't look like a Maven/Gradle source tree keeps
         # this useful in toy/test layouts too.
         resources_dir = out.parent / "resources" if out.name == "java" else out / "resources"
+        resources_dir = resources_dir.resolve()
         resources_dir.mkdir(parents=True, exist_ok=True)
         spec_path = resources_dir / "openapi.yaml"
         spec_path.write_text(self._render_openapi_spec())
@@ -491,13 +589,18 @@ public class %(class_name)s {
                 )
             class_schema_annotation = f"@Schema({', '.join(parts)})"
 
+        # Javadoc-escape every string that lands inside ``/** ... */``
+        # — without this, a class description containing ``*/`` would
+        # close the Javadoc early and any text after would parse as
+        # Java source. ``class_uri`` is similarly user-controlled
+        # (CURIE / IRI), so escape it too.
         return self._env.get_template("dto.java.jinja").render(
             package=self.package,
             class_name=cls.name,
             extends=extends,
             abstract=bool(cls.abstract),
-            doc=cls.description or "",
-            class_uri=class_uri,
+            doc=_escape_javadoc(cls.description or ""),
+            class_uri=_escape_javadoc(class_uri) if class_uri else class_uri,
             class_schema_annotation=class_schema_annotation,
             json_type_info=json_type_info,
             properties=properties,
@@ -546,6 +649,12 @@ public class %(class_name)s {
                         "openapi.legacy_type_codegen_name",
                     )
                     java_name = legacy_codegen_name or _java_identifier(legacy_field)
+                    # Escape ``legacy_value`` at every Java-literal
+                    # interpolation; ``_validate_schema_security``
+                    # already rejected quotes/backslashes/newlines,
+                    # but keeping the escape call here is the right
+                    # defense if validation is ever relaxed.
+                    safe_legacy = _escape_java(legacy_value)
                     properties.append(
                         {
                             "java_name": java_name,
@@ -553,12 +662,12 @@ public class %(class_name)s {
                             "getter_name": java_name[:1].upper() + java_name[1:],
                             "json_property": legacy_field,
                             "required": True,
-                            "default": f'"{legacy_value}"',
+                            "default": f'"{safe_legacy}"',
                             "schema_annotation": (
-                                f'@Schema(allowableValues = {{"{legacy_value}"}}, '
-                                f'defaultValue = "{legacy_value}")'
+                                f'@Schema(allowableValues = {{"{safe_legacy}"}}, '
+                                f'defaultValue = "{safe_legacy}")'
                             ),
-                            "javadoc": (
+                            "javadoc": _escape_javadoc(
                                 f"Back-compat opaque type marker. Pinned to "
                                 f'"{legacy_value}" for {cls.name}.'
                             ),
@@ -623,8 +732,12 @@ public class %(class_name)s {
 
         validation_annotations: list[str] = []
         if slot.pattern:
-            escaped = slot.pattern.replace("\\", "\\\\").replace('"', '\\"')
-            validation_annotations.append(f'@Pattern(regexp = "{escaped}")')
+            # Reuse the shared escape so newlines / tabs / etc. in a
+            # ``slot.pattern`` don't break the Java string literal.
+            # Pre-existing code only handled ``\\`` / ``"`` — a raw
+            # newline in the pattern would have made the file
+            # uncompilable.
+            validation_annotations.append(f'@Pattern(regexp = "{_escape_java(slot.pattern)}")')
             imports.add("jakarta.validation.constraints.Pattern")
         if slot.minimum_value is not None and java_inner in {"Long", "Integer"}:
             validation_annotations.append(f"@Min({slot.minimum_value})")
@@ -669,7 +782,10 @@ public class %(class_name)s {
             "json_property": (slot.name if slot.name != java_name else json_prop),
             "required": bool(slot.required),
             "default": None,
-            "javadoc": (slot.description or "").strip() or None,
+            # Slot description may legitimately contain Markdown ``*/``
+            # in tables / code spans — escape so it can't close the
+            # rendered Javadoc.
+            "javadoc": _escape_javadoc((slot.description or "").strip()) or None,
             "validation_annotations": validation_annotations,
             "schema_annotation": schema_annotation,
         }
@@ -748,10 +864,17 @@ public class %(class_name)s {
         # ``@ApiResponse`` content schemas describe the wire format and
         # are unchanged — only the Java method shape flips.
         self._apply_reactive_shape(ops, imports)
+        # class_uri lands inside the Javadoc opening block — escape so
+        # an adversarial CURIE / IRI containing ``*/`` can't close the
+        # comment early. Property-level javadocs in `ops[i].javadoc`
+        # are already constructed from validated identifiers and
+        # path-literal-validated paths (see _validate_schema_security),
+        # so they don't need further escaping at render time.
+        class_uri = self._expand_curie(cls.class_uri) if cls.class_uri else ""
         return self._env.get_template("api.java.jinja").render(
             package=self.package,
             resource_class=cls.name,
-            class_uri=self._expand_curie(cls.class_uri) if cls.class_uri else "",
+            class_uri=_escape_javadoc(class_uri) if class_uri else "",
             imports=sorted(imports),
             operations=ops,
             request_mapping_base=self._effective_path_prefix,
@@ -1770,7 +1893,14 @@ def _description_with_rdf(
 def _escape_java(text: str) -> str:
     """Escape a string for embedding inside a Java string literal:
     backslashes, double quotes, newlines, tabs, carriage returns.
-    Anything else passes through untouched."""
+    Anything else passes through untouched.
+
+    NOT safe for Javadoc bodies — see :func:`_escape_javadoc`. NOT
+    safe for identifier slots (class names, method names, package
+    components) — use :func:`_validate_identifier` to reject input
+    that would inject syntax there. This function only handles the
+    string-literal case.
+    """
     return (
         text.replace("\\", "\\\\")
         .replace('"', '\\"')
@@ -1778,6 +1908,69 @@ def _escape_java(text: str) -> str:
         .replace("\r", "\\r")
         .replace("\t", "\\t")
     )
+
+
+def _escape_javadoc(text: str) -> str:
+    """Escape a string for embedding inside a Javadoc ``/** ... */``
+    block. The key risk is the ``*/`` sequence — if present in the
+    body, it closes the comment early and any text after is parsed as
+    Java source. We replace ``*/`` with ``*&#47;`` (HTML-entity for
+    ``/``) so the rendered Javadoc still reads correctly but the
+    parser can't be fooled."""
+    return text.replace("*/", "*&#47;")
+
+
+# Identifier validation — used to reject schema input that would
+# inject Java syntax via class names, slot names, annotation values
+# that land in identifier slots (e.g. `openapi.type_value`,
+# `openapi.legacy_type_field`, `openapi.error_class_name`).
+#
+# Pattern matches a strict Java identifier: ASCII letter or underscore
+# followed by ASCII letters, digits, underscores, or ``$``. Stricter
+# than the JLS (which allows most Unicode letters) so we sidestep
+# bidi-attack territory and any normalisation surprises downstream.
+_JAVA_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_$]*$")
+
+
+def _validate_identifier(value: str, kind: str, owner: str = "") -> None:
+    """Raise ``ValueError`` if ``value`` is not a strict Java identifier.
+
+    Used in ``__post_init__`` to reject schema input that would inject
+    Java syntax at code-generation time. Catches both honest mistakes
+    (a slot named ``user-name``) and adversarial input (a class named
+    ``X"); System.exit(0); //``).
+    """
+    if not isinstance(value, str) or not _JAVA_IDENTIFIER_RE.match(value):
+        location = f" on {owner!r}" if owner else ""
+        raise ValueError(
+            f"{kind} {value!r}{location} is not a valid Java identifier; "
+            f"must match {_JAVA_IDENTIFIER_RE.pattern!r}. Rename in the "
+            "schema, or set the corresponding `openapi.*` annotation to "
+            "a Java-compatible value."
+        )
+
+
+# Pattern for the subset of an HTTP URL path that is safe to land in
+# a Spring ``@RequestMapping(value = "…")`` literal without
+# template-injection risk. Allows ``{name}`` placeholders, segment
+# letters/digits/hyphens/underscores, slashes; disallows
+# quote/backslash/semicolon/braces other than placeholder braces.
+_PATH_LITERAL_RE = re.compile(r"^[A-Za-z0-9_\-./{}]*$")
+
+
+def _validate_path_literal(value: str, annotation: str, owner: str = "") -> None:
+    """Raise ``ValueError`` if ``value`` (a URL path) contains
+    characters that could escape the Java string literal context it
+    lands in (``"…"`` inside ``@*Mapping``). Allows the standard URL
+    path alphabet plus ``{name}`` placeholders; rejects everything
+    else."""
+    if not isinstance(value, str) or not _PATH_LITERAL_RE.match(value):
+        location = f" on {owner!r}" if owner else ""
+        raise ValueError(
+            f"{annotation} {value!r}{location} contains characters that "
+            "are not safe to embed in a Java URL pattern; restrict to "
+            f"{_PATH_LITERAL_RE.pattern!r}."
+        )
 
 
 # Java reserved words (JLS §3.9, including contextual keywords and

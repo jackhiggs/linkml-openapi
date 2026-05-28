@@ -2436,6 +2436,14 @@ class OpenAPIGenerator(Generator):
         raw = self._class_annotation(cls, "openapi.list_query_params")
         if not raw:
             return []
+        # Cap the JSON input length so a pathologically deep / large
+        # annotation can't blow stack or RAM on a build.
+        if len(raw) > 65_536:
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: value is "
+                f"{len(raw)} bytes (cap is 65,536). Encode fewer params or "
+                "split across schemas."
+            )
         try:
             decoded = json.loads(raw)
         except json.JSONDecodeError as exc:
@@ -2443,6 +2451,11 @@ class OpenAPIGenerator(Generator):
                 f"openapi.list_query_params on {cls.name!r}: value must be a "
                 f"JSON array of `{{name, type, description?}}` objects; got "
                 f"{raw!r} ({exc})."
+            ) from exc
+        except RecursionError as exc:
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: value is "
+                f"too deeply nested to parse safely."
             ) from exc
         if not isinstance(decoded, list):
             raise ValueError(

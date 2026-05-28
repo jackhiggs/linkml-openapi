@@ -8,6 +8,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Input validation for Java code emission.** A second code review
+  identified that the Spring emitter interpolated several
+  schema-derived strings (class names, slot names, `openapi.path*`,
+  `openapi.type_value`, `openapi.legacy_type_value`,
+  `openapi.discriminator`, `openapi.error_class_name`, descriptions)
+  into Java source as raw f-strings, allowing a maliciously-crafted
+  LinkML schema to inject arbitrary Java at code-generation time
+  (closing the enclosing string literal or Javadoc and substituting
+  new top-level declarations). Mitigations:
+  - **Strict identifier validation** at `__post_init__` rejects
+    class names and identifier-shaped annotation values that don't
+    match `^[A-Za-z_][A-Za-z0-9_$]*$`.
+  - **Wire-value validation** rejects quote / backslash / newline /
+    `*/` characters in `openapi.type_value`,
+    `openapi.legacy_type_field`, `openapi.legacy_type_value`,
+    `openapi.discriminator` (catches Javadoc-close and Java-literal
+    breakouts).
+  - **Path-literal validation** restricts `openapi.path`,
+    `openapi.path_segment`, `openapi.path_template` to the URL-path
+    alphabet plus `{name}` placeholders.
+  - **Slot-name validation** rejects quote / backslash / newline /
+    `*/` (slot names land in `@JsonProperty("…")` and embedded in
+    Javadoc).
+  - **`_escape_javadoc`** replaces `*/` with `*&#47;` in description
+    strings so a class description containing `*/` can't close the
+    Javadoc early; applied to class- and slot-level descriptions
+    plus the `class_uri` Javadoc reference and the legacy-type-value
+    "pinned to …" javadoc.
+  - **Universal `_escape_java`** now applied at every Java string
+    literal interpolation site, including `slot.pattern`,
+    `legacy_value` in `@Schema(allowableValues = {…},
+    defaultValue = …)`, and the legacy-default initialiser.
+- **Path-traversal containment** in `SpringServerGenerator.emit`.
+  Every emitted file's resolved path is checked against the
+  resolved output directory; writes that would land outside the
+  tree are refused. Belt-and-braces with the identifier validation
+  above — a regression in either layer alone won't reopen the
+  arbitrary-file-write vector.
+- **DoS guard on `openapi.list_query_params`.** JSON parsing is now
+  bounded by a 65 KB input cap and catches `RecursionError`
+  alongside `JSONDecodeError`. Prevents pathologically deep JSON
+  from blowing the parser stack.
+
 ### Added
 
 - **`openapi.profile.<name>.include_classes` / `include_slots`** are
