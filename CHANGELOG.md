@@ -6,6 +6,88 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [Unreleased]
+
+### Added
+
+- **`openapi.profile.<name>.include_classes` / `include_slots`** are
+  now honoured (previously parsed but silently ignored). When
+  declared, the active profile keeps only the listed classes / slots
+  on the emitted surface; everything else is added to the existing
+  `exclude_*` sets. Composable with the explicit `exclude_*` lists —
+  exclusion still wins on a conflict.
+- **Spring `--error-responses` CLI flag** /
+  `error_responses=[...]` kwarg on `SpringServerGenerator`. Mirrors
+  the OpenAPI generator's #104 flag; extra 4xx/5xx codes from
+  `openapi.error_responses` (schema annotation or kwarg) now reach
+  the controller `@ApiResponse` blocks AND the sidecar OpenAPI spec,
+  so springdoc's live view matches the static contract.
+
+### Fixed
+
+- **`--codegen-friendly` + `--flatten-inheritance` no longer
+  reintroduces the #106 covariance crash.** `_narrowing_subclasses`
+  was only populated inside the `allOf` branch of
+  `_class_to_schema`, so flatten-mode + narrowing fell through to
+  the parent-`$ref` strategy and produced uncompilable Java.
+  Narrowing detection now runs in a dedicated pre-pass that sees
+  every is_a relationship regardless of emission mode.
+- **Pagination dialects no longer duplicate the legacy `limit` /
+  `offset` query params.** When `openapi.pagination` is declared,
+  the dialect's params replace the auto-emitted baseline; previously
+  `page-offset` produced two `offset` and two `limit` parameters
+  (invalid OpenAPI), and `cursor` / `page-size` shipped both
+  dialects on the same operation. Schemas without
+  `openapi.pagination` keep today's `limit` / `offset` baseline.
+- **`openapi.list_envelope` / `openapi.pagination` /
+  `openapi.list_query_params` now reach composition and reference
+  list operations** (#105 follow-up). Previously only the top-level
+  CRUD list and templated deep-path list ran through the
+  envelope-aware builder; composition and reference lists got only
+  the extras and missed pagination + auto-filter params. Refactored
+  all four sites to share `_list_operation_params`.
+- **`openapi.error_class` (user-defined error DTO) now reaches the
+  Spring side.** When set, the Spring emitter skips synthesising
+  `Problem.java` and routes every `@ApiResponse` at the user's
+  class. The sidecar OpenAPI spec already honoured the annotation,
+  so the two halves now agree on the wire shape.
+- **`openapi.error_responses` extra codes now reach Spring
+  controllers.** `_problem_responses` accepts the extra-codes list
+  and threads through to `_success_and_problem_responses`, emitting
+  one `@ApiResponse(responseCode = "...")` per declared code
+  alongside the 404 / 422 / 500 baseline. Previously the Spring
+  controllers and the sidecar spec disagreed.
+- **Concrete polymorphic root now appears in `@JsonSubTypes`.**
+  When the discriminator-bearing root is not abstract and pins its
+  own `openapi.type_value`, the Spring `@JsonSubTypes` list now
+  includes the root itself — mirrors the OpenAPI side's #95 fix and
+  lets Jackson deserialise root payloads.
+- **Java reserved-word slot names compile.** A LinkML slot named
+  `class`, `default`, `enum`, `void`, etc. now emits as
+  `class_` / `default_` / etc. on the Java side, preserving the
+  original wire name on `@JsonProperty`. Previously the generated
+  code was uncompilable.
+- **`openapi.path_template` strings containing quotes or backslashes
+  are now properly Java-escaped** before being interpolated into
+  `@GetMapping(value = "…")`.
+- **`openapi.expose: "false"`** consistency: parsing now goes
+  through the new `_is_falsy` helper so `"FALSE"` /
+  `"  false  "` / YAML `false` all suppress emission identically.
+  Same helper applied to `openapi.body` / `openapi.nested` /
+  `openapi.codegen_inheritance`.
+
+### Internal
+
+- Removed dead `_is_in_polymorphic_chain` method and three
+  redundant in-function `import warnings` / `import json`
+  statements.
+- Sidecar `OpenAPIGenerator` invocation in
+  `SpringServerGenerator._render_openapi_spec` now threads
+  `error_responses` through; documented the contract that future
+  Spring kwargs affecting the OpenAPI wire shape MUST be forwarded.
+- 22 new regression tests across `test_generator.py` and
+  `test_linkml_spring.py` cover every fix above.
+
 ## [0.15.0] — 2026-05-28
 
 ### Added
