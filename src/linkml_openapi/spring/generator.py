@@ -1300,7 +1300,21 @@ public class %(class_name)s {
     # --- LinkML helpers ------------------------------------------------
 
     def _is_resource(self, cls: ClassDefinition) -> bool:
-        return self._class_annotation(cls, "openapi.resource") == "true"
+        """True when the class has paths emitted by ``gen-spring-server``.
+
+        Honours ``openapi.expose: "false"`` (#110) — when set, the class
+        stays as a Java DTO (so other resources can reference its
+        shape via ``$ref``) but no controller interface, no path
+        emission, no sidecar entries for it. Use when the schema
+        author wants the type addressable on the OpenAPI side but the
+        CRUD owner is a different service.
+        """
+        if self._class_annotation(cls, "openapi.resource") != "true":
+            return False
+        expose = self._class_annotation(cls, "openapi.expose")
+        if expose is not None and expose.strip().lower() == "false":
+            return False
+        return True
 
     def _media_types(self, cls: ClassDefinition) -> list[str]:
         """Per-class media type list. Walks the ``is_a`` chain, taking
