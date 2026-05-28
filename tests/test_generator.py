@@ -3597,7 +3597,7 @@ classes:
         # (#107 only widens the rule when both annotations agree).
         schema = self.SCHEMA.replace(
             'openapi.discriminator: "#type"',
-            'openapi.discriminator: kind',
+            "openapi.discriminator: kind",
         )
         spec = _generate_from_string(schema, codegen_friendly=True)
         kind = spec["components"]["schemas"]["Kind"]
@@ -3922,15 +3922,18 @@ classes:
         assert schema["items"] == {"$ref": "#/components/schemas/Dataset"}
 
     def test_envelope_wraps_200_in_ref(self):
-        schema_yaml = self.BASE.replace(
-            "openapi.path: datasets",
-            'openapi.path: datasets\n      openapi.list_envelope: PagedDatasets',
-        ) + """
+        schema_yaml = (
+            self.BASE.replace(
+                "openapi.path: datasets",
+                "openapi.path: datasets\n      openapi.list_envelope: PagedDatasets",
+            )
+            + """
   PagedDatasets:
     attributes:
       items: { range: Dataset, multivalued: true }
       nextCursor: string
 """
+        )
         spec = _generate_from_string(schema_yaml)
         get = spec["paths"]["/datasets"]["get"]
         body = get["responses"]["200"]["content"]["application/json"]["schema"]
@@ -3939,7 +3942,7 @@ classes:
     def test_envelope_class_missing_raises(self):
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            'openapi.path: datasets\n      openapi.list_envelope: MissingClass',
+            "openapi.path: datasets\n      openapi.list_envelope: MissingClass",
         )
         _generate_from_string_raises(
             schema_yaml,
@@ -3949,7 +3952,7 @@ classes:
     def test_cursor_pagination_injects_cursor_and_page_size(self):
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            'openapi.path: datasets\n      openapi.pagination: cursor',
+            "openapi.path: datasets\n      openapi.pagination: cursor",
         )
         spec = _generate_from_string(schema_yaml)
         get = spec["paths"]["/datasets"]["get"]
@@ -3960,7 +3963,7 @@ classes:
     def test_page_size_dialect_injects_page_and_size(self):
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            'openapi.path: datasets\n      openapi.pagination: page-size',
+            "openapi.path: datasets\n      openapi.pagination: page-size",
         )
         spec = _generate_from_string(schema_yaml)
         get = spec["paths"]["/datasets"]["get"]
@@ -3971,7 +3974,7 @@ classes:
     def test_page_offset_dialect_injects_offset_and_limit(self):
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            'openapi.path: datasets\n      openapi.pagination: page-offset',
+            "openapi.path: datasets\n      openapi.pagination: page-offset",
         )
         spec = _generate_from_string(schema_yaml)
         get = spec["paths"]["/datasets"]["get"]
@@ -3982,7 +3985,7 @@ classes:
     def test_unknown_dialect_raises(self):
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            'openapi.path: datasets\n      openapi.pagination: invalid',
+            "openapi.path: datasets\n      openapi.pagination: invalid",
         )
         _generate_from_string_raises(schema_yaml, match=r"unknown dialect")
 
@@ -3993,7 +3996,7 @@ classes:
         # dialect-specific names get added on top.
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            'openapi.path: datasets\n      openapi.pagination: none',
+            "openapi.path: datasets\n      openapi.pagination: none",
         )
         spec = _generate_from_string(schema_yaml)
         get = spec["paths"]["/datasets"]["get"]
@@ -4010,7 +4013,7 @@ classes:
         )
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            f'openapi.path: datasets\n      openapi.list_query_params: \'{params_json}\'',
+            f"openapi.path: datasets\n      openapi.list_query_params: '{params_json}'",
         )
         spec = _generate_from_string(schema_yaml)
         get = spec["paths"]["/datasets"]["get"]
@@ -4032,26 +4035,29 @@ classes:
         params_json = '[{"name": "bad", "type": "uuid"}]'
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            f'openapi.path: datasets\n      openapi.list_query_params: \'{params_json}\'',
+            f"openapi.path: datasets\n      openapi.list_query_params: '{params_json}'",
         )
         _generate_from_string_raises(schema_yaml, match=r"not one of")
 
     def test_all_three_compose(self):
         params_json = '[{"name": "filter", "type": "string"}]'
-        schema_yaml = self.BASE.replace(
-            "openapi.path: datasets",
-            (
-                "openapi.path: datasets\n"
-                "      openapi.list_envelope: PagedDatasets\n"
-                "      openapi.pagination: cursor\n"
-                f"      openapi.list_query_params: '{params_json}'"
-            ),
-        ) + """
+        schema_yaml = (
+            self.BASE.replace(
+                "openapi.path: datasets",
+                (
+                    "openapi.path: datasets\n"
+                    "      openapi.list_envelope: PagedDatasets\n"
+                    "      openapi.pagination: cursor\n"
+                    f"      openapi.list_query_params: '{params_json}'"
+                ),
+            )
+            + """
   PagedDatasets:
     attributes:
       items: { range: Dataset, multivalued: true }
       nextCursor: string
 """
+        )
         spec = _generate_from_string(schema_yaml)
         get = spec["paths"]["/datasets"]["get"]
         # Envelope: response is $ref.

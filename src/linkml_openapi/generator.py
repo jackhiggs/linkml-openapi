@@ -596,10 +596,7 @@ class OpenAPIGenerator(Generator):
         # ``openapi.operations`` lists only collection-level ops, or
         # when an auto-derived flat item path has no item-level ops
         # to attach (#109).
-        paths = {
-            url: item for url, item in paths.items()
-            if self._path_item_has_operations(item)
-        }
+        paths = {url: item for url, item in paths.items() if self._path_item_has_operations(item)}
 
         # Merge schema-level / CLI ``openapi.error_responses`` codes
         # into every operation. Default-off (codes list is empty) so
@@ -1842,11 +1839,8 @@ class OpenAPIGenerator(Generator):
         cls = sv.get_class(class_name)
         if cls is not None:
             opt_out = (
-                (self._class_annotation(cls, "openapi.codegen_inheritance") or "")
-                .strip()
-                .lower()
-                == "false"
-            )
+                self._class_annotation(cls, "openapi.codegen_inheritance") or ""
+            ).strip().lower() == "false"
         if self.codegen_friendly and not has_narrowing and not opt_out:
             return Reference(ref=f"#/components/schemas/{class_name}")
         oneof = [Reference(ref=f"#/components/schemas/{n}") for n in descendants]
@@ -2094,18 +2088,14 @@ class OpenAPIGenerator(Generator):
             # simple class name. Switch the mapping keys to follow the
             # wire so dispatch actually resolves (#107).
             root_legacy_field = self._class_annotation(cls, "openapi.legacy_type_field")
-            use_legacy_keys = (
-                root_legacy_field is not None and root_legacy_field.strip() == field
-            )
+            use_legacy_keys = root_legacy_field is not None and root_legacy_field.strip() == field
             for sub_name in inject_candidates:
                 sub_cls = sv.get_class(sub_name)
                 tv = self._type_value(sub_cls)
                 if tv is None:
                     continue
                 if use_legacy_keys:
-                    legacy_value = self._class_annotation(
-                        sub_cls, "openapi.legacy_type_value"
-                    )
+                    legacy_value = self._class_annotation(sub_cls, "openapi.legacy_type_value")
                     mapping_key = legacy_value.strip() if legacy_value else tv
                 else:
                     mapping_key = tv
@@ -2141,9 +2131,8 @@ class OpenAPIGenerator(Generator):
             descendants = self._concrete_descendants_including_self(class_name)
             has_narrowing = any(d in self._narrowing_subclasses for d in descendants)
             opt_out = (
-                (self._class_annotation(cls, "openapi.codegen_inheritance") or "").strip().lower()
-                == "false"
-            )
+                self._class_annotation(cls, "openapi.codegen_inheritance") or ""
+            ).strip().lower() == "false"
             if self.codegen_friendly and not has_narrowing and not opt_out:
                 parent_schema = schemas.get(class_name)
                 if isinstance(parent_schema, Schema):
@@ -2354,9 +2343,7 @@ class OpenAPIGenerator(Generator):
             items=self._class_response_ref(class_name),
         )
 
-    def _list_response_schema(
-        self, cls: ClassDefinition, class_name: str
-    ) -> Schema | Reference:
+    def _list_response_schema(self, cls: ClassDefinition, class_name: str) -> Schema | Reference:
         """Resolve the 200-response schema for a list op. When the
         class declares ``openapi.list_envelope: <ClassName>`` the
         response becomes a ``$ref`` to the envelope class (which must
@@ -2428,8 +2415,7 @@ class OpenAPIGenerator(Generator):
         for idx, entry in enumerate(decoded):
             if not isinstance(entry, dict):
                 raise ValueError(
-                    f"openapi.list_query_params on {cls.name!r}: entry "
-                    f"{idx} is not a JSON object."
+                    f"openapi.list_query_params on {cls.name!r}: entry {idx} is not a JSON object."
                 )
             name = entry.get("name")
             otype = entry.get("type")

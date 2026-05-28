@@ -204,9 +204,7 @@ def cli(
             try:
                 codes.append(int(token))
             except ValueError as exc:
-                raise click.BadParameter(
-                    f"--error-responses: {token!r} is not an integer"
-                ) from exc
+                raise click.BadParameter(f"--error-responses: {token!r} is not an integer") from exc
         kwargs["error_responses"] = codes
     gen = OpenAPIGenerator(yamlfile, resource_filter=resource_filter, **kwargs)
     spec = gen.serialize()
