@@ -28,9 +28,11 @@ Scope (MVP):
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import ClassVar
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from linkml_runtime.linkml_model import ClassDefinition, SlotDefinition
@@ -48,6 +50,7 @@ from linkml_openapi._chains import (
     parse_path_param_sources,
     render_chain_hops,
 )
+from linkml_openapi._http import HTTP_REASON_PHRASES
 from linkml_openapi._query_params import QueryParamSpec, walk_query_params
 from linkml_openapi.generator import _is_falsy, _to_snake_case
 
@@ -286,35 +289,8 @@ class SpringServerGenerator:
                     return value
         return None
 
-    # IANA reason phrases for extra ``openapi.error_responses`` codes.
-    # Kept in sync with ``OpenAPIGenerator._HTTP_REASON_PHRASES`` so
-    # the controller annotations and sidecar spec match wire-for-wire.
-    _HTTP_REASON_PHRASES = {
-        400: "Bad request",
-        401: "Unauthorized",
-        402: "Payment required",
-        403: "Forbidden",
-        404: "Not found",
-        405: "Method not allowed",
-        406: "Not acceptable",
-        408: "Request timeout",
-        409: "Conflict",
-        410: "Gone",
-        412: "Precondition failed",
-        413: "Payload too large",
-        415: "Unsupported media type",
-        422: "Validation error",
-        423: "Locked",
-        424: "Failed dependency",
-        428: "Precondition required",
-        429: "Too many requests",
-        451: "Unavailable for legal reasons",
-        500: "Server error",
-        501: "Not implemented",
-        502: "Bad gateway",
-        503: "Service unavailable",
-        504: "Gateway timeout",
-    }
+    # IANA reason phrases live in ``linkml_openapi._http`` so the
+    # controller annotations and sidecar spec can't drift (#10).
 
     def _resolve_error_response_codes(self) -> list[int]:
         """Resolve the extra HTTP codes to emit on every controller op.
@@ -463,14 +439,21 @@ class SpringServerGenerator:
         the live springdoc view diverges from the static spec."""
         from linkml_openapi.generator import OpenAPIGenerator
 
+        # Preserve the kwarg's tri-state semantics through to the
+        # sidecar (#9): an explicit empty list means "skip injection
+        # everywhere"; ``None`` means "let the sidecar resolve from
+        # the schema annotation." Without this, ``[] or None`` would
+        # collapse the disable intent and the sidecar would re-emit
+        # the annotation's codes.
+        if self.error_responses is not None:
+            sidecar_error_responses: list[int] | None = list(self._extra_error_codes)
+        else:
+            sidecar_error_responses = None
         return OpenAPIGenerator(
             self.schema_path,
             path_prefix=self._effective_path_prefix or None,
             path_style=self.path_style,
-            # Thread the same extra error codes (#104) so the sidecar
-            # spec advertises 400/401/etc. on the same operations the
-            # controllers do.
-            error_responses=self._extra_error_codes or None,
+            error_responses=sidecar_error_responses,
         ).serialize()
 
     def build(self) -> dict[str, str]:
@@ -854,7 +837,8 @@ public class %(class_name)s {
                     media_types,
                     self._error_class_name,
                     self._extra_error_codes,
-                    self._HTTP_REASON_PHRASES,
+                    HTTP_REASON_PHRASES,
+                    op_kind=_op_kind_from_method_name(op["method_name"]),
                 )
             )
         if self._effective_path_prefix:
@@ -942,7 +926,13 @@ public class %(class_name)s {
                 imports.add(f"{self.package}.model.{body_type}")
         base = f'"/{path_segment}"'
         item = f'"/{path_segment}/{{id}}"'
-        list_return = f"List<{cn}>"
+        # Envelope-aware return type for the list op (#105) — when
+        # ``openapi.list_envelope`` is set, the controller returns the
+        # envelope class (which embeds the array slot itself) instead
+        # of a bare ``List<T>``.
+        list_return = self._list_return_type(cls, f"List<{cn}>")
+        if list_return != f"List<{cn}>":
+            imports.add(f"{self.package}.model.{list_return}")
         produces = _produces_arg(media_types)
         consumes = produces
         return [
@@ -951,7 +941,7 @@ public class %(class_name)s {
                 "method_annotations": [f"@GetMapping(value = {base}, produces = {produces})"],
                 "method_name": f"list{cn}s",
                 "return_type": list_return,
-                "params": _list_query_params() + self._query_param_dicts(cls, imports),
+                "params": self._list_operation_param_dicts(cls, imports),
             },
             {
                 "javadoc": f"POST /{path_segment} — create a {cn}.",
@@ -1079,16 +1069,20 @@ public class %(class_name)s {
         target_id_var = _java_identifier(target.name) + "Id"
         produces = _produces_arg(media_types)
         consumes = produces
+        # Envelope / pagination / extras on the nested list op
+        # mirror the target class's top-level CRUD list shape (#4).
+        list_return = self._list_return_type(target, f"List<{tn}>")
+        if list_return != f"List<{tn}>":
+            imports.add(f"{self.package}.model.{list_return}")
         return [
             {
                 "javadoc": f"GET /{slot.name} — list embedded {tn}s under a {pn}.",
                 "method_annotations": [f"@GetMapping(value = {collection}, produces = {produces})"],
                 "method_name": f"list{pn}{sn}",
-                "return_type": f"List<{tn}>",
+                "return_type": list_return,
                 "params": [
                     _path_param("id"),
-                    *_list_query_params(),
-                    *self._query_param_dicts(target, imports),
+                    *self._list_operation_param_dicts(target, imports),
                 ],
             },
             {
@@ -1166,8 +1160,11 @@ public class %(class_name)s {
                 "return_type": "List<URI>",
                 "params": [
                     _path_param("id"),
-                    *_list_query_params(),
-                    *self._query_param_dicts(target, imports),
+                    # Pagination / filters / extras still come from the
+                    # target class — the reference list URL lists the
+                    # SAME resource type the composition list does, so
+                    # the query-param contract matches (#4).
+                    *self._list_operation_param_dicts(target, imports),
                 ],
             },
             {
@@ -1398,6 +1395,9 @@ public class %(class_name)s {
                     collection_params = [
                         p for p, n in zip(item_params, unique_placeholders) if n != tail_name
                     ]
+                    templated_list_return = self._list_return_type(cls, f"List<{cn}>")
+                    if templated_list_return != f"List<{cn}>":
+                        imports.add(f"{self.package}.model.{templated_list_return}")
                     ops.extend(
                         [
                             {
@@ -1407,11 +1407,10 @@ public class %(class_name)s {
                                     f" produces = {produces})"
                                 ],
                                 "method_name": f"list{cn}s{suffix}",
-                                "return_type": f"List<{cn}>",
+                                "return_type": templated_list_return,
                                 "params": [
                                     *collection_params,
-                                    *_list_query_params(),
-                                    *self._query_param_dicts(cls, imports),
+                                    *self._list_operation_param_dicts(cls, imports),
                                 ],
                             },
                             {
@@ -1462,6 +1461,160 @@ public class %(class_name)s {
             imports.add("java.util.List")
         return out
 
+    # --- #105: pagination / envelope / extras on Spring side ----------
+
+    # Dialect → list of (param name, Java type, description). Mirrors
+    # ``OpenAPIGenerator._PAGINATION_DIALECTS`` so the sidecar spec and
+    # the controller annotations advertise the same query-param shape.
+    _PAGINATION_DIALECTS: ClassVar[dict[str, list[tuple[str, str, str]]]] = {
+        "cursor": [
+            ("cursor", "String", "Opaque cursor returned by a previous page."),
+            ("pageSize", "Integer", "Maximum number of items per page."),
+        ],
+        "page-size": [
+            ("page", "Integer", "1-indexed page number."),
+            ("size", "Integer", "Page size."),
+        ],
+        "page-offset": [
+            ("offset", "Integer", "Zero-based offset into the result set."),
+            ("limit", "Integer", "Maximum number of items to return."),
+        ],
+        "none": [],
+    }
+
+    @staticmethod
+    def _request_param_dict(name: str, java_type: str) -> dict:
+        """Build one ``@RequestParam`` dict for the template."""
+        return {
+            "annotation": f'@RequestParam(name = "{name}", required = false)',
+            "java_type": java_type,
+            "java_name": name,
+        }
+
+    def _pagination_param_dicts(self, cls: ClassDefinition) -> list[dict]:
+        """``@RequestParam`` dicts for the class's pagination dialect
+        (#105). When ``openapi.pagination`` is unset, returns the
+        legacy ``limit`` / ``offset`` baseline so today's wire shape
+        is preserved. When it is set, the dialect's params *replace*
+        the baseline (no duplication)."""
+        dialect = self._class_annotation(cls, "openapi.pagination")
+        if not dialect or not dialect.strip():
+            return _list_query_params()
+        dialect = dialect.strip()
+        if dialect not in self._PAGINATION_DIALECTS:
+            raise ValueError(
+                f"openapi.pagination on {cls.name!r}: unknown dialect "
+                f"{dialect!r}; expected one of "
+                f"{sorted(self._PAGINATION_DIALECTS)}."
+            )
+        return [
+            self._request_param_dict(name, java_type)
+            for name, java_type, _ in self._PAGINATION_DIALECTS[dialect]
+        ]
+
+    def _extra_list_param_dicts(self, cls: ClassDefinition) -> list[dict]:
+        """``@RequestParam`` dicts from ``openapi.list_query_params``
+        (#105 JSON array). Decoded with the same length cap and
+        error paths the OpenAPI generator uses, so a malformed value
+        produces the same error on both sides."""
+        raw = self._class_annotation(cls, "openapi.list_query_params")
+        if not raw:
+            return []
+        if len(raw) > 65_536:
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: value is "
+                f"{len(raw)} bytes (cap is 65,536)."
+            )
+        try:
+            decoded = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: value must be a "
+                f"JSON array of `{{name, type, description?}}` objects; got "
+                f"{raw!r} ({exc})."
+            ) from exc
+        except RecursionError as exc:
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: value is "
+                "too deeply nested to parse safely."
+            ) from exc
+        if not isinstance(decoded, list):
+            raise ValueError(
+                f"openapi.list_query_params on {cls.name!r}: expected a JSON "
+                f"array, got {type(decoded).__name__}."
+            )
+        java_type_for = {
+            "string": "String",
+            "integer": "Integer",
+            "number": "Double",
+            "boolean": "Boolean",
+            "array": "java.util.List<String>",
+        }
+        out: list[dict] = []
+        for idx, entry in enumerate(decoded):
+            if not isinstance(entry, dict):
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: entry {idx} is not a JSON object."
+                )
+            name = entry.get("name")
+            otype = entry.get("type")
+            if not name or not otype:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: entry "
+                    f"{idx} must declare `name` and `type`."
+                )
+            if otype not in java_type_for:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: entry "
+                    f"{idx} type {otype!r} is not one of "
+                    f"{sorted(java_type_for)}."
+                )
+            out.append(self._request_param_dict(name, java_type_for[otype]))
+        return out
+
+    def _list_envelope_class(self, cls: ClassDefinition) -> str | None:
+        """The Java class name to use as the list-op return type when
+        ``openapi.list_envelope`` is set, or None for the default
+        ``List<T>`` shape. Validates that the envelope class exists
+        in the schema (matches the OpenAPI generator's behaviour)."""
+        envelope = self._class_annotation(cls, "openapi.list_envelope")
+        if not envelope:
+            return None
+        envelope = envelope.strip()
+        if self._sv.get_class(envelope) is None:
+            raise ValueError(
+                f"openapi.list_envelope on {cls.name!r} refers to undefined "
+                f"class {envelope!r}; add the class to the schema or remove "
+                "the annotation."
+            )
+        return envelope
+
+    def _list_operation_param_dicts(self, cls: ClassDefinition, imports: set[str]) -> list[dict]:
+        """Single composition point for every list-op site's
+        @RequestParam list (#4 follow-up). Combines pagination
+        (dialect or legacy baseline), slot-driven filter / sort
+        params, and ``openapi.list_query_params`` extras. Mirrors the
+        OpenAPI generator's ``_list_operation_params`` so the
+        controllers and the sidecar spec agree wire-for-wire."""
+        return (
+            self._pagination_param_dicts(cls)
+            + self._query_param_dicts(cls, imports)
+            + self._extra_list_param_dicts(cls)
+        )
+
+    def _list_return_type(self, cls: ClassDefinition, default: str) -> str:
+        """Return type for a list op. When ``openapi.list_envelope``
+        is set, returns the envelope class name (Spring still wraps
+        it in ``ResponseEntity<…>`` / ``Mono<…>`` per reactive
+        mode). Otherwise returns ``default`` (e.g. ``List<T>``)."""
+        envelope = self._list_envelope_class(cls)
+        if envelope is None:
+            return default
+        # Envelope DTO lives in the .model package and is emitted by
+        # the normal DTO walk; register an import so the controller
+        # file compiles.
+        return envelope
+
     def _schema_auto_query_params(self) -> bool:
         raw = None
         sv_schema = self._sv.schema
@@ -1479,26 +1632,45 @@ public class %(class_name)s {
     ) -> str | None:
         """Read a slot annotation, walking slot_usage on the class.
 
-        Mirrors the OpenAPI generator's _get_slot_annotation but uses the
-        Spring emitter's induced-slot cache."""
+        Mirrors the OpenAPI generator's _get_slot_annotation. The
+        ``annotations`` container on an induced slot is a
+        ``JsonObj`` (no ``.values()`` / ``.keys()``) so this walker
+        treats it the same way ``_get_slot_annotation`` does:
+        iterate the JsonObj (which yields keys), then subscript to
+        get each ``Annotation`` value. Without this, inherited
+        ``openapi.query_param`` annotations on parent classes
+        silently fall through and the Spring filter surface
+        diverges from the OpenAPI sidecar (caught by the parity
+        test).
+        """
+
+        def _iter_annotations(container):
+            """Yield each ``Annotation`` value in a LinkML annotations
+            container, handling both dict and JsonObj shapes."""
+            if container is None:
+                return
+            if isinstance(container, dict):
+                yield from container.values()
+                return
+            # JsonObj — iterates its keys; subscript yields the value.
+            for key in container:
+                if key.startswith("_"):
+                    continue
+                yield container[key]
+
         if cls.slot_usage:
             items = cls.slot_usage.values() if isinstance(cls.slot_usage, dict) else cls.slot_usage
             for su in items:
                 su_obj = su if not isinstance(su, str) else None
                 if su_obj and getattr(su_obj, "name", None) == slot_name:
-                    anns = getattr(su_obj, "annotations", None)
-                    if anns:
-                        for ann in anns.values() if isinstance(anns, dict) else [anns]:
-                            if hasattr(ann, "tag") and ann.tag == tag:
-                                return str(ann.value)
+                    for ann in _iter_annotations(getattr(su_obj, "annotations", None)):
+                        if hasattr(ann, "tag") and ann.tag == tag:
+                            return str(ann.value)
         induced = self._slot_for(cls, slot_name)
         if induced is not None:
-            anns = getattr(induced, "annotations", None)
-            if anns:
-                keys = anns.values() if isinstance(anns, dict) else [anns]
-                for ann in keys:
-                    if hasattr(ann, "tag") and ann.tag == tag:
-                        return str(ann.value)
+            for ann in _iter_annotations(getattr(induced, "annotations", None)):
+                if hasattr(ann, "tag") and ann.tag == tag:
+                    return str(ann.value)
         top_level = self._sv.get_slot(slot_name)
         if top_level and top_level.annotations:
             for ann in top_level.annotations.values():
@@ -1837,16 +2009,15 @@ public class %(class_name)s {
         if parent is not None and self._inherited_discriminator(parent):
             return None
         subtypes = []
-        # Include the root itself when it's concrete and pins its own
-        # type value (mirrors the OpenAPI generator's #95 fix): a
+        # Include the root itself when it's concrete and non-mixin
+        # (mirrors the OpenAPI generator's #95 fix): a
         # ``{"resourceType":"Resource", ...}`` payload otherwise has
         # no @JsonSubTypes mapping back to the root and Jackson
-        # refuses to deserialise it.
-        if (
-            not cls.abstract
-            and not cls.mixin
-            and (self._class_annotation(cls, "openapi.type_value") is not None)
-        ):
+        # refuses to deserialise it. Falls back to the class name as
+        # the tag when ``openapi.type_value`` isn't set — symmetric
+        # with the OpenAPI generator, which uses ``cls.name`` as the
+        # default discriminator value.
+        if not cls.abstract and not cls.mixin:
             subtypes.append({"class_name": cls.name, "tag": self._type_value(cls)})
         for name in self._sv.class_descendants(cls.name, reflexive=False):
             sub = self._sv.get_class(name)
@@ -1973,17 +2144,22 @@ def _validate_path_literal(value: str, annotation: str, owner: str = "") -> None
         )
 
 
-# Java reserved words (JLS §3.9, including contextual keywords and
-# the literal-like ``true`` / ``false`` / ``null``). Slot or class
-# names that resolve to one of these are suffixed with ``_`` so the
-# emitted Java still compiles.
+# Java reserved words (JLS §3.9, including contextual keywords from
+# Java 9+/14+/17+ and the literal-like ``true`` / ``false`` /
+# ``null``). Slot or class names that resolve to one of these are
+# suffixed with ``_`` so the emitted Java still compiles on any LTS.
+# ``record``, ``sealed``, ``permits``, ``var``, ``yield`` are
+# contextual keywords — they're not reserved in every position, but
+# making them safe in identifier slots avoids surprise breakage when
+# the slot's emitted Java moves between positions.
 _JAVA_RESERVED_WORDS = frozenset(
     """abstract assert boolean break byte case catch char class const continue
-       default do double else enum extends final finally float for goto if
-       implements import instanceof int interface long native new package
-       private protected public return short static strictfp super switch
-       synchronized this throw throws transient try void volatile while
-       true false null _""".split()
+       default do double else enum exports extends final finally float for goto
+       if implements import instanceof int interface long module native new
+       non-sealed open opens package permits private protected provides public
+       record requires return sealed short static strictfp super switch
+       synchronized this throw throws to transient transitive try uses var void
+       volatile while with yield true false null _""".split()
 )
 
 
@@ -2033,12 +2209,44 @@ def _list_query_params() -> list[dict]:
     ]
 
 
+def _op_kind_from_method_name(method_name: str) -> str:
+    """Derive the operation kind (used to pick the per-op error
+    baseline) from the Java method name's verb prefix. Method names
+    in this generator always start with ``list``, ``create``,
+    ``get``, ``update``, ``delete``, ``patch``, ``attach``, or
+    ``detach``; anything else falls back to ``other`` which gets the
+    legacy baseline."""
+    for verb in ("list", "create", "get", "update", "delete", "patch", "attach", "detach"):
+        if method_name.startswith(verb):
+            return verb
+    return "other"
+
+
+# Per-op baseline error codes — aligned with the OpenAPI generator's
+# per-op shape (`_make_*_operation` in `generator.py`) so the
+# controller annotations match the sidecar spec wire-for-wire.
+# ``other`` keeps the broad legacy baseline as a safety net for any
+# verb the generator grows in future.
+_OP_BASELINE_CODES: dict[str, tuple[int, ...]] = {
+    "list": (),
+    "create": (422,),
+    "get": (404,),
+    "update": (404, 422),
+    "patch": (404, 422),
+    "delete": (404,),
+    "attach": (404, 422),
+    "detach": (404,),
+    "other": (404, 422),
+}
+
+
 def _success_and_problem_responses(
     return_type: str,
     media_types: list[str],
     error_class: str = "Problem",
     extra_codes: list[int] | None = None,
     reason_phrases: dict[int, str] | None = None,
+    op_kind: str = "other",
 ) -> list[str]:
     """Success + RFC 7807 error responses for an operation.
 
@@ -2052,11 +2260,16 @@ def _success_and_problem_responses(
     ``extra_codes`` (#104) declares additional 4xx/5xx codes drawn
     from ``openapi.error_responses`` so the controller annotations
     match the sidecar spec.
+
+    ``op_kind`` picks the per-op error baseline; see
+    ``_OP_BASELINE_CODES``. Aligns the Spring controller annotations
+    with the OpenAPI generator's per-op shape so the sidecar and
+    controllers agree.
     """
     if return_type == "Void":
         return [
             '@ApiResponse(responseCode = "204", description = "No content")',
-            *_problem_responses(error_class, extra_codes, reason_phrases),
+            *_problem_responses(error_class, extra_codes, reason_phrases, op_kind),
         ]
     if return_type.startswith("List<"):
         inner = return_type[len("List<") : -1]
@@ -2079,27 +2292,28 @@ def _success_and_problem_responses(
         '@ApiResponse(responseCode = "200", description = "OK",'
         f" content = {{{', '.join(contents)}}})"
     )
-    return [success, *_problem_responses(error_class, extra_codes, reason_phrases)]
+    return [success, *_problem_responses(error_class, extra_codes, reason_phrases, op_kind)]
 
 
 def _problem_responses(
     error_class: str = "Problem",
     extra_codes: list[int] | None = None,
     reason_phrases: dict[int, str] | None = None,
+    op_kind: str = "other",
 ) -> list[str]:
-    """RFC 7807 error contract — same Problem-shaped DTO under
-    ``application/problem+json`` across every error response.
+    """RFC 7807 error contract — Problem-shaped DTO under
+    ``application/problem+json`` for the per-op error baseline plus
+    any extra codes the schema declared via ``openapi.error_responses``.
 
-    The 404 / 422 / 500 trio is always declared (today's contract).
-    ``extra_codes`` (#104) adds further codes from
-    ``openapi.error_responses``; duplicates with the baseline trio
-    are dropped silently so the wire shape matches the sidecar."""
-    baseline = {
-        404: "Not found",
-        422: "Validation error",
-        500: "Server error",
+    The baseline is selected by ``op_kind`` so a list op doesn't
+    declare a phantom 404, a create op doesn't declare a 404, etc.
+    Aligned with the OpenAPI generator's per-op error shape so the
+    sidecar spec and the controller annotations agree wire-for-wire.
+    """
+    baseline_codes = _OP_BASELINE_CODES.get(op_kind, _OP_BASELINE_CODES["other"])
+    codes: dict[int, str] = {
+        code: (reason_phrases or {}).get(code, f"HTTP {code}") for code in baseline_codes
     }
-    codes: dict[int, str] = dict(baseline)
     for code in extra_codes or ():
         if code in codes:
             continue

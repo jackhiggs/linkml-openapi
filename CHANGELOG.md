@@ -8,6 +8,77 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Spring controllers honour `openapi.list_envelope` /
+  `openapi.pagination` / `openapi.list_query_params`** (#4
+  follow-up). Previously only the sidecar OpenAPI spec carried
+  these — Spring controllers shipped `List<T>` + hardcoded
+  `limit/offset` regardless. Now the controllers return the
+  envelope class when set, emit the dialect's query params (`cursor`
+  / `pageSize`, etc.), and inject any extra typed `@RequestParam`
+  declarations declared via `openapi.list_query_params`. The live
+  springdoc view now matches the static sidecar wire-for-wire.
+
+### Fixed
+
+- **Mixin narrowing now triggers the `--codegen-friendly` fallback**
+  (#5). `_detect_narrowing_subclasses` only walked `is_a`; a class
+  that narrowed an inherited slot via a `mixins:` chain silently
+  fell through and re-introduced the #106 covariance crash under
+  `--codegen-friendly --flatten-inheritance`. The walk now visits
+  `is_a` AND every entry of `mixins:`.
+- **Spring `@JsonSubTypes` includes the concrete root regardless of
+  explicit `openapi.type_value`** (#6). Mirrors the OpenAPI
+  generator's `_type_value` fallback (uses `cls.name` when the
+  annotation isn't set), so a concrete polymorphic root's payload
+  can now Jackson-deserialise on the Spring side.
+- **Per-op error response baseline aligns with OpenAPI** (#7).
+  Spring previously emitted `{404, 422, 500}` on every op. The
+  OpenAPI generator emits per-op shapes (list: none; create: 422;
+  read/delete: 404; update/patch: 404+422; attach: 404+422; detach:
+  404). The Spring side now mirrors this. The 500 baseline is dropped
+  — schemas opt in via `openapi.error_responses` for server-error
+  contracts. `openapi.error_responses` codes still merge in
+  uniformly across all ops.
+- **`openapi.profile.<n>.include_classes` / `include_slots` /
+  `exclude_classes` / `exclude_slots` now detect typos** (#8).
+  Unknown class / slot names raise a `ValueError` naming the
+  misspelled tokens. Previously a typo silently included/excluded
+  the wrong set — worst case `include_classes: Cataog` excluded the
+  entire schema with no warning.
+- **`error_responses=[]` Spring kwarg now propagates to the sidecar**
+  (#9). The prior `[] or None` collapse silently fell back to the
+  schema annotation, so "skip everywhere" leaked the codes into the
+  sidecar spec. Spring and sidecar now agree on disable intent.
+- **Spring's `_get_slot_annotation_compat` walks JsonObj annotation
+  containers correctly.** Inherited `openapi.query_param`
+  annotations from a parent class's `slot_usage` were silently lost
+  on Spring (the walker treated the JsonObj as a single annotation
+  instead of iterating its keys). The fix mirrors the OpenAPI
+  generator's defensive iteration pattern. Surfaced by the parity
+  test once a separate regex fix let it see beyond the first
+  `@RequestParam`.
+- **Whitespace-only `openapi.pagination` value no longer crashes**
+  (L11). Both generators now treat `openapi.pagination: "  "` as
+  "unset" (legacy `limit`/`offset` baseline) instead of falling
+  through to an unknown-dialect error.
+
+### Internal
+
+- **Shared `_http` module** holds the IANA reason-phrase table; both
+  generators import from it so the table can't drift (#10).
+- **`_JAVA_RESERVED_WORDS`** extended to cover Java 9+/14+/17+
+  contextual keywords (`record`, `sealed`, `permits`, `var`,
+  `yield`, `module`, `requires`, `exports`, ...) so slot names that
+  collide with them get the `_` suffix on every supported LTS (L9).
+- **Misleading ordering comment** on `_path_item_has_operations`
+  cleaned up — the prior comment described an injection-then-filter
+  bug that doesn't exist (the injector skips op-less PathItems
+  anyway). Replaced with a comment stating the invariant the
+  ordering establishes (L10).
+- 11 new regression tests covering each fix above.
+
 ### Security
 
 - **Input validation for Java code emission.** A second code review
