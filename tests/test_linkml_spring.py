@@ -237,12 +237,20 @@ class TestApiSurface:
         assert '"text/turtle"' in src
         assert '"application/rdf+xml"' in src
 
-    def test_problem_responses_declared_on_every_op(self, files):
+    def test_problem_responses_match_openapi_per_op_shape(self, files):
+        """Per-op error baselines align with the OpenAPI generator
+        (#7 follow-up): list ops carry no baseline error; create has
+        422 only; read/delete have 404; update / patch carry both;
+        attach has both; detach has 404 only. ``openapi.error_responses``
+        adds further codes uniformly across ops."""
         src = files["io/example/dcat/api/CatalogApi.java"]
-        # Every op carries the Problem error contract for 404/422/500.
+        # The controller for Catalog should carry at least one 404 and
+        # one 422 (across its read / update ops) and reference the
+        # error DTO.
         assert src.count('responseCode = "404"') >= 1
         assert src.count('responseCode = "422"') >= 1
-        assert src.count('responseCode = "500"') >= 1
+        # 500 is no longer in the baseline — schemas opt in via
+        # ``openapi.error_responses`` for server-side error contracts.
         assert "Problem.class" in src
 
 
@@ -1000,18 +1008,50 @@ class TestParityWithOpenApiSide:
             if relpath.endswith("Api.java")
         }
 
-        # Collect spring {url: set_of_request_param_wire_names}
-        getmapping_re = re.compile(
-            r'@GetMapping\(value\s*=\s*"([^"]+)"[^)]*\)\s*\n'
-            r"[^\n]*\n\s*default ResponseEntity[^(]*\([^)]*\)",
-            re.DOTALL,
-        )
+        # Capture the URL and the FULL method body (up to the closing
+        # ``)`` of the method signature). The previous regex stopped
+        # at the first nested ``)`` inside any ``@RequestParam(...)``
+        # — fine when methods only had ``limit`` / ``offset``, but it
+        # silently undercount on rich filter params (the #4
+        # follow-up). Match instead by locating the method-signature
+        # opening paren and scanning forward for the matching close.
+        getmapping_url_re = re.compile(r'@GetMapping\(value\s*=\s*"([^"]+)"', re.DOTALL)
+
+        def _params_between_method_parens(source: str, start: int) -> str:
+            """Return the slice of ``source`` between the
+            method-signature's opening ``(`` and its matching ``)``,
+            handling nested ``(`` / ``)`` inside annotations."""
+            method_open = source.find("(", start)
+            depth = 0
+            i = method_open
+            while i < len(source):
+                if source[i] == "(":
+                    depth += 1
+                elif source[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        return source[method_open : i + 1]
+                i += 1
+            return ""
+
         spring_query_params: dict[str, set[str]] = {}
         for source in java_files.values():
-            for m in getmapping_re.finditer(source):
+            for m in getmapping_url_re.finditer(source):
                 url = m.group(1)
-                signature = m.group(0)
-                wire_names = set(request_param_re.findall(signature))
+                # Walk forward from the @GetMapping match to find the
+                # ``default ResponseEntity...`` method signature for
+                # that mapping.
+                default_idx = source.find("default ResponseEntity", m.end())
+                if default_idx == -1:
+                    continue
+                # Sanity check: the next `default ResponseEntity` must
+                # belong to THIS @GetMapping (i.e. no other
+                # @GetMapping in between).
+                next_get = source.find("@GetMapping", m.end())
+                if next_get != -1 and next_get < default_idx:
+                    continue
+                method_params = _params_between_method_parens(source, default_idx)
+                wire_names = set(request_param_re.findall(method_params))
                 if wire_names:
                     spring_query_params.setdefault(url, set()).update(wire_names)
 
@@ -1689,3 +1729,266 @@ classes:
         # The original wire name must be preserved on the @JsonProperty.
         assert '@JsonProperty("class")' in dto
         assert '@JsonProperty("default")' in dto
+
+
+class TestSpringPaginationAndEnvelope:
+    """Coverage for the #4 follow-up: Spring controllers now honour
+    ``openapi.pagination`` / ``openapi.list_envelope`` /
+    ``openapi.list_query_params`` alongside the sidecar, so the live
+    springdoc view matches the static spec wire-for-wire."""
+
+    SCHEMA = """\
+id: https://example.org/spring_page
+name: spring_page_test
+default_range: string
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+      openapi.pagination: cursor
+      openapi.list_envelope: PagedDatasets
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      title: { range: string }
+  PagedDatasets:
+    attributes:
+      items: { range: Dataset, multivalued: true }
+      nextCursor: { range: string }
+"""
+
+    @pytest.fixture
+    def files(self, tmp_path) -> dict:
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(self.SCHEMA)
+        return SpringServerGenerator(str(fixture), package="io.example.page").build()
+
+    def test_controller_uses_envelope_return_type(self, files):
+        api = files["io/example/page/api/DatasetApi.java"]
+        assert "ResponseEntity<PagedDatasets>" in api
+        assert "ResponseEntity<List<Dataset>>" not in api
+
+    def test_controller_emits_cursor_query_params(self, files):
+        api = files["io/example/page/api/DatasetApi.java"]
+        assert '@RequestParam(name = "cursor"' in api
+        assert '@RequestParam(name = "pageSize"' in api
+
+    def test_controller_drops_legacy_limit_offset_under_dialect(self, files):
+        api = files["io/example/page/api/DatasetApi.java"]
+        # Under a declared pagination dialect, the legacy ``limit``
+        # /``offset`` baseline must NOT also be emitted (would mean
+        # duplicate / contradictory paging contracts).
+        assert '@RequestParam(name = "limit"' not in api
+        assert '@RequestParam(name = "offset"' not in api
+
+
+class TestSpringExtraListQueryParams:
+    """`openapi.list_query_params` (JSON array) now produces matching
+    `@RequestParam` declarations on the Spring controller (#4)."""
+
+    SCHEMA = """\
+id: https://example.org/spring_extra
+name: spring_extra
+default_range: string
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+      openapi.list_query_params: |
+        [{"name": "filterBy", "type": "string"},
+         {"name": "archived", "type": "boolean"}]
+    attributes:
+      id: { identifier: true, range: string, required: true }
+"""
+
+    @pytest.fixture
+    def files(self, tmp_path) -> dict:
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(self.SCHEMA)
+        return SpringServerGenerator(str(fixture), package="io.example.extra").build()
+
+    def test_extra_string_param_emits_string_type(self, files):
+        api = files["io/example/extra/api/DatasetApi.java"]
+        assert '@RequestParam(name = "filterBy"' in api
+        assert "String filterBy" in api
+
+    def test_extra_boolean_param_emits_boolean_type(self, files):
+        api = files["io/example/extra/api/DatasetApi.java"]
+        assert '@RequestParam(name = "archived"' in api
+        assert "Boolean archived" in api
+
+
+class TestProfileIncludeTypoDetection:
+    """`openapi.profile.<n>.include_classes` / `include_slots` now
+    detect typos in the referenced names (#8) — silently nuking the
+    entire schema because of a misspelled class name was the worst
+    outcome of the prior "accepted but ignored" behaviour."""
+
+    def test_unknown_class_name_in_include_classes_raises(self, tmp_path):
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(
+            "id: https://example.org/profile_typo\n"
+            "name: profile_typo\n"
+            "default_range: string\n"
+            "annotations:\n"
+            "  openapi.profile.partner.include_classes: Cataog\n"
+            "classes:\n"
+            "  Catalog:\n"
+            '    annotations: { openapi.resource: "true" }\n'
+            "    attributes:\n"
+            "      id: { identifier: true, range: string, required: true }\n"
+        )
+        with pytest.raises(ValueError, match=r"unknown class names.*Cataog"):
+            OpenAPIGenerator(str(fixture), profile="partner").serialize()
+
+    def test_unknown_class_in_exclude_classes_also_raises(self, tmp_path):
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(
+            "id: https://example.org/profile_typo2\n"
+            "name: profile_typo2\n"
+            "default_range: string\n"
+            "annotations:\n"
+            "  openapi.profile.internal.exclude_classes: Misspelled\n"
+            "classes:\n"
+            "  Catalog:\n"
+            '    annotations: { openapi.resource: "true" }\n'
+            "    attributes:\n"
+            "      id: { identifier: true, range: string, required: true }\n"
+        )
+        with pytest.raises(ValueError, match=r"unknown class names.*Misspelled"):
+            OpenAPIGenerator(str(fixture), profile="internal").serialize()
+
+
+class TestErrorResponsesEmptyKwargDisablesSidecar:
+    """Coverage for #9 — Spring's ``error_responses=[]`` kwarg must
+    suppress injection in BOTH the controllers and the sidecar. The
+    prior ``[] or None`` collapse re-emitted the schema annotation's
+    codes in the sidecar."""
+
+    SCHEMA = """\
+id: https://example.org/err_disable
+name: err_disable
+default_range: string
+annotations:
+  openapi.error_responses: "400,500"
+classes:
+  Person:
+    annotations: { openapi.resource: "true", openapi.path: people }
+    attributes:
+      id: { identifier: true, range: string, required: true }
+"""
+
+    def test_explicit_empty_kwarg_skips_extras_in_sidecar(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(self.SCHEMA)
+        out = tmp_path / "out" / "java"
+        out.mkdir(parents=True)
+        SpringServerGenerator(str(fixture), package="io.example.disable", error_responses=[]).emit(
+            str(out)
+        )
+        spec_text = (tmp_path / "out" / "resources" / "openapi.yaml").read_text()
+        # The schema annotation declared 400 + 500 — but the explicit
+        # empty kwarg overrides it, so the sidecar must NOT carry
+        # either code.
+        assert "'400':" not in spec_text
+        assert "'500':" not in spec_text
+
+    def test_unset_kwarg_lets_sidecar_resolve_from_annotation(self, tmp_path):
+        # Sanity: when the kwarg is None, the sidecar still picks up
+        # the schema annotation's codes.
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(self.SCHEMA)
+        out = tmp_path / "out" / "java"
+        out.mkdir(parents=True)
+        SpringServerGenerator(str(fixture), package="io.example.disable2").emit(str(out))
+        spec_text = (tmp_path / "out" / "resources" / "openapi.yaml").read_text()
+        assert "'400':" in spec_text
+        assert "'500':" in spec_text
+
+
+class TestConcreteRootInJsonSubTypesWithoutExplicitTypeValue:
+    """Coverage for #6 — the Spring side now mirrors the OpenAPI
+    generator's fallback: a concrete polymorphic root with NO
+    explicit ``openapi.type_value`` still gets a ``@JsonSubTypes``
+    entry using its class name as the tag."""
+
+    SCHEMA = """\
+id: https://example.org/concrete_root_implicit
+name: concrete_root_implicit
+default_range: string
+classes:
+  Resource:
+    annotations:
+      openapi.resource: "true"
+      openapi.discriminator: resourceType
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      title: { range: string }
+  Dataset:
+    is_a: Resource
+    annotations: { openapi.resource: "true" }
+    attributes:
+      description: { range: string }
+"""
+
+    def test_root_appears_in_jsonsubtypes_even_without_type_value(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(self.SCHEMA)
+        files = SpringServerGenerator(str(fixture), package="io.example.implicit").build()
+        resource_dto = files["io/example/implicit/model/Resource.java"]
+        # Default tag falls back to class name (cls.name).
+        assert 'name = "Resource"' in resource_dto
+        assert "Resource.class" in resource_dto
+        assert 'name = "Dataset"' in resource_dto
+
+
+class TestMixinNarrowingDetected:
+    """Coverage for #5 — narrowing detection now walks mixins
+    alongside ``is_a``, so a class that narrows an inherited slot
+    via a mixin chain doesn't re-introduce the #106 covariance
+    crash under ``--codegen-friendly --flatten-inheritance``."""
+
+    def test_mixin_narrowing_triggers_codegen_fallback(self, tmp_path):
+        from linkml_openapi.generator import OpenAPIGenerator
+
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(
+            "id: https://example.org/mixin_narrow\n"
+            "name: mixin_narrow\n"
+            "default_range: string\n"
+            "classes:\n"
+            "  Distribution:\n"
+            "    attributes:\n"
+            "      id: { identifier: true, range: string, required: true }\n"
+            "  AcmeDistribution:\n"
+            "    is_a: Distribution\n"
+            "  HasDistributions:\n"
+            "    mixin: true\n"
+            "    annotations:\n"
+            "      openapi.discriminator: kind\n"
+            "    attributes:\n"
+            "      distribution:\n"
+            "        range: Distribution\n"
+            "        multivalued: true\n"
+            "  Dataset:\n"
+            "    mixins: [HasDistributions]\n"
+            '    annotations: { openapi.resource: "true" }\n'
+            "    attributes:\n"
+            "      id: { identifier: true, range: string, required: true }\n"
+            "  AcmeDataset:\n"
+            "    is_a: Dataset\n"
+            "    slot_usage:\n"
+            "      distribution:\n"
+            "        range: AcmeDistribution\n"
+        )
+        gen = OpenAPIGenerator(str(fixture))
+        gen.serialize()
+        # AcmeDataset narrowed via slot_usage on a slot inherited
+        # from the HasDistributions mixin chain. Detection must catch
+        # this and mark AcmeDataset.
+        assert "AcmeDataset" in gen._narrowing_subclasses

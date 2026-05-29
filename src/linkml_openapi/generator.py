@@ -43,6 +43,7 @@ from linkml_openapi._chains import (
 from linkml_openapi._chains import (
     parse_path_param_sources as _parse_path_param_sources_helper,
 )
+from linkml_openapi._http import reason_for
 from linkml_openapi._query_params import (
     QueryParamSpec,
     walk_query_params,
@@ -618,11 +619,11 @@ class OpenAPIGenerator(Generator):
         # ``openapi.operations`` lists only collection-level ops, or
         # when an auto-derived flat item path has no item-level ops
         # to attach (#109).
-        # Order matters: filter empty PathItems BEFORE injecting extra
-        # error responses. If we injected first, an otherwise-invalid
-        # operation-less PathItem could survive emission with only the
-        # synthetic 4xx/5xx responses attached, which is still
-        # structurally invalid (responses without a method holder).
+        # Filtering happens before extra-error injection — the
+        # injector skips op-less PathItems anyway, but keeping this
+        # invariant ordered makes the dataflow easier to reason about:
+        # after this line, every PathItem in ``paths`` has at least
+        # one HTTP method on it.
         paths = {url: item for url, item in paths.items() if self._path_item_has_operations(item)}
 
         # Merge schema-level / CLI ``openapi.error_responses`` codes
@@ -1444,35 +1445,8 @@ class OpenAPIGenerator(Generator):
             )
         return custom
 
-    # IANA standard reason phrases for the 4xx / 5xx codes we expect
-    # authors to declare via ``openapi.error_responses`` (#104). Any
-    # unrecognised code falls back to ``f"HTTP {code}"``.
-    _HTTP_REASON_PHRASES: ClassVar[dict[int, str]] = {
-        400: "Bad request",
-        401: "Unauthorized",
-        402: "Payment required",
-        403: "Forbidden",
-        404: "Not found",
-        405: "Method not allowed",
-        406: "Not acceptable",
-        408: "Request timeout",
-        409: "Conflict",
-        410: "Gone",
-        412: "Precondition failed",
-        413: "Payload too large",
-        415: "Unsupported media type",
-        422: "Validation error",
-        423: "Locked",
-        424: "Failed dependency",
-        428: "Precondition required",
-        429: "Too many requests",
-        451: "Unavailable for legal reasons",
-        500: "Server error",
-        501: "Not implemented",
-        502: "Bad gateway",
-        503: "Service unavailable",
-        504: "Gateway timeout",
-    }
+    # IANA standard reason phrases live in ``_http`` so the Spring
+    # emitter and the OpenAPI generator can't drift apart (#10).
 
     def _resolve_error_response_codes(self) -> list[int]:
         """Resolve the list of extra error codes from CLI/kwarg or
@@ -1515,7 +1489,7 @@ class OpenAPIGenerator(Generator):
 
     def _http_reason(self, code: int) -> str:
         """Standard reason phrase for an HTTP status code (#104)."""
-        return self._HTTP_REASON_PHRASES.get(code, f"HTTP {code}")
+        return reason_for(code)
 
     def _apply_extra_error_responses(self, paths: dict[str, PathItem]) -> None:
         """Merge ``openapi.error_responses`` codes into every operation
@@ -1599,6 +1573,25 @@ class OpenAPIGenerator(Generator):
                 f"{self.profile}.<key>` schema annotations."
             )
         p = profiles[self.profile]
+        sv = self.schemaview
+        # Validate that every name in ``include_*`` / ``exclude_*``
+        # actually exists in the schema. A typo (``Cataog`` for
+        # ``Catalog``) would otherwise silently exclude the entire
+        # schema (``include_classes``) or excluded-nothing
+        # (``exclude_classes``) — the spec compiles, the surface is
+        # wrong, and the wrong shape ships. Raise instead (#8).
+        all_class_names = set(sv.all_classes())
+        all_slot_names = {
+            s.name for class_name in all_class_names for s in self._induced_slots_iter(class_name)
+        }
+        self._validate_profile_names(
+            "exclude_classes", p.get("exclude_classes") or [], all_class_names
+        )
+        self._validate_profile_names(
+            "include_classes", p.get("include_classes") or [], all_class_names
+        )
+        self._validate_profile_names("exclude_slots", p.get("exclude_slots") or [], all_slot_names)
+        self._validate_profile_names("include_slots", p.get("include_slots") or [], all_slot_names)
         excluded_classes = set(p.get("exclude_classes", []))
         excluded_slots = set(p.get("exclude_slots", []))
         # ``include_classes`` / ``include_slots`` (when declared)
@@ -1607,7 +1600,6 @@ class OpenAPIGenerator(Generator):
         # a class can be both included and explicitly excluded; the
         # exclusion wins (matches the "drift on a slot annotation
         # surfaces loudly" philosophy: be conservative).
-        sv = self.schemaview
         include_classes = p.get("include_classes")
         if include_classes:
             include_set = set(include_classes)
@@ -1625,6 +1617,19 @@ class OpenAPIGenerator(Generator):
                         excluded_slots.add(slot.name)
         self._raise_on_drift(excluded_classes, excluded_slots)
         return excluded_classes, excluded_slots, p.get("description")
+
+    def _validate_profile_names(self, key: str, names: list[str], universe: set[str]) -> None:
+        """Raise on any profile-list name that doesn't exist in the
+        schema (#8). A typo would otherwise silently include / exclude
+        the wrong set."""
+        unknown = sorted(n for n in names if n not in universe)
+        if unknown:
+            kind = "class" if "classes" in key else "slot"
+            raise ValueError(
+                f"Profile {self.profile!r} `{key}` references unknown "
+                f"{kind} names: {unknown}. Fix the typo or remove the "
+                f"`openapi.profile.{self.profile}.{key}` annotation."
+            )
 
     def _raise_on_drift(self, excluded_classes: set[str], excluded_slots: set[str]) -> None:
         """Fail when an excluded slot is referenced by an annotation.
@@ -1696,19 +1701,36 @@ class OpenAPIGenerator(Generator):
         )
 
     def _detect_narrowing_subclasses(self) -> None:
-        """Walk every is_a relationship and record subclasses that
-        materially narrowed an inherited slot's range. Runs unconditionally
-        in ``__post_init__`` so the discriminator pass (#106) gets the
-        right answer regardless of whether the per-class emission later
-        takes the ``allOf`` branch or the ``flatten_inheritance`` branch
-        of ``_class_to_schema``.
+        """Walk every is_a / mixin relationship and record subclasses
+        that materially narrowed an inherited slot's range. Runs
+        unconditionally in ``__post_init__`` so the discriminator pass
+        (#106) gets the right answer regardless of whether the
+        per-class emission later takes the ``allOf`` branch or the
+        ``flatten_inheritance`` branch of ``_class_to_schema``.
+
+        Mixins are walked alongside ``is_a`` (a slot can be narrowed
+        from either) so a schema that uses LinkML's mixin mechanism to
+        share slots across resource classes still gets the
+        codegen-friendly fallback when a descendant narrows the
+        inherited slot.
         """
         sv = self.schemaview
         for class_name in sv.all_classes():
             cls = sv.get_class(class_name)
-            if cls is None or not cls.is_a:
+            if cls is None:
                 continue
-            parent_slots_by_name = {s.name: s for s in self._induced_slots_iter(cls.is_a)}
+            parents: list[str] = []
+            if cls.is_a:
+                parents.append(cls.is_a)
+            parents.extend(cls.mixins or [])
+            if not parents:
+                continue
+            parent_slots_by_name: dict[str, SlotDefinition] = {}
+            for parent in parents:
+                for s in self._induced_slots_iter(parent):
+                    # First-seen parent wins (matches LinkML's MRO);
+                    # we only need a "any parent had this slot" view.
+                    parent_slots_by_name.setdefault(s.name, s)
             for slot in self._induced_slots_iter(class_name):
                 parent_slot = parent_slots_by_name.get(slot.name)
                 if parent_slot is not None and self._slot_was_narrowed(slot, parent_slot):
@@ -3687,7 +3709,13 @@ class OpenAPIGenerator(Generator):
         no duplication of ``limit``/``offset`` against ``offset`` /
         ``limit`` from ``page-offset`` (#105 follow-up).
         """
-        if self._class_annotation(cls, "openapi.pagination"):
+        # Strip whitespace so ``openapi.pagination: "  "`` is treated
+        # the same as "unset" (legacy baseline). Without the strip a
+        # purely-whitespace value would skip the legacy params and
+        # then crash inside ``_pagination_params`` on the unknown
+        # dialect.
+        pagination_value = self._class_annotation(cls, "openapi.pagination")
+        if pagination_value and pagination_value.strip():
             pagination = self._pagination_params(cls)
         else:
             pagination = self._legacy_pagination_params()
