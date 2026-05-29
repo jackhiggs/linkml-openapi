@@ -1,8 +1,10 @@
 """Tests for the OpenAPI generator."""
 
 import json
+import tempfile
 from pathlib import Path
 
+import pytest
 import yaml
 
 from linkml_openapi.generator import (
@@ -14,12 +16,30 @@ from linkml_openapi.generator import (
 FIXTURES = Path(__file__).parent / "fixtures"
 SCHEMA_PATH = str(FIXTURES / "person.yaml")
 
+# Module-scoped cache for the no-kwarg ``_generate()`` call. Built
+# lazily so import isn't slowed; populated on the first call. ~50
+# tests in this module rely on the bare ``_generate()`` path and
+# previously triggered a fresh schema walk + serialise (~0.8s each).
+_PERSON_SPEC_CACHE: dict | None = None
+
 
 def _make_generator(**kwargs) -> OpenAPIGenerator:
     return OpenAPIGenerator(SCHEMA_PATH, **kwargs)
 
 
 def _generate(**kwargs) -> dict:
+    """Generate the person.yaml OpenAPI spec.
+
+    No-kwarg calls are cached for the lifetime of the test module —
+    the result is read-only and shared across tests. Any kwarg
+    triggers a fresh build.
+    """
+    global _PERSON_SPEC_CACHE
+    if not kwargs:
+        if _PERSON_SPEC_CACHE is None:
+            raw = _make_generator().serialize(format="yaml")
+            _PERSON_SPEC_CACHE = yaml.safe_load(raw)
+        return _PERSON_SPEC_CACHE
     gen = _make_generator(**kwargs)
     raw = gen.serialize(format=kwargs.get("format", "yaml"))
     if kwargs.get("format") == "json":
@@ -35,8 +55,6 @@ def _generate_from_string(schema_yaml: str, **kwargs) -> dict:
     ad-hoc schema (ambiguous chains, malformed templates, schema-level
     annotations, etc.).
     """
-    import tempfile
-
     with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
         f.write(schema_yaml)
         tmp = f.name
@@ -48,10 +66,6 @@ def _generate_from_string(schema_yaml: str, **kwargs) -> dict:
 
 def _generate_from_string_raises(schema_yaml: str, match: str, **kwargs) -> None:
     """Same as :func:`_generate_from_string` but expects a ValueError."""
-    import tempfile
-
-    import pytest
-
     with tempfile.NamedTemporaryFile(suffix=".yaml", delete=False, mode="w") as f:
         f.write(schema_yaml)
         tmp = f.name
@@ -1277,25 +1291,37 @@ class TestDeepNestedPaths:
             )
 
     def test_ambiguous_chain_resolved_by_parent_path(self):
-        """Tag2 reachable via Folder.tags AND Bookmark.tags → annotation picks Folder."""
+        """Tag2 reachable via Folder.tags AND Bookmark.tags → annotation picks Folder.
+
+        Prior version of this test had a comment-only ``del bookmark_deep``
+        with no assertion on the Bookmark branch — it passed even when no
+        deep path was emitted at all. This now asserts both positive
+        ("Folder branch wins") and negative ("operation IDs are not
+        suffixed with the Bookmark chain") signals so a regression
+        either way trips the test.
+        """
         spec = _generate()
-        # The annotation is `Folder.tags`, so the deep item path emits under folders.
+        # Positive: a Folder-shaped deep path exists.
         tag_paths = sorted(p for p in spec["paths"] if "tags" in p)
-        assert "/folders/{id}/tags/{id}" in spec["paths"] or any(
-            "/folders/" in p and p.endswith("/tags/{id}") for p in spec["paths"]
-        ), f"expected Folder-shaped deep path; got: {tag_paths}"
-        # And the Bookmark-shaped deep path is NOT emitted (only one canonical chain).
-        bookmark_deep = [
-            p
-            for p in spec["paths"]
-            if p.startswith("/bookmarks/") and "tags" in p and p.endswith("{id}")
-        ]
-        # `/bookmarks/{id}/tags` (collection) and `/bookmarks/{id}/tags/{tag2_id}` (immediate
-        # nested item) are emitted by the parent's nested-paths walk — those exist regardless.
-        # The thing that should NOT exist is a *deep* path treating Bookmark as the leaf's chain.
-        # In this fixture the chain is exactly one hop, so the immediate-nested form IS the deep
-        # form — the assertion just confirms we don't error and the Folder branch wins.
-        del bookmark_deep  # documented; no further assertion needed at this depth.
+        folder_deep = [p for p in spec["paths"] if "/folders/" in p and p.endswith("/tags/{id}")]
+        assert folder_deep, f"expected Folder-shaped deep path; got: {tag_paths}"
+
+        # Negative: no operation ID is suffixed with the Bookmark chain
+        # — that would indicate the Bookmark branch ALSO emitted a deep
+        # path (i.e., the annotation did not resolve the ambiguity).
+        op_ids: list[str] = []
+        for item in spec["paths"].values():
+            for method in ("get", "put", "post", "patch", "delete"):
+                op = item.get(method)
+                if isinstance(op, dict) and "operationId" in op:
+                    op_ids.append(op["operationId"])
+        # The chain-suffix scheme uses "_via_<chain>" where chain
+        # segments are snake_case class names from the path. A Bookmark-
+        # branched deep emission would produce IDs ending in
+        # "_via_bookmark".
+        assert not any(op_id.endswith("_via_bookmark") for op_id in op_ids), (
+            f"unexpected Bookmark-branched chain emission: {op_ids}"
+        )
 
     def test_ambiguous_chain_without_annotation_raises(self):
         """An ambiguous leaf without `openapi.parent_path` raises with candidates."""
@@ -3753,13 +3779,31 @@ classes:
         assert "Role" in spec["components"]["schemas"]
 
     def test_expose_false_class_still_referenceable(self):
-        # Person.role still resolves to Role.
+        # Person.role still resolves to Role via a structural ``$ref``.
+        # Previously this test did ``assert "Role" in yaml.safe_dump(...)``
+        # which passed for any substring containing "Role" (e.g. a
+        # property named ``Role`` or a description mentioning it).
+        # Walk the property explicitly to confirm the ``$ref`` target.
         spec = _generate_from_string(self.SCHEMA)
         person = spec["components"]["schemas"]["Person"]
         role_prop = person["properties"]["role"]
-        # Either a $ref or a schema with a $ref under allOf — both fine
-        # as long as the link survives.
-        assert "Role" in yaml.safe_dump(role_prop)
+
+        def _collect_refs(node) -> list[str]:
+            if isinstance(node, dict):
+                if "$ref" in node and isinstance(node["$ref"], str):
+                    return [node["$ref"]]
+                refs: list[str] = []
+                for child in node.values():
+                    refs.extend(_collect_refs(child))
+                return refs
+            if isinstance(node, list):
+                return [r for child in node for r in _collect_refs(child)]
+            return []
+
+        refs = _collect_refs(role_prop)
+        assert "#/components/schemas/Role" in refs, (
+            f"expected $ref to Role on Person.role; got refs={refs}"
+        )
 
     def test_default_unset_preserves_today_behavior(self):
         schema = self.SCHEMA.replace('      openapi.expose: "false"\n', "")
@@ -3949,38 +3993,24 @@ classes:
             match=r"undefined class 'MissingClass'",
         )
 
-    def test_cursor_pagination_injects_cursor_and_page_size(self):
+    @pytest.mark.parametrize(
+        "dialect, expected_names",
+        [
+            ("cursor", {"cursor", "pageSize"}),
+            ("page-size", {"page", "size"}),
+            ("page-offset", {"offset", "limit"}),
+        ],
+    )
+    def test_dialect_injects_expected_query_params(self, dialect, expected_names):
+        """Each `openapi.pagination` dialect injects its own pair of
+        query params on the list endpoint."""
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
-            "openapi.path: datasets\n      openapi.pagination: cursor",
+            f"openapi.path: datasets\n      openapi.pagination: {dialect}",
         )
         spec = _generate_from_string(schema_yaml)
-        get = spec["paths"]["/datasets"]["get"]
-        names = {p["name"] for p in get["parameters"]}
-        assert "cursor" in names
-        assert "pageSize" in names
-
-    def test_page_size_dialect_injects_page_and_size(self):
-        schema_yaml = self.BASE.replace(
-            "openapi.path: datasets",
-            "openapi.path: datasets\n      openapi.pagination: page-size",
-        )
-        spec = _generate_from_string(schema_yaml)
-        get = spec["paths"]["/datasets"]["get"]
-        names = {p["name"] for p in get["parameters"]}
-        assert "page" in names
-        assert "size" in names
-
-    def test_page_offset_dialect_injects_offset_and_limit(self):
-        schema_yaml = self.BASE.replace(
-            "openapi.path: datasets",
-            "openapi.path: datasets\n      openapi.pagination: page-offset",
-        )
-        spec = _generate_from_string(schema_yaml)
-        get = spec["paths"]["/datasets"]["get"]
-        names = {p["name"] for p in get["parameters"]}
-        assert "offset" in names
-        assert "limit" in names
+        names = {p["name"] for p in spec["paths"]["/datasets"]["get"]["parameters"]}
+        assert expected_names <= names, f"dialect {dialect!r}: expected {expected_names} ⊆ {names}"
 
     def test_unknown_dialect_raises(self):
         schema_yaml = self.BASE.replace(
