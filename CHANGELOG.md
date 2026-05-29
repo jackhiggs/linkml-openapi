@@ -8,40 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Internal (test suite)
+### Added
 
-- **Test suite ~70% faster.** `_generate()` in `test_generator.py`
-  now caches the no-kwarg result (the ~50 tests that called
-  `_generate()` against `person.yaml` each paid ~0.8s of
-  schema-walk + serialise; now the cost is paid once per process).
-  Full suite runtime dropped from ~95s → ~27s.
-- **`tests/conftest.py`** holds the module-scoped `person_spec` /
-  `person_spec_json` fixtures and a `schema_to_file` factory for
-  tests that need ad-hoc YAML on disk (replaces inline
-  `tempfile.NamedTemporaryFile(delete=False)` blocks with a
-  `tmp_path`-based path that pytest cleans up automatically).
-- **`tests/test_helpers.py`** covers `_generate_from_string` and
-  `_generate_from_string_raises` — the helpers ~100 tests rely on
-  for ad-hoc schemas. A silent regression there would mask failures
-  across the entire suite; the new tests pin the helpers' contract.
-- **Local `import tempfile` / `import pytest` hoisted** out of
-  `_generate_from_string` and `_generate_from_string_raises` to the
-  module-level imports (code-smell flagged in the review).
-- **Pagination dialect tests parametrised** — the three
-  cursor/page-size/page-offset tests in
-  `TestPaginationAndListEnvelope` collapsed into one
-  `pytest.mark.parametrize` test (failures now name the failing
-  dialect).
-- **Shape-not-bug assertions tightened**:
-  - `test_expose_false_class_still_referenceable` now walks the
-    property tree and asserts on the resolved `$ref` target instead
-    of `"Role" in yaml.safe_dump(...)` (substring match that passed
-    for any text containing "Role").
-  - `test_ambiguous_chain_resolved_by_parent_path` gained both
-    positive ("Folder branch wins") and negative ("no `_via_bookmark`
-    operation IDs emitted") assertions; the prior version had a
-    comment-only `del bookmark_deep` that passed when no deep path
-    was emitted at all.
+- **`openapi.list_query_params` accepts a YAML list** as the
+  preferred shape, alongside the JSON-string form shipped in
+  v0.15.0 (#12 follow-up). LinkML-runtime preserves structured
+  annotation values natively, so a schema author can write
+  ```yaml
+  openapi.list_query_params:
+    - name: filterBy
+      type: string
+      description: Filter
+    - name: archived
+      type: boolean
+  ```
+  instead of stuffing it in a JSON string. The JSON form keeps
+  working — no schema migration needed.
 
 ### Added (refactor / docs / CLI symmetry)
 

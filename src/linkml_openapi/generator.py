@@ -2425,46 +2425,82 @@ class OpenAPIGenerator(Generator):
             for name, otype, description in self._PAGINATION_DIALECTS[dialect]
         ]
 
+    @staticmethod
+    def _class_annotation_raw(cls: ClassDefinition, tag: str):
+        """Read a class-level annotation's raw value (no ``str(...)``
+        coercion). Lets callers see YAML-native structured values
+        (lists, dicts) for annotations that opt into them. Returns
+        ``None`` when the annotation is absent."""
+        if not cls.annotations:
+            return None
+        for ann in cls.annotations.values():
+            if ann.tag == tag:
+                return ann.value
+        return None
+
     def _extra_list_query_params(self, cls: ClassDefinition) -> list[Parameter]:
-        """Decode ``openapi.list_query_params`` (JSON array string) into
-        Parameter objects. Each entry is ``{name, type, description?}``
-        plus optional ``required: true/false``. Unparseable JSON or
-        unknown OpenAPI scalar types raise (#105)."""
-        raw = self._class_annotation(cls, "openapi.list_query_params")
-        if not raw:
+        """Decode ``openapi.list_query_params`` into Parameter objects.
+
+        Accepts two equivalent shapes (#12 follow-up):
+
+        - **YAML list** (preferred): a list of ``{name, type,
+          description?, required?}`` mappings, written natively as
+          a LinkML annotation. linkml-runtime preserves structured
+          values, so this is just the YAML the author meant.
+        - **JSON-encoded string** (back-compat): the same array
+          serialised as a JSON string. Was the only supported form
+          in v0.15.0; kept indefinitely so existing schemas don't
+          need to change.
+
+        Each entry must declare ``name`` and ``type``; ``type`` is
+        one of ``string`` / ``integer`` / ``number`` / ``boolean``
+        / ``array``. Unparseable input or invalid types raise.
+        """
+        # Try the raw (YAML-native) value first; fall back to the
+        # string form (which is what linkml-runtime gives us for
+        # scalar annotation values).
+        raw_value = self._class_annotation_raw(cls, "openapi.list_query_params")
+        if raw_value is None:
             return []
-        # Cap the JSON input length so a pathologically deep / large
-        # annotation can't blow stack or RAM on a build.
-        if len(raw) > 65_536:
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: value is "
-                f"{len(raw)} bytes (cap is 65,536). Encode fewer params or "
-                "split across schemas."
-            )
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: value must be a "
-                f"JSON array of `{{name, type, description?}}` objects; got "
-                f"{raw!r} ({exc})."
-            ) from exc
-        except RecursionError as exc:
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: value is "
-                f"too deeply nested to parse safely."
-            ) from exc
-        if not isinstance(decoded, list):
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: expected a JSON "
-                f"array, got {type(decoded).__name__}."
-            )
+        if isinstance(raw_value, list):
+            decoded = raw_value
+        else:
+            raw = str(raw_value)
+            if not raw:
+                return []
+            # Cap the JSON input length so a pathologically deep /
+            # large annotation can't blow stack or RAM on a build.
+            if len(raw) > 65_536:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: value is "
+                    f"{len(raw)} bytes (cap is 65,536). Encode fewer params or "
+                    "split across schemas."
+                )
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: value must be "
+                    f"a YAML list (preferred) or a JSON array of "
+                    f"`{{name, type, description?}}` objects; got "
+                    f"{raw!r} ({exc})."
+                ) from exc
+            except RecursionError as exc:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: value is "
+                    f"too deeply nested to parse safely."
+                ) from exc
+            if not isinstance(decoded, list):
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: expected a "
+                    f"list, got {type(decoded).__name__}."
+                )
         params: list[Parameter] = []
         valid_types = {"string", "integer", "number", "boolean", "array"}
         for idx, entry in enumerate(decoded):
             if not isinstance(entry, dict):
                 raise ValueError(
-                    f"openapi.list_query_params on {cls.name!r}: entry {idx} is not a JSON object."
+                    f"openapi.list_query_params on {cls.name!r}: entry {idx} is not a mapping."
                 )
             name = entry.get("name")
             otype = entry.get("type")

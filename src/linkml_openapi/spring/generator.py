@@ -1537,36 +1537,47 @@ public class %(class_name)s {
         ]
 
     def _extra_list_param_dicts(self, cls: ClassDefinition) -> list[dict]:
-        """``@RequestParam`` dicts from ``openapi.list_query_params``
-        (#105 JSON array). Decoded with the same length cap and
-        error paths the OpenAPI generator uses, so a malformed value
-        produces the same error on both sides."""
-        raw = self._class_annotation(cls, "openapi.list_query_params")
-        if not raw:
+        """``@RequestParam`` dicts from ``openapi.list_query_params``.
+
+        Accepts a YAML list (preferred, native LinkML annotation
+        shape) or a JSON-encoded string (back-compat with v0.15.0).
+        Decoded with the same length cap and error paths the OpenAPI
+        generator uses, so a malformed value produces the same error
+        on both sides.
+        """
+        raw_value = self._class_annotation_raw(cls, "openapi.list_query_params")
+        if raw_value is None:
             return []
-        if len(raw) > 65_536:
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: value is "
-                f"{len(raw)} bytes (cap is 65,536)."
-            )
-        try:
-            decoded = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: value must be a "
-                f"JSON array of `{{name, type, description?}}` objects; got "
-                f"{raw!r} ({exc})."
-            ) from exc
-        except RecursionError as exc:
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: value is "
-                "too deeply nested to parse safely."
-            ) from exc
-        if not isinstance(decoded, list):
-            raise ValueError(
-                f"openapi.list_query_params on {cls.name!r}: expected a JSON "
-                f"array, got {type(decoded).__name__}."
-            )
+        if isinstance(raw_value, list):
+            decoded = raw_value
+        else:
+            raw = str(raw_value)
+            if not raw:
+                return []
+            if len(raw) > 65_536:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: value is "
+                    f"{len(raw)} bytes (cap is 65,536)."
+                )
+            try:
+                decoded = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: value must be "
+                    f"a YAML list (preferred) or a JSON array of "
+                    f"`{{name, type, description?}}` objects; got "
+                    f"{raw!r} ({exc})."
+                ) from exc
+            except RecursionError as exc:
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: value is "
+                    "too deeply nested to parse safely."
+                ) from exc
+            if not isinstance(decoded, list):
+                raise ValueError(
+                    f"openapi.list_query_params on {cls.name!r}: expected a "
+                    f"list, got {type(decoded).__name__}."
+                )
         java_type_for = {
             "string": "String",
             "integer": "Integer",
@@ -1920,6 +1931,18 @@ public class %(class_name)s {
         for ann in cls.annotations.values():
             if ann.tag == tag:
                 return str(ann.value)
+        return None
+
+    def _class_annotation_raw(self, cls: ClassDefinition, tag: str):
+        """Read a class-level annotation's raw value (no ``str(...)``
+        coercion). Mirrors the OpenAPI generator's helper so the
+        Spring side can also accept YAML-native structured values
+        (e.g. ``openapi.list_query_params`` as a YAML list)."""
+        if not cls or not cls.annotations:
+            return None
+        for ann in cls.annotations.values():
+            if ann.tag == tag:
+                return ann.value
         return None
 
     def _request_body_class(self, cls: ClassDefinition, op: str) -> str | None:
