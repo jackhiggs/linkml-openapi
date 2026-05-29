@@ -414,9 +414,8 @@ class TestQueryOperators:
         list_params = spec["paths"]["/addresses"]["get"]["parameters"]
         assert not any(p["name"] == "sort" for p in list_params)
 
-    def test_comparable_on_string_warns(self):
+    def test_comparable_on_string_warns(self, schema_to_file):
         """`comparable` on a string range warns; lex comparison is rarely the intent."""
-        import tempfile
         import warnings
 
         schema_yaml = """
@@ -436,24 +435,14 @@ classes:
         annotations:
           openapi.query_param: comparable
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                gen.serialize(format="yaml")
-            assert any("not a numeric or temporal" in str(w.message) for w in caught)
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gen.serialize(format="yaml")
+        assert any("not a numeric or temporal" in str(w.message) for w in caught)
 
-    def test_sortable_on_multivalued_raises(self):
+    def test_sortable_on_multivalued_raises(self, schema_to_file):
         """`sortable` on a multivalued slot is a generation-time error."""
-        import tempfile
-
-        import pytest
-
         schema_yaml = """
 id: https://example.org/multisort
 name: multisort
@@ -472,15 +461,9 @@ classes:
         annotations:
           openapi.query_param: sortable
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="multivalued"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        with pytest.raises(ValueError, match="multivalued"):
+            gen.serialize(format="yaml")
 
 
 class TestSlotAnnotations:
@@ -795,10 +778,8 @@ class TestNestedRelationships:
         assert "put" in item
         assert "delete" in item
 
-    def test_no_resourcelink_if_no_reference_relationships(self):
+    def test_no_resourcelink_if_no_reference_relationships(self, schema_to_file):
         """A schema with only composition slots doesn't emit ResourceLink."""
-        import tempfile
-
         schema_yaml = """
 id: https://example.org/comp-only
 name: comp_only
@@ -817,15 +798,9 @@ classes:
     attributes:
       line_id: { identifier: true, range: string, required: true }
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            spec = yaml.safe_load(gen.serialize(format="yaml"))
-            assert "ResourceLink" not in spec["components"]["schemas"]
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        spec = yaml.safe_load(gen.serialize(format="yaml"))
+        assert "ResourceLink" not in spec["components"]["schemas"]
 
     def test_nested_opt_out_suppresses_paths(self):
         """`openapi.nested: "false"` on a slot suppresses its nested paths.
@@ -845,12 +820,8 @@ classes:
         assert "/persons/{id}/addresses" in spec["paths"]
         assert "/persons/{id}/addresses/{address_id}" in spec["paths"]
 
-    def test_resource_without_addressability_raises(self):
+    def test_resource_without_addressability_raises(self, schema_to_file):
         """openapi.resource: "true" with no identifier and item-path ops fails loudly."""
-        import tempfile
-
-        import pytest
-
         schema_yaml = """
 id: https://example.org/no-id
 name: no_id
@@ -862,15 +833,9 @@ classes:
     attributes:
       label: { range: string }
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="Floating"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        with pytest.raises(ValueError, match="Floating"):
+            gen.serialize(format="yaml")
 
 
 class TestInverseDirection:
@@ -1034,11 +999,8 @@ class TestErrorModel:
         not_found = spec["paths"]["/persons/{id}"]["get"]["responses"]["404"]
         assert "content" not in not_found
 
-    def test_user_class_named_problem_is_not_overwritten(self):
+    def test_user_class_named_problem_is_not_overwritten(self, schema_to_file):
         """If the schema defines its own `Problem` class, the synthesised one is suppressed."""
-        # Build a tiny schema where Problem is a real LinkML class.
-        import tempfile
-
         schema_yaml = """
 id: https://example.org/with-problem
 name: with_problem
@@ -1055,22 +1017,14 @@ classes:
     attributes:
       id: { identifier: true, range: string, required: true }
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            spec = yaml.safe_load(gen.serialize(format="yaml"))
-            # User's Problem wins — has `reason`, not the RFC 7807 fields.
-            assert "reason" in spec["components"]["schemas"]["Problem"]["properties"]
-            assert "instance" not in spec["components"]["schemas"]["Problem"]["properties"]
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        spec = yaml.safe_load(gen.serialize(format="yaml"))
+        # User's Problem wins — has `reason`, not the RFC 7807 fields.
+        assert "reason" in spec["components"]["schemas"]["Problem"]["properties"]
+        assert "instance" not in spec["components"]["schemas"]["Problem"]["properties"]
 
-    def test_custom_error_class_via_schema_annotation(self):
+    def test_custom_error_class_via_schema_annotation(self, schema_to_file):
         """openapi.error_class on the schema picks a user-declared error class."""
-        import tempfile
-
         schema_yaml = """
 id: https://example.org/custom-error
 name: custom_error
@@ -1089,26 +1043,19 @@ classes:
     attributes:
       id: { identifier: true, range: string, required: true }
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            spec = yaml.safe_load(gen.serialize(format="yaml"))
-            # No synthesised Problem.
-            assert "Problem" not in spec["components"]["schemas"]
-            # 404 references ApiError instead.
-            not_found = spec["paths"]["/widgets/{id}"]["get"]["responses"]["404"]
-            assert not_found["content"]["application/json"]["schema"] == {
-                "$ref": "#/components/schemas/ApiError"
-            }
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        spec = yaml.safe_load(gen.serialize(format="yaml"))
+        # No synthesised Problem.
+        assert "Problem" not in spec["components"]["schemas"]
+        # 404 references ApiError instead.
+        not_found = spec["paths"]["/widgets/{id}"]["get"]["responses"]["404"]
+        assert not_found["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/ApiError"
+        }
 
-    def test_error_class_name_renames_synthesised_problem(self):
+    def test_error_class_name_renames_synthesised_problem(self, schema_to_file):
         """`openapi.error_class_name: ProblemDetail` renames the synthesised
         RFC 7807 schema (and every `$ref` to it) without authoring a class."""
-        import tempfile
 
         schema_yaml = """
 id: https://example.org/rename-error
@@ -1124,30 +1071,23 @@ classes:
     attributes:
       id: { identifier: true, range: string, required: true }
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            spec = yaml.safe_load(gen.serialize(format="yaml"))
-            assert "Problem" not in spec["components"]["schemas"]
-            problem = spec["components"]["schemas"]["ProblemDetail"]
-            # RFC 7807 fields still present under the renamed schema.
-            for key in ("type", "title", "status", "detail", "instance"):
-                assert key in problem["properties"]
-            assert problem["title"] == "ProblemDetail"
-            # Non-2xx responses point at the renamed schema.
-            not_found = spec["paths"]["/widgets/{id}"]["get"]["responses"]["404"]
-            assert not_found["content"]["application/json"]["schema"] == {
-                "$ref": "#/components/schemas/ProblemDetail"
-            }
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        spec = yaml.safe_load(gen.serialize(format="yaml"))
+        assert "Problem" not in spec["components"]["schemas"]
+        problem = spec["components"]["schemas"]["ProblemDetail"]
+        # RFC 7807 fields still present under the renamed schema.
+        for key in ("type", "title", "status", "detail", "instance"):
+            assert key in problem["properties"]
+        assert problem["title"] == "ProblemDetail"
+        # Non-2xx responses point at the renamed schema.
+        not_found = spec["paths"]["/widgets/{id}"]["get"]["responses"]["404"]
+        assert not_found["content"]["application/json"]["schema"] == {
+            "$ref": "#/components/schemas/ProblemDetail"
+        }
 
-    def test_error_class_wins_over_error_class_name_with_warning(self):
+    def test_error_class_wins_over_error_class_name_with_warning(self, schema_to_file):
         """When both annotations are set, the user-defined class wins and a
         UserWarning fires so the conflict is visible."""
-        import tempfile
         import warnings
 
         schema_yaml = """
@@ -1168,29 +1108,19 @@ classes:
     attributes:
       id: { identifier: true, range: string, required: true }
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                gen = OpenAPIGenerator(tmp)
-                spec = yaml.safe_load(gen.serialize(format="yaml"))
-            assert any("openapi.error_class_name" in str(w.message) for w in caught), (
-                f"expected UserWarning naming the conflict, got {[str(w.message) for w in caught]}"
-            )
-            # ApiError wins; ProblemDetail is not synthesised.
-            assert "ApiError" in spec["components"]["schemas"]
-            assert "ProblemDetail" not in spec["components"]["schemas"]
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+            spec = yaml.safe_load(gen.serialize(format="yaml"))
+        assert any("openapi.error_class_name" in str(w.message) for w in caught), (
+            f"expected UserWarning naming the conflict, got {[str(w.message) for w in caught]}"
+        )
+        # ApiError wins; ProblemDetail is not synthesised.
+        assert "ApiError" in spec["components"]["schemas"]
+        assert "ProblemDetail" not in spec["components"]["schemas"]
 
-    def test_undefined_error_class_raises(self):
+    def test_undefined_error_class_raises(self, schema_to_file):
         """openapi.error_class pointing at a missing class fails at generation time."""
-        import tempfile
-
-        import pytest
-
         schema_yaml = """
 id: https://example.org/bad-error-class
 name: bad_error_class
@@ -1205,15 +1135,9 @@ classes:
     attributes:
       id: { identifier: true, range: string, required: true }
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="NonExistent"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        with pytest.raises(ValueError, match="NonExistent"):
+            gen.serialize(format="yaml")
 
 
 class TestDeepNestedPaths:
@@ -2085,12 +2009,8 @@ class TestDiscriminator:
         book = spec["components"]["schemas"]["Book"]
         assert "discriminator" not in book
 
-    def test_conflict_designates_type_and_openapi_discriminator_raises(self):
+    def test_conflict_designates_type_and_openapi_discriminator_raises(self, schema_to_file):
         """Declaring both ways for the same class is a generation-time error."""
-        import tempfile
-
-        import pytest
-
         schema_yaml = """
 id: https://example.org/conflict
 name: conflict
@@ -2112,22 +2032,12 @@ classes:
   Widget:
     is_a: Item
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="designates_type"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        with pytest.raises(ValueError, match="designates_type"):
+            gen.serialize(format="yaml")
 
-    def test_duplicate_type_values_raises(self):
+    def test_duplicate_type_values_raises(self, schema_to_file):
         """Two subclasses with the same openapi.type_value is a generation-time error."""
-        import tempfile
-
-        import pytest
-
         schema_yaml = """
 id: https://example.org/dup-type-value
 name: dup_type_value
@@ -2152,15 +2062,9 @@ classes:
     annotations:
       openapi.type_value: SAME
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp)
-            with pytest.raises(ValueError, match="Duplicate"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml))
+        with pytest.raises(ValueError, match="Duplicate"):
+            gen.serialize(format="yaml")
 
     # --- Polymorphism at points-of-use (no schema-level oneOf) ---------
 
@@ -3009,12 +2913,8 @@ class TestProfiles:
         with pytest.raises(ValueError, match="Unknown profile 'nope'"):
             _generate(profile="nope")
 
-    def test_profile_drift_on_path_variable_raises(self):
+    def test_profile_drift_on_path_variable_raises(self, schema_to_file):
         """Excluding a slot that's annotated as path_variable fails loudly."""
-        import tempfile
-
-        import pytest
-
         schema_yaml = """
 id: https://example.org/drift
 name: drift
@@ -3035,15 +2935,9 @@ classes:
         annotations:
           openapi.path_variable: "true"
 """
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(schema_yaml)
-            tmp = f.name
-        try:
-            gen = OpenAPIGenerator(tmp, profile="bad")
-            with pytest.raises(ValueError, match="path_variable"):
-                gen.serialize(format="yaml")
-        finally:
-            Path(tmp).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(schema_yaml), profile="bad")
+        with pytest.raises(ValueError, match="path_variable"):
+            gen.serialize(format="yaml")
 
 
 class TestRdfExtensions:
@@ -3223,42 +3117,26 @@ classes:
         widget_local = spec["components"]["schemas"]["Widget"]["allOf"][1]
         assert "x-codegen-name" not in widget_local["properties"]["#type"]
 
-    def test_emit_name_mappings_returns_wire_to_codegen_pairs(self):
+    def test_emit_name_mappings_returns_wire_to_codegen_pairs(self, schema_to_file):
         """``emit_name_mappings`` returns ``--name-mappings`` file
         content — one ``wire-name=codegen-name`` per line, sorted."""
-        import tempfile
-
         with_codegen = self.BASE.replace(
             '      openapi.legacy_type_field: "#type"\n',
             '      openapi.legacy_type_field: "#type"\n'
             "      openapi.legacy_type_codegen_name: legacyType\n",
         )
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(with_codegen)
-            path = f.name
-        try:
-            gen = OpenAPIGenerator(path)
-            gen.serialize()  # build state populates the mapping
-            assert gen.emit_name_mappings() == "#type=legacyType\n"
-            assert gen.name_mappings() == {"#type": "legacyType"}
-        finally:
-            Path(path).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(with_codegen))
+        gen.serialize()  # build state populates the mapping
+        assert gen.emit_name_mappings() == "#type=legacyType\n"
+        assert gen.name_mappings() == {"#type": "legacyType"}
 
-    def test_emit_name_mappings_empty_when_no_renames(self):
+    def test_emit_name_mappings_empty_when_no_renames(self, schema_to_file):
         """No ``legacy_type_codegen_name`` → empty string, so callers
         can write the file unconditionally without polluting the repo."""
-        import tempfile
-
-        with tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False) as f:
-            f.write(self.BASE)
-            path = f.name
-        try:
-            gen = OpenAPIGenerator(path)
-            gen.serialize()
-            assert gen.emit_name_mappings() == ""
-            assert gen.name_mappings() == {}
-        finally:
-            Path(path).unlink(missing_ok=True)
+        gen = OpenAPIGenerator(schema_to_file(self.BASE))
+        gen.serialize()
+        assert gen.emit_name_mappings() == ""
+        assert gen.name_mappings() == {}
 
 
 class TestInlinedPolymorphicRange:
