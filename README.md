@@ -26,6 +26,11 @@ pip install linkml-openapi
 
 ### CLI
 
+Two entry points:
+
+- **`gen-openapi`** emits an OpenAPI 3.0/3.1 spec.
+- **`gen-spring-server`** emits a Spring Boot Java source tree (controller interfaces + DTOs) plus a sidecar OpenAPI spec at `resources/openapi.yaml`.
+
 ```bash
 # Generate OpenAPI YAML from a LinkML schema
 gen-openapi schema.yaml > openapi.yaml
@@ -38,7 +43,19 @@ gen-openapi schema.yaml --api-title "My API" --api-version 2.0.0 --server-url ht
 
 # Only generate endpoints for specific classes
 gen-openapi schema.yaml --classes Person --classes Address
+
+# Inject standard 4xx/5xx error responses on every operation
+gen-openapi schema.yaml --error-responses 400,401,403,500,503 > openapi.yaml
+
+# Emit a Spring Boot server tree under ./build/spring-src
+gen-spring-server schema.yaml --output ./build/spring-src --package com.example.api
+
+# Spring + reactive (WebFlux) + URL prefix
+gen-spring-server schema.yaml --output ./build/spring-src \
+    --package com.example.api --reactive --path-prefix /api/v1
 ```
+
+The Spring CLI mirrors `gen-openapi`'s flags where they affect the sidecar OpenAPI spec (`--error-responses`, `--profile`, `--emit-namespaces`, `--rdf-resolved-map`, `--post-process`); reactive / path-style / path-prefix also apply to the controller emission.
 
 ### Python
 
@@ -281,6 +298,28 @@ The OpenAPI generator output is not affected.
 Reactive apps depend on `spring-boot-starter-webflux` instead of
 `spring-boot-starter-web` (the starters are mutually exclusive).
 
+#### `openapi.error_responses` — standard 4xx/5xx codes on every op
+
+Inject a shared list of error responses on every emitted operation,
+each described with its standard IANA reason phrase and referencing
+the active error class (`Problem` by default, or the user-defined
+class set via `openapi.error_class`):
+
+```yaml
+annotations:
+  openapi.error_responses: "400,401,403,500,503"
+```
+
+Override per-build with `--error-responses 400,401,403,500,503` on
+either CLI or `error_responses=[400, 401, 403, 500, 503]` in the
+Python API. An explicit empty list `[]` disables injection even when
+the schema annotation declares one.
+
+The Spring side mirrors the OpenAPI side per-op: list endpoints
+declare no baseline error, create gets `422`, read/delete get `404`,
+update/patch get `404+422`, and any `openapi.error_responses` codes
+merge in uniformly across all ops.
+
 ### Class-level annotations
 
 Annotations are placed in the `annotations` block of a class definition.
@@ -358,6 +397,120 @@ Sets a custom URL path segment for the resource's endpoints.
     annotations:
       openapi.resource: "true"
       openapi.path: people     # GET /people, GET /people/{id}
+```
+
+#### `openapi.expose`
+
+Suppress path emission for an `openapi.resource: "true"` class
+while keeping it as a referenceable component schema. Useful when
+the class is part of the wire contract (other resources `$ref` it)
+but CRUD ownership lives in a different service:
+
+```yaml
+classes:
+  Person:
+    annotations: { openapi.resource: "true" }
+    attributes:
+      role: { range: Role, inlined: true }
+  Role:
+    annotations:
+      openapi.resource: "true"
+      openapi.expose: "false"   # Role schema emitted, /roles paths suppressed
+    attributes:
+      id: { identifier: true, required: true }
+      label: string
+```
+
+Both `gen-openapi` and `gen-spring-server` honour the annotation —
+the Spring side skips the controller interface and the sidecar OpenAPI spec.
+
+#### `openapi.pagination` / `openapi.list_envelope` / `openapi.list_query_params`
+
+Three composable per-class annotations for list endpoints.
+
+**`openapi.pagination`** picks a query-param dialect:
+
+| Value | Injected query params |
+|-------|-----------------------|
+| `cursor` | `cursor` (string), `pageSize` (integer) |
+| `page-size` | `page` (integer), `size` (integer) |
+| `page-offset` | `offset` (integer), `limit` (integer) |
+| `none` | (no pagination params at all) |
+| unset | Legacy `limit`/`offset` baseline (today's behaviour) |
+
+```yaml
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.pagination: cursor
+```
+
+When a dialect is declared, the legacy `limit`/`offset` are NOT
+also emitted (no duplication).
+
+**`openapi.list_envelope`** wraps the 200 response in a `$ref` to a
+declared envelope class instead of returning a bare array:
+
+```yaml
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.list_envelope: PagedDatasets
+  PagedDatasets:
+    attributes:
+      items: { range: Dataset, multivalued: true }
+      nextCursor: string
+      hasMore: boolean
+```
+
+The envelope class owns the array slot pointing at the listed
+resource; the generator just routes the list-op response at it.
+
+**`openapi.list_query_params`** injects extra typed query
+parameters on top of slot-driven filters:
+
+```yaml
+classes:
+  Dataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.list_query_params: |
+        [{"name": "filterBy", "type": "string", "description": "Filter expression"},
+         {"name": "includeArchived", "type": "boolean"}]
+```
+
+Value is a JSON array of `{name, type, description?, required?}`
+objects. Types: `string` / `integer` / `number` / `boolean` /
+`array`.
+
+The Spring side honours all three — controllers return the
+envelope class, accept the dialect's query params, and add the
+extra `@RequestParam` declarations.
+
+#### `openapi.codegen_inheritance` — escape hatch for `--codegen-friendly`
+
+When `--codegen-friendly` is on, the generator normally emits a
+schema-level discriminator on the polymorphic root and replaces
+use-site `oneOf` with a `$ref` to the parent (the parent owns the
+`mapping` for codegen dispatch). This collides with
+openapi-generator's Java inheritance template when a subclass
+narrows an inherited slot via `slot_usage`: the generated subclass
+emits a covariant override that doesn't compile.
+
+The generator detects narrowing automatically and falls back to
+inline use-site `oneOf` for the affected root. Pass
+`openapi.codegen_inheritance: "false"` on the root to force the
+fallback for any root, regardless of auto-detection:
+
+```yaml
+classes:
+  Resource:
+    abstract: true
+    annotations:
+      openapi.discriminator: resourceType
+      openapi.codegen_inheritance: "false"   # use-site oneOf only
 ```
 
 #### `openapi.operations`
@@ -1147,6 +1300,27 @@ endpoints regardless of any of these annotations.
 | `openapi.path_variable` | slot (via `slot_usage`) | `"true"` | Identifier slot |
 | `openapi.path_segment` | slot (via `slot_usage`) | URL segment string | Slot name with active path-style applied |
 | `openapi.query_param` | slot (via `slot_usage`) | `"true"` / token list / `"false"` | Auto-inferred from slot type |
+| `openapi.discriminator` | class | property name string | None (no polymorphic dispatch) |
+| `openapi.type_value` | class | string | Falls back to class name |
+| `openapi.legacy_type_field` | class | wire JSON property name | None — no legacy synthesis |
+| `openapi.legacy_type_value` | class | wire value string | (required when ancestor sets `legacy_type_field`) |
+| `openapi.legacy_type_codegen_name` | class | Java-side field name | Wire field name passed through unchanged |
+| `openapi.request_class` / `openapi.update_class` | class | LinkML class name | Resource class itself |
+| `openapi.body` | slot (via `slot_usage`) | `"false"` | Slot lands on parent body |
+| `openapi.nested` | slot (via `slot_usage`) | `"false"` | Nested endpoint emits |
+| `openapi.expose` | class | `"false"` | Path emission enabled |
+| `openapi.error_class` | schema | LinkML class name | Synthesised RFC 7807 Problem |
+| `openapi.error_responses` | schema | comma-separated 4xx/5xx codes | None — only per-op baseline emitted |
+| `openapi.pagination` | class | `cursor` / `page-size` / `page-offset` / `none` | Legacy `limit`/`offset` baseline |
+| `openapi.list_envelope` | class | LinkML class name | Bare array response |
+| `openapi.list_query_params` | class | JSON array of `{name, type, description?}` | None |
+| `openapi.codegen_inheritance` | class | `"false"` | `--codegen-friendly` uses parent-$ref strategy |
+| `openapi.reactive` | schema | `"true"` / `"false"` | Off — blocking Spring MVC |
+| `openapi.profile.<name>.exclude_classes` | schema | comma-separated class names | None |
+| `openapi.profile.<name>.include_classes` | schema | comma-separated class names | None (all included) |
+| `openapi.profile.<name>.exclude_slots` | schema | comma-separated slot names | None |
+| `openapi.profile.<name>.include_slots` | schema | comma-separated slot names | None (all included) |
+| `openapi.profile.<name>.description` | schema | description string | None |
 | `openapi.format` | slot | format string | derived from slot range |
 
 ## Type Mapping

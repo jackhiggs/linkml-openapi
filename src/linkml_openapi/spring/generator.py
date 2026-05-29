@@ -52,7 +52,8 @@ from linkml_openapi._chains import (
 )
 from linkml_openapi._http import HTTP_REASON_PHRASES
 from linkml_openapi._query_params import QueryParamSpec, walk_query_params
-from linkml_openapi.generator import _is_falsy, _to_snake_case
+from linkml_openapi._utils import is_falsy as _is_falsy
+from linkml_openapi._utils import to_snake_case as _to_snake_case
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 
@@ -85,6 +86,14 @@ class SpringServerGenerator:
     Use :meth:`emit` to write the source tree to disk, or
     :meth:`build` to get the in-memory rendering as
     ``{relative_path: source_text}`` for testing.
+
+    **Field default-value conventions:** mirror the OpenAPI
+    generator's. Tri-state fields (``None`` = "read schema
+    annotation"; explicit value = "override") include
+    ``error_responses``, ``path_style``, ``path_prefix``,
+    ``reactive``. ``sidecar_*`` fields pass through to the
+    sidecar OpenAPI generator unchanged; they do NOT affect the
+    Java controller source.
     """
 
     schema_path: str
@@ -119,6 +128,17 @@ class SpringServerGenerator:
     # None falls back to the schema-level ``openapi.error_responses``
     # annotation; an empty list explicitly disables injection.
     error_responses: list[int] | None = None
+    # Sidecar-only knobs (#14 follow-up): pass through to the
+    # ``OpenAPIGenerator`` invocation in ``_render_openapi_spec`` so a
+    # user moving from ``gen-openapi`` to ``gen-spring-server`` doesn't
+    # lose access to profiles, RDF resolved maps, namespaces, or
+    # post-processors. These do NOT affect the Spring controller
+    # source — only the sidecar OpenAPI spec written to
+    # ``resources/openapi.yaml``.
+    sidecar_profile: str | None = None
+    sidecar_emit_namespaces: bool = False
+    sidecar_rdf_resolved_map: bool = False
+    sidecar_post_processors: list[str] = field(default_factory=list)
 
     _sv: SchemaView = field(init=False)
     _env: Environment = field(init=False)
@@ -454,6 +474,10 @@ class SpringServerGenerator:
             path_prefix=self._effective_path_prefix or None,
             path_style=self.path_style,
             error_responses=sidecar_error_responses,
+            profile=self.sidecar_profile,
+            emit_namespaces=self.sidecar_emit_namespaces,
+            rdf_resolved_map=self.sidecar_rdf_resolved_map,
+            post_processors=list(self.sidecar_post_processors),
         ).serialize()
 
     def build(self) -> dict[str, str]:

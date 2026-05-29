@@ -48,6 +48,15 @@ from linkml_openapi._query_params import (
     QueryParamSpec,
     walk_query_params,
 )
+from linkml_openapi._utils import (
+    is_falsy,
+    is_irregular_plural_hint,
+    is_truthy,
+    parse_csv,
+    pluralize,
+    to_path_segment,
+    to_snake_case,
+)
 
 # LinkML range → OpenAPI DataType mapping
 RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
@@ -67,102 +76,36 @@ RANGE_TYPE_MAP: dict[str, dict[str, Any]] = {
 
 
 # Class-name suffixes that are already plural (or unchanged in plural form)
-# and should be returned as-is from `_pluralize`.
-_INVARIANT_PLURAL_SUFFIXES = ("series", "species", "genus")
-
-# Class-name suffixes that become irregular in plural form. We don't try
-# to inflect these — we just emit a heads-up so the user can set
-# `openapi.path` explicitly. Listed lower-case for case-insensitive match.
-_IRREGULAR_HINT_SUFFIXES = (
-    "child",
-    "datum",
-    "criterion",
-    "phenomenon",
-    "analysis",
-    "thesis",
-    "axis",
-    "crisis",
-)
+# and the irregular-plural hint list live in ``_utils`` so both emitters
+# share one source of truth (see _utils.pluralize / is_irregular_plural_hint).
 
 
 def _pluralize(name: str) -> str:
-    """Pluralize an English noun for URL paths.
-
-    Handles the common regular-pluralization patterns (`-s/-x/-z/-ch/-sh`,
-    consonant-`y`, default `+s`) and the most common already-plural Latin
-    forms used in domain modeling (`series`, `species`, `genus`). For
-    irregular nouns (`child`, `person`, `index`, …) the function falls
-    back to `+s` and the caller is expected to set `openapi.path`
-    explicitly when correctness matters; `_warn_on_irregular_plural`
-    surfaces a warning at generation time.
-    """
-    if not name:
-        return name
-
-    lower = name.lower()
-    for inv in _INVARIANT_PLURAL_SUFFIXES:
-        if lower.endswith(inv):
-            return name
-
-    if name.endswith(("ch", "sh")):
-        return name + "es"
-    if name.endswith(("s", "x", "z")):
-        return name + "es"
-    if name.endswith("y") and name[-2:] not in ("ay", "ey", "oy", "uy"):
-        return name[:-1] + "ies"
-    return name + "s"
+    return pluralize(name)
 
 
 def _is_irregular_plural_hint(name: str) -> bool:
-    """True when `name` looks like it would be misled by the default rules."""
-    if not name:
-        return False
-    lower = name.lower()
-    return any(lower.endswith(suf) for suf in _IRREGULAR_HINT_SUFFIXES)
+    return is_irregular_plural_hint(name)
 
 
 def _to_snake_case(name: str) -> str:
-    """Convert CamelCase to snake_case."""
-    s = re.sub(r"(?<=[a-z0-9])([A-Z])", r"_\1", name)
-    return s.lower()
+    return to_snake_case(name)
 
 
 def _is_truthy(value: object) -> bool:
-    """Check if an annotation value represents a boolean true."""
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() == "true"
+    return is_truthy(value)
 
 
 def _is_falsy(value: object | None) -> bool:
-    """Check if an annotation value represents a boolean false.
-
-    ``None`` (annotation absent) is NOT falsy — distinguish "the
-    author explicitly opted out" from "the author didn't say anything."
-    Use this for opt-out annotations (``openapi.expose: "false"``,
-    ``openapi.codegen_inheritance: "false"``, etc.) so the falsy
-    parsing rule is identical across the file.
-    """
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return not value
-    return str(value).strip().lower() == "false"
+    return is_falsy(value)
 
 
 def _to_path_segment(name: str) -> str:
-    """Convert class name to URL path segment: CamelCase → snake_case → plural."""
-    return _pluralize(_to_snake_case(name))
+    return to_path_segment(name)
 
 
 def _parse_csv(value: str | None, *, lowercase: bool = False) -> list[str]:
-    """Split a comma-separated annotation value, trimming whitespace and empties."""
-    if not value:
-        return []
-    out = [t.strip() for t in str(value).split(",")]
-    if lowercase:
-        out = [t.lower() for t in out]
-    return [t for t in out if t]
+    return parse_csv(value, lowercase=lowercase)
 
 
 # URL path-segment styles. Module-level so the CLI can import the
@@ -186,7 +129,39 @@ ITEM_OPERATIONS: frozenset[str] = frozenset({OP_READ, OP_UPDATE, OP_PATCH, OP_DE
 
 @dataclass
 class OpenAPIGenerator(Generator):
-    """Generate an OpenAPI 3.1 specification from a LinkML schema."""
+    """Generate an OpenAPI 3.1 specification from a LinkML schema.
+
+    **Field default-value conventions:**
+
+    *Tri-state* fields (``None`` / explicit value) distinguish "the
+    caller didn't touch this knob" from "the caller explicitly
+    overrode this value." A ``None`` default means "fall back to the
+    matching ``openapi.*`` schema annotation, or the documented
+    fallback if no annotation exists." An explicit value (including
+    an empty list / string) means "use exactly this; do not consult
+    the schema annotation." Tri-state fields documented as such:
+
+    - ``error_responses``: ``None`` reads ``openapi.error_responses``;
+      ``[]`` explicitly disables injection; non-empty list overrides
+      the annotation.
+    - ``path_style``: ``None`` reads ``openapi.path_style`` (default
+      ``"snake_case"``); explicit value wins.
+    - ``path_prefix``: ``None`` reads ``openapi.path_prefix`` (default
+      no prefix); explicit value wins.
+    - ``resource_filter``: ``None`` defaults to "all
+      ``openapi.resource: true`` classes"; explicit list narrows.
+    - ``profile``: ``None`` activates no profile; an explicit name
+      activates the matching ``openapi.profile.<name>`` block.
+
+    *Bool* fields (``True`` / ``False`` defaults) are not tri-state —
+    the schema annotation (when one exists) is read independently
+    and the ``True``/``False`` field acts as a CLI / kwarg override
+    only when explicitly set. Documented per-field where relevant.
+
+    *Empty-collection* defaults (``post_processors: list[str] = []``)
+    mean "no entries" — they are not tri-state. An empty list and a
+    missing schema annotation produce identical behaviour.
+    """
 
     # ClassVar overrides
     generatorname: ClassVar[str] = os.path.basename(__file__)

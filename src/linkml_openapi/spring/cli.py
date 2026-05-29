@@ -83,6 +83,61 @@ from linkml_openapi.spring.generator import SpringServerGenerator
         "springdoc's runtime view matches."
     ),
 )
+@click.option(
+    "--profile",
+    default=None,
+    metavar="NAME",
+    help=(
+        "Active profile name for the sidecar OpenAPI spec. The "
+        "profile must be declared via `openapi.profile.<NAME>.<key>` "
+        "schema annotations; classes / slots listed in `exclude_*` / "
+        "`include_*` are filtered out of the sidecar. Mirrors "
+        "`gen-openapi --profile`. NOTE: profile filtering applies "
+        "only to the sidecar spec — the Spring controllers are "
+        "always emitted from the full schema. Use this when the "
+        "Spring service hosts the full API surface but the sidecar "
+        "needs a narrower partner/external view."
+    ),
+)
+@click.option(
+    "--emit-namespaces",
+    "emit_namespaces",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit a top-level `x-namespaces` map on the sidecar OpenAPI "
+        "spec (CURIE prefix → expanded IRI) drawn from the LinkML "
+        "schema's `prefixes:` block. Lets RDF runtimes build "
+        "JSON-LD `@context` blocks / Turtle `@prefix` declarations "
+        "from a single source of truth. Mirrors `gen-openapi "
+        "--emit-namespaces`. Defaults to off."
+    ),
+)
+@click.option(
+    "--rdf-resolved-map",
+    "rdf_resolved_map",
+    is_flag=True,
+    default=False,
+    help=(
+        "Emit `x-rdf-properties-resolved` + `x-ranges-resolved` on "
+        "every component schema in the sidecar — slot name → "
+        "expanded RDF predicate IRI / resolved range class names, "
+        "with inheritance via `allOf` already resolved. Mirrors "
+        "`gen-openapi --rdf-resolved-map`. Defaults to off."
+    ),
+)
+@click.option(
+    "--post-process",
+    "post_process",
+    default=None,
+    metavar="NAME[,NAME...]",
+    help=(
+        "Comma-separated list of registered post-processors to apply "
+        "to the sidecar OpenAPI spec. Mirrors `gen-openapi "
+        "--post-process`. See linkml_openapi.post_processors for the "
+        "registry."
+    ),
+)
 @click.version_option(__version__, "-V", "--version")
 def cli(
     yamlfile,
@@ -92,6 +147,10 @@ def cli(
     path_style: str | None,
     reactive: bool | None,
     error_responses: str | None,
+    profile: str | None,
+    emit_namespaces: bool,
+    rdf_resolved_map: bool,
+    post_process: str | None,
 ) -> None:
     """Generate Spring server source files directly from a LinkML schema."""
     parsed_codes: list[int] | None = None
@@ -105,6 +164,9 @@ def cli(
                 parsed_codes.append(int(token))
             except ValueError as exc:
                 raise click.BadParameter(f"--error-responses: {token!r} is not an integer") from exc
+    post_processors: list[str] = []
+    if post_process:
+        post_processors = [n.strip() for n in post_process.split(",") if n.strip()]
     gen = SpringServerGenerator(
         yamlfile,
         package=package,
@@ -112,6 +174,10 @@ def cli(
         path_style=path_style,
         reactive=reactive,
         error_responses=parsed_codes,
+        sidecar_profile=profile,
+        sidecar_emit_namespaces=emit_namespaces,
+        sidecar_rdf_resolved_map=rdf_resolved_map,
+        sidecar_post_processors=post_processors,
     )
     written = gen.emit(output)
     for path in written:

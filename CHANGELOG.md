@@ -8,6 +8,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (refactor / docs / CLI symmetry)
+
+- **`gen-spring-server` CLI gains four new sidecar-affecting flags**
+  to mirror `gen-openapi` (#14): `--profile`, `--emit-namespaces`,
+  `--rdf-resolved-map`, `--post-process`. They thread through to the
+  `OpenAPIGenerator` invocation that writes the sidecar OpenAPI
+  spec to `resources/openapi.yaml`. The Java controller emission
+  is unchanged — these flags only affect the sidecar.
+- **`src/linkml_openapi/_utils.py`** holds the shared
+  helpers (`pluralize`, `to_snake_case`, `is_truthy` / `is_falsy`,
+  `parse_csv`, `to_path_segment`, `is_irregular_plural_hint`) that
+  both generators need (#13). The Spring emitter imports directly
+  from `_utils` instead of reaching into `linkml_openapi.generator`
+  for private names. Existing `_pluralize` / `_to_snake_case` /
+  etc. names in `generator.py` are preserved as thin shims so
+  any external caller that touched them keeps working — they just
+  delegate to `_utils`.
+- **README documents the v0.15.0 features**: `openapi.expose`,
+  `openapi.pagination` (`cursor` / `page-size` / `page-offset` /
+  `none`), `openapi.list_envelope`, `openapi.list_query_params`,
+  `openapi.error_responses`, `openapi.codegen_inheritance`. The
+  annotation summary table now lists 22 additional annotations
+  (`openapi.discriminator`, the `legacy_type_*` cluster,
+  `request_class` / `update_class`, the profile keys, and the
+  v0.15.0 additions). The CLI section now describes
+  `gen-spring-server` alongside `gen-openapi`.
+- **Dataclass field-default conventions documented** on both
+  `OpenAPIGenerator` and `SpringServerGenerator` class docstrings
+  (#15). Tri-state semantics (`None` = "read schema annotation";
+  explicit value = "override") spelled out for `error_responses`,
+  `path_style`, `path_prefix`, `resource_filter`, `profile`,
+  `reactive`. Empty-collection defaults (`post_processors`,
+  `sidecar_post_processors`) clarified as non-tri-state.
+
 ### Added
 
 - **Spring controllers honour `openapi.list_envelope` /

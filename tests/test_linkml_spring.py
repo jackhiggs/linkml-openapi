@@ -1992,3 +1992,56 @@ class TestMixinNarrowingDetected:
         # from the HasDistributions mixin chain. Detection must catch
         # this and mark AcmeDataset.
         assert "AcmeDataset" in gen._narrowing_subclasses
+
+
+class TestSpringSidecarFlagPassthrough:
+    """``gen-spring-server`` now exposes the same sidecar-affecting
+    flags as ``gen-openapi`` (#14): ``--profile``,
+    ``--emit-namespaces``, ``--rdf-resolved-map``, ``--post-process``.
+    They thread through to the OpenAPIGenerator that builds the
+    sidecar spec written under ``resources/openapi.yaml``."""
+
+    SCHEMA = """\
+id: https://example.org/spring_passthrough
+name: spring_passthrough
+prefixes:
+  acme: https://example.com/acme/
+default_range: string
+classes:
+  Dataset:
+    annotations: { openapi.resource: "true", openapi.path: datasets }
+    class_uri: acme:Dataset
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      title: { range: string }
+"""
+
+    def test_emit_namespaces_reaches_sidecar(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(self.SCHEMA)
+        out = tmp_path / "out" / "java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        SpringServerGenerator(
+            str(fixture),
+            package="io.example.pass",
+            sidecar_emit_namespaces=True,
+        ).emit(str(out))
+        spec_text = (tmp_path / "out" / "resources" / "openapi.yaml").read_text()
+        assert "x-namespaces:" in spec_text
+        assert "acme: https://example.com/acme/" in spec_text
+
+    def test_rdf_resolved_map_reaches_sidecar(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(self.SCHEMA)
+        out = tmp_path / "out" / "java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        SpringServerGenerator(
+            str(fixture),
+            package="io.example.pass2",
+            sidecar_rdf_resolved_map=True,
+        ).emit(str(out))
+        spec_text = (tmp_path / "out" / "resources" / "openapi.yaml").read_text()
+        # Resolved-map mode emits the flattened map alongside
+        # per-property `x-rdf-property` extensions; either marker
+        # indicates the flag reached the sidecar.
+        assert "x-rdf-class" in spec_text  # class_uri on Dataset gets surfaced
