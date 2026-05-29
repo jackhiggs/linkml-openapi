@@ -4036,7 +4036,7 @@ classes:
         assert "page" not in names
 
     def test_extra_list_query_params_inject(self):
-        # JSON-encoded array because LinkML annotations are scalar strings.
+        # JSON-encoded array — back-compat path for v0.15.0 schemas.
         params_json = (
             '[{"name": "filterBy", "type": "string", "description": "Filter"}, '
             '{"name": "archived", "type": "boolean"}]'
@@ -4054,12 +4054,39 @@ classes:
         assert "archived" in params
         assert params["archived"]["schema"]["type"] == "boolean"
 
+    def test_extra_list_query_params_as_yaml_list(self):
+        """Preferred form (#12 follow-up): `openapi.list_query_params`
+        accepts a YAML list directly — no JSON-in-string indirection.
+        Round-trips through linkml-runtime's native structured-value
+        support."""
+        schema_yaml = self.BASE.replace(
+            "openapi.path: datasets",
+            "openapi.path: datasets\n"
+            "      openapi.list_query_params:\n"
+            "        - name: filterBy\n"
+            "          type: string\n"
+            "          description: Filter\n"
+            "        - name: archived\n"
+            "          type: boolean\n",
+        )
+        spec = _generate_from_string(schema_yaml)
+        get = spec["paths"]["/datasets"]["get"]
+        params = {p["name"]: p for p in get["parameters"]}
+        assert "filterBy" in params
+        assert params["filterBy"]["schema"]["type"] == "string"
+        assert params["filterBy"].get("description") == "Filter"
+        assert "archived" in params
+        assert params["archived"]["schema"]["type"] == "boolean"
+
     def test_invalid_extra_param_json_raises(self):
         schema_yaml = self.BASE.replace(
             "openapi.path: datasets",
             'openapi.path: datasets\n      openapi.list_query_params: "not json"',
         )
-        _generate_from_string_raises(schema_yaml, match=r"JSON array")
+        # The error message names both supported shapes (YAML list
+        # preferred, JSON array back-compat) so the user knows which
+        # form to fix.
+        _generate_from_string_raises(schema_yaml, match=r"YAML list.*JSON array")
 
     def test_invalid_extra_param_type_raises(self):
         params_json = '[{"name": "bad", "type": "uuid"}]'

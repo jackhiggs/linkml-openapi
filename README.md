@@ -469,21 +469,36 @@ The envelope class owns the array slot pointing at the listed
 resource; the generator just routes the list-op response at it.
 
 **`openapi.list_query_params`** injects extra typed query
-parameters on top of slot-driven filters:
+parameters on top of slot-driven filters. Preferred form is a
+native YAML list:
 
 ```yaml
 classes:
   Dataset:
     annotations:
       openapi.resource: "true"
+      openapi.list_query_params:
+        - name: filterBy
+          type: string
+          description: Filter expression
+        - name: includeArchived
+          type: boolean
+```
+
+Each entry is a `{name, type, description?, required?}` mapping;
+`type` is one of `string` / `integer` / `number` / `boolean` /
+`array`.
+
+A JSON-array-as-string form is also accepted for back-compat with
+v0.15.0:
+
+```yaml
       openapi.list_query_params: |
-        [{"name": "filterBy", "type": "string", "description": "Filter expression"},
+        [{"name": "filterBy", "type": "string"},
          {"name": "includeArchived", "type": "boolean"}]
 ```
 
-Value is a JSON array of `{name, type, description?, required?}`
-objects. Types: `string` / `integer` / `number` / `boolean` /
-`array`.
+Both forms produce identical wire shape.
 
 The Spring side honours all three — controllers return the
 envelope class, accept the dialect's query params, and add the
