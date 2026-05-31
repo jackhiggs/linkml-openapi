@@ -4171,3 +4171,149 @@ class TestCodegenFriendlyNarrowingDetectedInFlattenMode:
         gen.serialize()
         assert "AcmeDataset" in gen._narrowing_subclasses
         assert "AcmeCatalog" in gen._narrowing_subclasses
+
+
+class TestSingletonResource:
+    """Coverage for the ``openapi.singleton: "true"`` annotation —
+    all verbs bind to one canonical URL with no ``/{id}`` segment.
+
+    Three URL-shape patterns covered:
+
+    - Top-level singleton (``/health``)
+    - Sub-resource singleton via path_template
+      (``/catalogs/{catalogId}/.../owners``)
+    - Single-verb singleton (PUT only)
+    """
+
+    def test_top_level_singleton_emits_one_path_with_all_verbs(self):
+        spec = _generate_from_string(
+            """
+id: https://example.org/sing1
+name: sing1
+default_range: string
+classes:
+  Health:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: health
+      openapi.singleton: "true"
+      openapi.operations: "read,create,update,delete"
+    attributes:
+      title: { range: string }
+"""
+        )
+        # ONE path entry; no `/health/{id}` fork.
+        assert "/health" in spec["paths"]
+        assert "/health/{id}" not in spec["paths"]
+        item = spec["paths"]["/health"]
+        # All four verbs bound to the same PathItem.
+        assert "get" in item
+        assert "post" in item
+        assert "put" in item
+        assert "delete" in item
+
+    def test_singleton_via_path_template_emits_deep_url_only(self):
+        spec = _generate_from_string(
+            """
+id: https://example.org/sing2
+name: sing2
+default_range: string
+classes:
+  AcmeCatalog:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: catalogs
+    attributes:
+      id: { identifier: true, range: string, required: true }
+  AcmeDataset:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: datasets
+    attributes:
+      id: { identifier: true, range: string, required: true }
+  DatasetOwners:
+    annotations:
+      openapi.resource: "true"
+      openapi.singleton: "true"
+      openapi.path_template: "/catalogs/{catalogId}/datasets/{datasetId}/owners"
+      openapi.path_param_sources: "catalogId:AcmeCatalog.id,datasetId:AcmeDataset.id"
+      openapi.operations: "update"
+    attributes:
+      contact: { range: string }
+"""
+        )
+        deep = "/catalogs/{catalogId}/datasets/{datasetId}/owners"
+        assert deep in spec["paths"]
+        # No `/{ownerId}` fork.
+        assert f"{deep}/{{id}}" not in spec["paths"]
+        assert f"{deep}/{{owner_id}}" not in spec["paths"]
+        item = spec["paths"][deep]
+        # Only the requested verb.
+        assert "put" in item
+        assert "get" not in item
+        assert "post" not in item
+        assert "delete" not in item
+
+    def test_singleton_with_list_raises(self):
+        _generate_from_string_raises(
+            """
+id: https://example.org/sing3
+name: sing3
+default_range: string
+classes:
+  Bad:
+    annotations:
+      openapi.resource: "true"
+      openapi.singleton: "true"
+      openapi.operations: "list,read"
+    attributes:
+      title: { range: string }
+""",
+            match=r"singleton.*list.*collection to enumerate",
+        )
+
+    def test_singleton_skips_path_var_check(self):
+        """A singleton with no identifier slot and no path_variable
+        annotation is still valid — the singleton IS the URL."""
+        spec = _generate_from_string(
+            """
+id: https://example.org/sing4
+name: sing4
+default_range: string
+classes:
+  Heartbeat:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: heartbeat
+      openapi.singleton: "true"
+      openapi.operations: "read"
+    attributes:
+      status: { range: string }
+      lastBeat: { range: string }
+"""
+        )
+        assert "/heartbeat" in spec["paths"]
+        assert spec["paths"]["/heartbeat"].get("get") is not None
+
+    def test_singleton_response_schema_is_the_class(self):
+        """Singleton response body is the class schema directly —
+        not wrapped in `List<…>` even when no envelope is declared."""
+        spec = _generate_from_string(
+            """
+id: https://example.org/sing5
+name: sing5
+default_range: string
+classes:
+  Settings:
+    annotations:
+      openapi.resource: "true"
+      openapi.path: settings
+      openapi.singleton: "true"
+      openapi.operations: "read,update"
+    attributes:
+      theme: { range: string }
+"""
+        )
+        get_body = spec["paths"]["/settings"]["get"]["responses"]["200"]
+        schema = get_body["content"]["application/json"]["schema"]
+        assert schema == {"$ref": "#/components/schemas/Settings"}

@@ -6,6 +6,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [Unreleased]
+
+### Added
+
+- **`openapi.singleton: "true"` class-level annotation.** Resources
+  marked singleton emit ALL verbs in `openapi.operations` on one
+  canonical URL — no `/{id}` segment, no fork between collection-root
+  and item path. Covers three URL-shape patterns that previously
+  required hand-authored controllers in downstream Spring services:
+  - **Top-level singleton** (e.g. `GET/POST/PUT/DELETE /settings`)
+  - **Sub-resource singleton via `openapi.path_template`** (e.g.
+    `PUT /catalogs/{catalogId}/datasets/{datasetId}/owners`)
+  - **Single-verb singleton** by listing one verb in
+    `openapi.operations`
+
+  `list` is rejected — a singleton has no collection to enumerate.
+  Both `gen-openapi` and `gen-spring-server` honour the annotation;
+  the sidecar spec and controller annotations agree wire-for-wire.
+  Identifier-slot validation is skipped under singleton mode (the
+  singleton IS the URL).
+
 ## [0.16.0] — 2026-05-29
 
 ### Added

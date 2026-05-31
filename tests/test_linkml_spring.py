@@ -2045,3 +2045,110 @@ classes:
         # per-property `x-rdf-property` extensions; either marker
         # indicates the flag reached the sidecar.
         assert "x-rdf-class" in spec_text  # class_uri on Dataset gets surfaced
+
+
+class TestSpringSingletonResource:
+    """``openapi.singleton: "true"`` (new) — Spring controllers emit
+    all verbs on ONE URL with no `/{id}` segment, matching the
+    OpenAPI generator's singleton emission."""
+
+    def test_top_level_singleton_controller_has_only_singleton_verbs(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(
+            "id: https://example.org/spring_singleton\n"
+            "name: spring_singleton\n"
+            "default_range: string\n"
+            "classes:\n"
+            "  Health:\n"
+            "    annotations:\n"
+            '      openapi.resource: "true"\n'
+            "      openapi.path: health\n"
+            '      openapi.singleton: "true"\n'
+            '      openapi.operations: "read,create,update,delete"\n'
+            "    attributes:\n"
+            "      title: { range: string }\n"
+        )
+        files = SpringServerGenerator(str(fixture), package="io.example.sing").build()
+        api = files["io/example/sing/api/HealthApi.java"]
+        # All four mappings present on the singleton URL.
+        assert '@GetMapping(value = "/health"' in api
+        assert '@PostMapping(value = "/health"' in api
+        assert '@PutMapping(value = "/health"' in api
+        assert '@DeleteMapping("/health")' in api
+        # No `/health/{id}` polluted methods.
+        assert "/health/{id}" not in api
+
+    def test_sub_resource_singleton_via_template(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(
+            "id: https://example.org/spring_singleton2\n"
+            "name: spring_singleton2\n"
+            "default_range: string\n"
+            "classes:\n"
+            "  AcmeCatalog:\n"
+            '    annotations: { openapi.resource: "true", openapi.path: catalogs }\n'
+            "    attributes:\n"
+            "      id: { identifier: true, range: string, required: true }\n"
+            "  DatasetOwners:\n"
+            "    annotations:\n"
+            '      openapi.resource: "true"\n'
+            '      openapi.singleton: "true"\n'
+            '      openapi.path_template: "/catalogs/{catalogId}/owners"\n'
+            '      openapi.path_param_sources: "catalogId:AcmeCatalog.id"\n'
+            '      openapi.operations: "update"\n'
+            "    attributes:\n"
+            "      contact: { range: string }\n"
+        )
+        files = SpringServerGenerator(str(fixture), package="io.example.sing2").build()
+        api = files["io/example/sing2/api/DatasetOwnersApi.java"]
+        # Only PUT on the templated singleton URL.
+        assert '@PutMapping(value = "/catalogs/{catalogId}/owners"' in api
+        # No GET / POST / DELETE.
+        assert '@GetMapping(value = "/catalogs/{catalogId}/owners"' not in api
+        assert '@PostMapping(value = "/catalogs/{catalogId}/owners"' not in api
+        assert '@DeleteMapping("/catalogs/{catalogId}/owners")' not in api
+        # The path variable is wired as @PathVariable on the method.
+        assert '@PathVariable("catalogId")' in api
+
+    def test_singleton_with_list_raises(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(
+            "id: https://example.org/spring_singleton_bad\n"
+            "name: spring_singleton_bad\n"
+            "default_range: string\n"
+            "classes:\n"
+            "  Bad:\n"
+            "    annotations:\n"
+            '      openapi.resource: "true"\n'
+            "      openapi.path: bad\n"
+            '      openapi.singleton: "true"\n'
+            '      openapi.operations: "list,read"\n'
+            "    attributes:\n"
+            "      title: { range: string }\n"
+        )
+        with pytest.raises(ValueError, match=r"singleton.*list"):
+            SpringServerGenerator(str(fixture), package="io.example.bad").build()
+
+    def test_singleton_sidecar_spec_matches_controller_shape(self, tmp_path):
+        fixture = tmp_path / "schema.yaml"
+        fixture.write_text(
+            "id: https://example.org/spring_singleton_parity\n"
+            "name: spring_singleton_parity\n"
+            "default_range: string\n"
+            "classes:\n"
+            "  Settings:\n"
+            "    annotations:\n"
+            '      openapi.resource: "true"\n'
+            "      openapi.path: settings\n"
+            '      openapi.singleton: "true"\n'
+            '      openapi.operations: "read,update"\n'
+            "    attributes:\n"
+            "      theme: { range: string }\n"
+        )
+        out = tmp_path / "out" / "java"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        SpringServerGenerator(str(fixture), package="io.example.parity").emit(str(out))
+        spec_text = (tmp_path / "out" / "resources" / "openapi.yaml").read_text()
+        # Sidecar advertises GET + PUT on the singleton URL only.
+        assert "/settings:" in spec_text
+        assert "/settings/{id}:" not in spec_text
