@@ -835,11 +835,22 @@ public class %(class_name)s {
                 "the flat URL only."
             )
 
-        if not nested_only:
+        # Singleton mode short-circuits the regular CRUD fork — all
+        # verbs land on one canonical URL with no `/{id}` segment.
+        # The wire shape matches the OpenAPI generator's singleton
+        # emission so the sidecar spec and the controllers agree.
+        singleton_raw = self._class_annotation(cls, "openapi.singleton")
+        is_singleton = singleton_raw is not None and singleton_raw.strip().lower() == "true"
+        if is_singleton:
+            ops.extend(self._singleton_ops(cls, path_segment, imports, media_types))
+        elif not nested_only:
             ops.extend(self._top_level_ops(cls, path_segment, imports, media_types))
-        ops.extend(self._nested_ops(cls, path_segment, imports, media_types))
+        if not is_singleton:
+            ops.extend(self._nested_ops(cls, path_segment, imports, media_types))
         # Deep nested chain (auto-derived). Item-only CRUD on the deep URL.
-        if not flat_only:
+        # Skipped under singleton mode — the singleton URL already
+        # carries every requested verb.
+        if not flat_only and not is_singleton:
             template = self._class_annotation(cls, "openapi.path_template")
             if template:
                 ops.extend(self._deep_templated_ops(cls, template, imports, media_types))
@@ -928,6 +939,197 @@ public class %(class_name)s {
             else:
                 op["method_return"] = f"ResponseEntity<{inner}>"
                 op["default_body"] = "ResponseEntity.status(HttpStatus.NOT_IMPLEMENTED).build()"
+
+    @staticmethod
+    def _requested_operations(cls: ClassDefinition) -> set[str]:
+        """Parse ``openapi.operations`` into a set of verb names. Empty
+        annotation (or absent) means "all standard CRUD"; the caller
+        decides which standard set applies (singleton vs full CRUD)."""
+        ann = None
+        if cls.annotations:
+            for a in cls.annotations.values():
+                if a.tag == "openapi.operations":
+                    ann = str(a.value)
+                    break
+        if not ann:
+            return set()
+        return {t.strip().lower() for t in ann.split(",") if t.strip()}
+
+    def _singleton_ops(
+        self,
+        cls: ClassDefinition,
+        path_segment: str,
+        imports: set[str],
+        media_types: list[str],
+    ) -> list[dict]:
+        """Singleton resource — all requested verbs land on ONE URL
+        with no `/{id}` segment. Mirrors the OpenAPI generator's
+        ``_emit_singleton_path``. The URL is ``openapi.path_template``
+        if set, else ``/<path_segment>``.
+
+        ``openapi.operations`` selects the verb set; ``list`` is
+        rejected (singleton has no collection)."""
+        cn = cls.name
+        update_body_type = self._request_body_class(cls, op="update") or cn
+        create_body_type = self._request_body_class(cls, op="create") or cn
+        for body_type in (create_body_type, update_body_type):
+            if body_type != cn:
+                imports.add(f"{self.package}.model.{body_type}")
+        template = self._class_annotation(cls, "openapi.path_template")
+        if template:
+            url_literal = f'"{_escape_java(template)}"'
+            path_params = self._templated_path_params(cls, template, imports)
+        else:
+            url_literal = f'"/{path_segment}"'
+            path_params = []
+        produces = _produces_arg(media_types)
+        consumes = produces
+        requested = self._requested_operations(cls)
+        if not requested:
+            # Default singleton verbs match the OpenAPI generator's
+            # default: read + create + update + delete (no list).
+            requested = {"read", "create", "update", "delete"}
+        if "list" in requested:
+            raise ValueError(
+                f'Class {cn!r} has openapi.singleton: "true" with `list` in '
+                "openapi.operations — singletons can't be listed. Drop "
+                "`list` or remove the singleton annotation."
+            )
+        ops: list[dict] = []
+        if "read" in requested:
+            ops.append(
+                {
+                    "javadoc": f"GET — read the {cn} singleton.",
+                    "method_annotations": [
+                        f"@GetMapping(value = {url_literal}, produces = {produces})"
+                    ],
+                    "method_name": f"get{cn}",
+                    "return_type": cn,
+                    "params": list(path_params),
+                }
+            )
+        if "create" in requested:
+            ops.append(
+                {
+                    "javadoc": f"POST — create the {cn} singleton.",
+                    "method_annotations": [
+                        f"@PostMapping(value = {url_literal}, "
+                        f"consumes = {consumes}, produces = {produces})"
+                    ],
+                    "method_name": f"create{cn}",
+                    "return_type": cn,
+                    "params": [
+                        *path_params,
+                        {
+                            "annotation": "@Valid @RequestBody",
+                            "java_type": create_body_type,
+                            "java_name": "body",
+                        },
+                    ],
+                }
+            )
+        if "update" in requested:
+            ops.append(
+                {
+                    "javadoc": f"PUT — replace the {cn} singleton.",
+                    "method_annotations": [
+                        f"@PutMapping(value = {url_literal}, "
+                        f"consumes = {consumes}, produces = {produces})"
+                    ],
+                    "method_name": f"update{cn}",
+                    "return_type": cn,
+                    "params": [
+                        *path_params,
+                        {
+                            "annotation": "@Valid @RequestBody",
+                            "java_type": update_body_type,
+                            "java_name": "body",
+                        },
+                    ],
+                }
+            )
+        if "patch" in requested:
+            patch_body_type = f"{cn}Patch"
+            imports.add(f"{self.package}.model.{patch_body_type}")
+            ops.append(
+                {
+                    "javadoc": f"PATCH — partial update of the {cn} singleton.",
+                    "method_annotations": [
+                        f"@PatchMapping(value = {url_literal}, "
+                        f'consumes = "application/merge-patch+json", '
+                        f"produces = {produces})"
+                    ],
+                    "method_name": f"patch{cn}",
+                    "return_type": cn,
+                    "params": [
+                        *path_params,
+                        {
+                            "annotation": "@Valid @RequestBody",
+                            "java_type": patch_body_type,
+                            "java_name": "body",
+                        },
+                    ],
+                }
+            )
+            imports.add("org.springframework.web.bind.annotation.PatchMapping")
+        if "delete" in requested:
+            ops.append(
+                {
+                    "javadoc": f"DELETE — remove the {cn} singleton.",
+                    "method_annotations": [f"@DeleteMapping({url_literal})"],
+                    "method_name": f"delete{cn}",
+                    "return_type": "Void",
+                    "params": list(path_params),
+                }
+            )
+        return ops
+
+    def _templated_path_params(
+        self, cls: ClassDefinition, template: str, imports: set[str]
+    ) -> list[dict]:
+        """Build @PathVariable dicts for each `{name}` placeholder in
+        ``template``, sourced from ``openapi.path_param_sources``.
+        Used by ``_singleton_ops`` for sub-resource singletons; shares
+        the same parsing rules as the OpenAPI generator's templated
+        deep-path emitter."""
+        sources_raw = self._class_annotation(cls, "openapi.path_param_sources") or ""
+        if not sources_raw:
+            return []
+        # Parse `name:Class.slot, name:Class.slot` into a dict.
+        sources: dict[str, tuple[str, str]] = {}
+        for entry in sources_raw.split(","):
+            entry = entry.strip()
+            if not entry or ":" not in entry:
+                continue
+            name, ref = entry.split(":", 1)
+            if "." not in ref:
+                continue
+            src_class, src_slot = ref.split(".", 1)
+            sources[name.strip()] = (src_class.strip(), src_slot.strip())
+        # Build the placeholder list in template order.
+        placeholders = re.findall(r"\{([^}]+)\}", template)
+        seen: set[str] = set()
+        out: list[dict] = []
+        for name in placeholders:
+            if name in seen:
+                continue
+            seen.add(name)
+            if name not in sources:
+                continue
+            src_class, src_slot = sources[name]
+            slot = next(
+                (s for s in self._induced_slots(src_class) if s.name == src_slot),
+                None,
+            )
+            java_type = self._java_type_for_range(slot, imports) if slot is not None else "String"
+            out.append(
+                {
+                    "annotation": f'@PathVariable("{name}")',
+                    "java_type": java_type,
+                    "java_name": _java_identifier(name),
+                }
+            )
+        return out
 
     def _top_level_ops(
         self,

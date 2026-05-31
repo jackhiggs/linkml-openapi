@@ -493,8 +493,26 @@ class OpenAPIGenerator(Generator):
             path_vars = self._get_path_variables(cls)
             path_segment = self._get_path_segment(cls)
             operations = self._get_operations(cls)
+            is_singleton = _is_truthy(self._class_annotation(cls, "openapi.singleton") or False)
             nested_only = _is_truthy(self._class_annotation(cls, "openapi.nested_only") or False)
             flat_only = _is_truthy(self._class_annotation(cls, "openapi.flat_only") or False)
+            # Singleton mode short-circuits the collection-vs-item fork
+            # and the templated-deep emission — all verbs bind to one
+            # canonical URL. Composition and synthetic-inverse paths
+            # are still emitted normally below (those describe OTHER
+            # resources pointing at this one).
+            if is_singleton:
+                self._validate_resource_addressability(
+                    class_name, path_vars, operations, is_singleton=True
+                )
+                singleton_paths = self._emit_singleton_path(
+                    cls, class_name, path_segment, operations
+                )
+                paths.update(singleton_paths)
+                if OP_PATCH in operations and f"{class_name}Patch" not in schemas:
+                    schemas[f"{class_name}Patch"] = self._build_patch_schema(class_name, cls)
+                paths.update(self._make_nested_paths(class_name, path_segment, path_vars))
+                continue
             if nested_only and flat_only:
                 raise ValueError(
                     f"Class {class_name!r} declares both "
@@ -2687,7 +2705,7 @@ class OpenAPIGenerator(Generator):
     # --- Composition vs reference ---------------------------------------
 
     def _validate_resource_addressability(
-        self, class_name: str, path_vars: list, operations: list[str]
+        self, class_name: str, path_vars: list, operations: list[str], is_singleton: bool = False
     ) -> None:
         """Resource classes that need item-path operations must be addressable.
 
@@ -2695,7 +2713,14 @@ class OpenAPIGenerator(Generator):
         slot or an explicit ``openapi.path_variable`` annotation. If neither
         is present the class can't be referenced individually and the
         generator should fail loudly rather than silently drop the item path.
+
+        Singleton resources (``openapi.singleton: "true"``) are exempt
+        from the identifier check — they live at one canonical URL with
+        no ``/{id}`` segment, so the ops bind without an addressable
+        handle.
         """
+        if is_singleton:
+            return
         item_ops = ITEM_OPERATIONS & set(operations) - {OP_PATCH}
         if item_ops and not path_vars:
             raise ValueError(
@@ -3267,6 +3292,105 @@ class OpenAPIGenerator(Generator):
             if getattr(item, method, None) is not None:
                 return True
         return False
+
+    def _emit_singleton_path(
+        self,
+        cls: ClassDefinition,
+        class_name: str,
+        path_segment: str,
+        operations: list[str],
+    ) -> dict[str, PathItem]:
+        """Emit a singleton resource — one canonical URL with all
+        verbs in ``operations`` bound to the same PathItem, no
+        ``/{id}`` segment, no fork between collection-root and item
+        path.
+
+        Three URL-shape patterns this covers (all of which today
+        require hand-authored controllers when the schema author
+        wants the wire shape):
+
+        - **Top-level singleton** (``/data-authority``): class with
+          ``openapi.singleton: "true"``, no ``path_template``. URL
+          is auto-derived ``/<path_segment>`` (or
+          ``openapi.path`` override).
+        - **Sub-resource singleton via path_template**
+          (``/catalogs/{catalogId}/datasets/{datasetId}/owners``):
+          class with ``openapi.singleton: "true"`` and
+          ``openapi.path_template``. URL is the template as-is,
+          with parameters from ``openapi.path_param_sources``.
+        - **Single-verb singleton** (``PUT /…/owners`` only):
+          same as above but ``openapi.operations`` lists only the
+          one verb. The PathItem ends up with just that method.
+
+        Validation:
+
+        - ``list`` is incompatible — a singleton has no collection
+          to enumerate (the resource IS the collection of size 1).
+          Raises if ``operations`` requests ``list``.
+        - ``read`` is the GET on the singleton URL — fine.
+        - ``create`` is POST on the singleton URL (idempotent
+          create-or-409 is the schema author's call; the generator
+          just emits the verb).
+        """
+        if OP_LIST in operations:
+            raise ValueError(
+                f'Class {class_name!r} has openapi.singleton: "true" with '
+                "`list` in openapi.operations — a singleton has no "
+                "collection to enumerate (the resource is itself the "
+                "only instance). Drop `list` from operations or remove "
+                "the singleton annotation."
+            )
+        template = self._class_annotation(cls, "openapi.path_template")
+        if template:
+            # Build path params from the explicit sources.
+            sources_raw = self._class_annotation(cls, "openapi.path_param_sources") or ""
+            sources = self._parse_path_param_sources(class_name, sources_raw)
+            placeholders = list(self._PATH_TEMPLATE_PLACEHOLDER_RE.findall(template))
+            unique_placeholders = list(dict.fromkeys(placeholders))
+            missing = set(unique_placeholders) - set(sources)
+            extra = set(sources) - set(unique_placeholders)
+            if missing or extra:
+                raise ValueError(
+                    f"Class {class_name!r} `openapi.path_template` "
+                    f"placeholders don't match `openapi.path_param_sources`. "
+                    f"Template placeholders: {sorted(unique_placeholders)!r}. "
+                    f"Source keys: {sorted(sources)!r}. "
+                    f"Missing sources: {sorted(missing)!r}. "
+                    f"Extra sources: {sorted(extra)!r}."
+                )
+            params: list[Parameter] = []
+            for name in unique_placeholders:
+                src_class, src_slot = sources[name]
+                slot = self._induced_slots_by_name(src_class).get(src_slot)
+                if slot is None:
+                    raise ValueError(
+                        f"Class {class_name!r} `openapi.path_param_sources` "
+                        f"refers to unknown slot {src_class}.{src_slot!r} for "
+                        f"parameter {name!r}."
+                    )
+                params.append(
+                    Parameter(
+                        name=name,
+                        param_in=ParameterLocation.PATH,
+                        required=True,
+                        param_schema=self._slot_to_schema(slot),
+                    )
+                )
+            url = template
+        else:
+            params = []
+            url = f"/{path_segment}"
+        item = PathItem(parameters=params or None)
+        # All verbs share the same PathItem — read/update/patch/delete
+        # via the standard item-ops attach, create via direct POST.
+        # The wire shape: ``GET /foo`` / ``POST /foo`` / ``PUT /foo``
+        # / ``PATCH /foo`` / ``DELETE /foo``.
+        self._attach_item_operations(item, cls, class_name, operations)
+        if OP_CREATE in operations:
+            item.post = self._make_create_operation(cls, class_name)
+        # PATCH bodies follow the same emission rule as the regular
+        # CRUD pass — handled outside this method by the caller.
+        return {url: item}
 
     _PATH_TEMPLATE_PLACEHOLDER_RE = PATH_TEMPLATE_PLACEHOLDER_RE
 

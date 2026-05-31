@@ -528,6 +528,55 @@ classes:
       openapi.codegen_inheritance: "false"   # use-site oneOf only
 ```
 
+#### `openapi.singleton` — one URL, no item-id segment
+
+Resources marked `openapi.singleton: "true"` emit every verb in
+`openapi.operations` on **one canonical URL** — no `/{id}` segment,
+no fork between a collection path and an item path. Covers the
+patterns that today force hand-authored controllers:
+
+```yaml
+# Top-level singleton — GET/POST/PUT/DELETE all on /settings
+Settings:
+  annotations:
+    openapi.resource: "true"
+    openapi.path: settings
+    openapi.singleton: "true"
+    openapi.operations: "read,create,update,delete"
+  attributes:
+    theme: { range: string }
+    locale: { range: string }
+
+# Sub-resource singleton via path_template — PUT only
+DatasetOwners:
+  annotations:
+    openapi.resource: "true"
+    openapi.singleton: "true"
+    openapi.path_template: "/catalogs/{catalogId}/datasets/{datasetId}/owners"
+    openapi.path_param_sources: "catalogId:Catalog.id,datasetId:Dataset.id"
+    openapi.operations: "update"
+  attributes:
+    contact: { range: string }
+```
+
+The first example emits `GET /settings`, `POST /settings`,
+`PUT /settings`, `DELETE /settings` — four operations on one
+PathItem. The second emits only `PUT /catalogs/{catalogId}/…/owners`.
+
+Constraints:
+
+- `list` is rejected (a singleton has no collection to enumerate —
+  the resource IS the singleton).
+- An identifier slot is **not** required (no addressable handle is
+  needed; the URL IS the handle).
+- Composition / synthetic-inverse / nested paths still emit
+  normally — singleton mode only changes how the resource's *own*
+  paths are shaped.
+
+Both `gen-openapi` and `gen-spring-server` honour the annotation —
+the sidecar OpenAPI spec and the Spring controller annotations
+agree wire-for-wire.
+
 #### `openapi.operations`
 
 Comma-separated list of CRUD operations to generate. Controls which HTTP methods appear on the collection and item paths.
@@ -1330,6 +1379,7 @@ endpoints regardless of any of these annotations.
 | `openapi.list_envelope` | class | LinkML class name | Bare array response |
 | `openapi.list_query_params` | class | JSON array of `{name, type, description?}` | None |
 | `openapi.codegen_inheritance` | class | `"false"` | `--codegen-friendly` uses parent-$ref strategy |
+| `openapi.singleton` | class | `"true"` | Resource has a collection / item fork |
 | `openapi.reactive` | schema | `"true"` / `"false"` | Off — blocking Spring MVC |
 | `openapi.profile.<name>.exclude_classes` | schema | comma-separated class names | None |
 | `openapi.profile.<name>.include_classes` | schema | comma-separated class names | None (all included) |
