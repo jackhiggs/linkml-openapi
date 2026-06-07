@@ -1984,12 +1984,26 @@ class TestDiscriminator:
 
     def test_designates_type_does_not_pollute_abstract_parent(self):
         """`designates_type: true` is a discriminator declaration. The
-        abstract parent (Animal) carries no instances, so the
-        synthesised single-value enum lives on each concrete
-        subclass's ``allOf[1]`` local block, not on the parent."""
+        abstract parent (Animal) carries the OpenAPI ``discriminator``
+        block (propertyName + mapping) so Swagger UI / codegens can
+        dispatch on the wire value — but no instance data (no
+        ``oneOf`` at the schema root, no synthesised single-value
+        enum on the parent). The single-value enum lives on each
+        concrete subclass's ``allOf[1]`` local block.
+
+        Behaviour change in 0.16.x: prior to the polymorphic-codegen
+        gaps fix, the parent had no ``discriminator`` block in
+        regular mode and consumers couldn't dispatch from the parent
+        schema. The block is now attached unconditionally (Swagger
+        UI requires it for polymorphic rendering).
+        """
         spec = _generate()
         animal = spec["components"]["schemas"]["Animal"]
-        assert "discriminator" not in animal
+        assert animal.get("discriminator", {}).get("propertyName") == "species"
+        mapping = animal.get("discriminator", {}).get("mapping") or {}
+        assert "Dog" in mapping
+        assert "Cat" in mapping
+        # No instance-level oneOf on the parent — that lives at use sites.
         assert "oneOf" not in animal
         dog_local = spec["components"]["schemas"]["Dog"]["allOf"][1]
         cat_local = spec["components"]["schemas"]["Cat"]["allOf"][1]
@@ -2073,13 +2087,25 @@ classes:
         (``type: object``, properties, required) so codegens generate a
         class for it. The discriminator field is not injected on the
         abstract root — that's handled by each concrete subclass — but
-        the root's own ``sku`` etc. survive."""
+        the root's own ``sku`` etc. survive.
+
+        Behaviour change in 0.16.x: the parent component schema now
+        carries the OpenAPI ``discriminator`` block (propertyName +
+        mapping) so Swagger UI can render polymorphic dispatch from
+        the parent schema directly. No ``oneOf`` at the root — that
+        still lives at use sites.
+        """
         spec = _generate()
         product = spec["components"]["schemas"]["Product"]
         assert product["type"] == "object"
         assert "sku" in product["properties"]
         assert "oneOf" not in product
-        assert "discriminator" not in product
+        disc = product.get("discriminator")
+        assert disc is not None
+        assert disc["propertyName"] == "kind"
+        mapping = disc.get("mapping") or {}
+        assert "BOOK" in mapping
+        assert "VINYL" in mapping
 
     def test_discriminator_default_keeps_parent_properties(self):
         """Without --flatten-inheritance, the parent keeps its own
@@ -4317,3 +4343,163 @@ classes:
         get_body = spec["paths"]["/settings"]["get"]["responses"]["200"]
         schema = get_body["content"]["application/json"]["schema"]
         assert schema == {"$ref": "#/components/schemas/Settings"}
+
+
+class TestPolymorphicCodegenGaps:
+    """Coverage for the polymorphic-class codegen gaps reported
+    against 0.16.1:
+
+    A) LinkML-native ``slot_usage.<discriminator>.equals_string``
+       is read as a fallback discriminator value (was previously
+       ignored — only ``openapi.type_value`` was honoured).
+    B) The parent component schema now carries the OpenAPI
+       ``discriminator`` block (propertyName + mapping) so Swagger
+       UI / codegens can dispatch from the parent schema directly.
+    C) An ``openapi.list_envelope`` whose array slot ranges on a
+       polymorphic class but is NOT ``inlined: true`` raises with
+       a clear remediation (would otherwise silently ship URI
+       strings, hiding the subtype dispatch on the wire).
+    """
+
+    POLY_SCHEMA = """
+id: https://example.org/poly-gaps
+name: poly_gaps
+default_range: string
+classes:
+  Vehicle:
+    abstract: true
+    annotations:
+      openapi.resource: "true"
+      openapi.discriminator: vehicleType
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      vehicleType: { range: string }
+  Car:
+    is_a: Vehicle
+    annotations:
+      openapi.resource: "true"
+    slot_usage:
+      vehicleType:
+        equals_string: CAR
+    attributes:
+      doors: { range: integer }
+  Truck:
+    is_a: Vehicle
+    annotations:
+      openapi.resource: "true"
+    slot_usage:
+      vehicleType:
+        equals_string: TRUCK
+    attributes:
+      payloadCapacity: { range: integer }
+"""
+
+    def test_equals_string_drives_discriminator_value(self):
+        """A) ``slot_usage.<discrim>.equals_string`` should pin the
+        wire value. Without this, pure-LinkML schemas fall back to
+        ``cls.name`` and emit ``Car`` / ``Truck`` instead of the
+        intended ``CAR`` / ``TRUCK``."""
+        spec = _generate_from_string(self.POLY_SCHEMA)
+        car_local = spec["components"]["schemas"]["Car"]["allOf"][1]
+        truck_local = spec["components"]["schemas"]["Truck"]["allOf"][1]
+        assert car_local["properties"]["vehicleType"]["enum"] == ["CAR"]
+        assert car_local["properties"]["vehicleType"]["default"] == "CAR"
+        assert truck_local["properties"]["vehicleType"]["enum"] == ["TRUCK"]
+        assert truck_local["properties"]["vehicleType"]["default"] == "TRUCK"
+
+    def test_openapi_type_value_still_wins_over_equals_string(self):
+        """Resolution order: ``openapi.type_value`` > ``equals_string``
+        > ``cls.name``. Schemas that already set ``openapi.type_value``
+        for legacy wire compat must keep their existing values."""
+        # Insert `openapi.type_value: passenger-car` into Car's
+        # existing annotations block.
+        car_before = '  Car:\n    is_a: Vehicle\n    annotations:\n      openapi.resource: "true"'
+        car_after = car_before + "\n      openapi.type_value: passenger-car"
+        schema = self.POLY_SCHEMA.replace(car_before, car_after)
+        spec = _generate_from_string(schema)
+        car_local = spec["components"]["schemas"]["Car"]["allOf"][1]
+        # openapi.type_value wins.
+        assert car_local["properties"]["vehicleType"]["default"] == "passenger-car"
+
+    def test_discriminator_mapping_uses_equals_string_values(self):
+        """A): the use-site mapping reflects the ``equals_string``
+        values (mapping keys are the wire values, refs target the
+        subclass schemas)."""
+        spec = _generate_from_string(self.POLY_SCHEMA)
+        post = spec["paths"]["/vehicles"]["post"]
+        body = post["requestBody"]["content"]["application/json"]["schema"]
+        mapping = body["discriminator"]["mapping"]
+        assert mapping == {
+            "CAR": "#/components/schemas/Car",
+            "TRUCK": "#/components/schemas/Truck",
+        }
+
+    def test_parent_component_schema_carries_discriminator_block(self):
+        """B) The parent component schema carries the OpenAPI
+        ``discriminator`` block so Swagger UI / generic codegens can
+        dispatch from the root schema directly. Required for Swagger
+        UI to render polymorphic dispatch in the request-body
+        selector and the response renderer."""
+        spec = _generate_from_string(self.POLY_SCHEMA)
+        vehicle = spec["components"]["schemas"]["Vehicle"]
+        disc = vehicle.get("discriminator")
+        assert disc is not None
+        assert disc["propertyName"] == "vehicleType"
+        mapping = disc.get("mapping") or {}
+        assert mapping == {
+            "CAR": "#/components/schemas/Car",
+            "TRUCK": "#/components/schemas/Truck",
+        }
+        # No instance-level ``oneOf`` on the parent — that still
+        # lives at use sites only.
+        assert "oneOf" not in vehicle
+
+    _DISC_LINE = "      openapi.discriminator: vehicleType"
+    _DISC_WITH_ENVELOPE = (
+        "      openapi.discriminator: vehicleType\n      openapi.list_envelope: GetVehiclesResponse"
+    )
+
+    def test_envelope_with_non_inlined_polymorphic_slot_raises(self):
+        """C) An envelope's array slot that ranges on a polymorphic
+        class must be ``inlined: true`` — otherwise the wire ships
+        URI references and consumers can't deserialise subtypes."""
+        schema_yaml = (
+            self.POLY_SCHEMA.replace(self._DISC_LINE, self._DISC_WITH_ENVELOPE)
+            + """
+  GetVehiclesResponse:
+    attributes:
+      items:
+        range: Vehicle
+        multivalued: true
+      nextCursor: { range: string }
+"""
+        )
+        _generate_from_string_raises(
+            schema_yaml,
+            match=r"openapi.list_envelope.*NOT `inlined: true`",
+        )
+
+    def test_envelope_with_inlined_polymorphic_slot_emits_oneof(self):
+        """C) sanity: when the envelope's array slot IS inlined, the
+        polymorphic dispatch reaches the ``items`` schema as expected."""
+        schema_yaml = (
+            self.POLY_SCHEMA.replace(self._DISC_LINE, self._DISC_WITH_ENVELOPE)
+            + """
+  GetVehiclesResponse:
+    attributes:
+      items:
+        range: Vehicle
+        multivalued: true
+        inlined: true
+        inlined_as_list: true
+      nextCursor: { range: string }
+"""
+        )
+        spec = _generate_from_string(schema_yaml)
+        env = spec["components"]["schemas"]["GetVehiclesResponse"]
+        items_inner = env["properties"]["items"]["items"]
+        assert "oneOf" in items_inner
+        assert items_inner["discriminator"]["propertyName"] == "vehicleType"
+        # Polymorphic dispatch reaches subtypes only — no abstract base.
+        refs = sorted(r["$ref"].rsplit("/", 1)[-1] for r in items_inner["oneOf"])
+        assert refs == ["Car", "Truck"]

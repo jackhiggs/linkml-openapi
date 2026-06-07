@@ -2095,12 +2095,38 @@ class OpenAPIGenerator(Generator):
     def _type_value(self, cls: ClassDefinition) -> str:
         """The discriminator value for a concrete subclass.
 
-        Defaults to the class name as-is, matching ``designates_type``'s
-        LinkML default. ``openapi.type_value`` overrides — used when an
-        existing system has a fixed value the schema needs to honour.
+        Resolution order (most specific wins):
+
+        1. ``openapi.type_value`` annotation on the class — used when
+           the schema needs to honour a wire value that doesn't match
+           any LinkML-derivable name.
+        2. ``slot_usage.<discriminator>.equals_string`` — the
+           LinkML-native way to pin the discriminator value for a
+           subclass. Picked up here so pure-LinkML schemas (no
+           ``openapi.*`` annotations on the discriminator) emit the
+           correct const on each subclass.
+        3. ``cls.name`` — matches ``designates_type``'s LinkML default.
         """
         override = self._class_annotation(cls, "openapi.type_value")
-        return override.strip() if override else cls.name
+        if override:
+            return override.strip()
+        # LinkML-native fallback: when the discriminator slot's
+        # ``equals_string`` is pinned in this class's ``slot_usage``,
+        # that's the wire value.
+        field = self._inherited_discriminator_field(cls.name)
+        if field and cls.slot_usage:
+            slot_usage_items = (
+                cls.slot_usage.values() if isinstance(cls.slot_usage, dict) else cls.slot_usage
+            )
+            for su in slot_usage_items:
+                if isinstance(su, str):
+                    continue
+                if getattr(su, "name", None) != field:
+                    continue
+                equals = getattr(su, "equals_string", None)
+                if equals:
+                    return str(equals).strip()
+        return cls.name
 
     def _apply_discriminators(self, schemas: dict[str, Schema | Reference]) -> None:
         """Patch component schemas with OpenAPI ``discriminator`` blocks.
@@ -2189,7 +2215,23 @@ class OpenAPIGenerator(Generator):
             descendants = self._concrete_descendants_including_self(class_name)
             has_narrowing = any(d in self._narrowing_subclasses for d in descendants)
             opt_out = _is_falsy(self._class_annotation(cls, "openapi.codegen_inheritance"))
-            if self.codegen_friendly and not has_narrowing and not opt_out:
+            # Attach the ``discriminator`` block to the parent's
+            # component schema in BOTH modes (regular and
+            # codegen-friendly). Swagger UI and most OpenAPI codegens
+            # read the dispatch mapping from the parent's schema even
+            # when use sites carry it too — without it, polymorphic
+            # responses render as the bare parent shape with subtype
+            # fields hidden. The codegen-friendly guard (narrowing
+            # detection + ``codegen_inheritance: "false"`` opt-out)
+            # only applies to the inheritance-based ``$ref`` strategy
+            # used by openapi-generator's Java template; in regular
+            # mode the parent block is harmless and useful.
+            attach_parent_block = True
+            if self.codegen_friendly and (has_narrowing or opt_out):
+                # Avoid the Java covariance collision under
+                # codegen-friendly + narrowing (#106 / #65 trade-off).
+                attach_parent_block = False
+            if attach_parent_block:
                 parent_schema = schemas.get(class_name)
                 if isinstance(parent_schema, Schema):
                     parent_schema.discriminator = Discriminator(
@@ -2405,7 +2447,15 @@ class OpenAPIGenerator(Generator):
         response becomes a ``$ref`` to the envelope class (which must
         exist in the schema); otherwise it's today's bare array
         (#105). The envelope class is responsible for declaring the
-        array slot that points at the listed resource type."""
+        array slot that points at the listed resource type.
+
+        Validation: when the listed class is polymorphic (an abstract
+        root with concrete descendants) and the envelope's array slot
+        is NOT ``inlined: true``, the envelope's ``items`` ends up as
+        URI strings on the wire — losing the polymorphic dispatch.
+        Raise with a clear remediation so authors don't ship envelopes
+        that hide their subtypes.
+        """
         envelope = self._class_annotation(cls, "openapi.list_envelope")
         if not envelope:
             return self._list_response_items_schema(class_name)
@@ -2416,7 +2466,47 @@ class OpenAPIGenerator(Generator):
                 f"class {envelope!r}; add the class to the schema or remove "
                 "the annotation."
             )
+        self._validate_envelope_items_inlined(class_name, envelope)
         return Reference(ref=f"#/components/schemas/{envelope}")
+
+    def _validate_envelope_items_inlined(self, listed_class: str, envelope_class: str) -> None:
+        """When the listed class has concrete descendants (polymorphic),
+        the envelope must carry the array slot as ``inlined: true`` so
+        the polymorphic ``oneOf`` reaches the wire. Without it, the
+        envelope ships URI strings and consumers can't deserialise
+        subtypes. Raise with the slot name and the fix."""
+        if not self._concrete_descendants_excluding_self(listed_class):
+            # Not polymorphic — the URI-vs-inlined choice is the
+            # author's call and either shape is valid.
+            return
+        target_slot_name: str | None = None
+        for slot in self._induced_slots_iter(envelope_class):
+            if not slot.multivalued or not slot.range:
+                continue
+            # Slot ranges on the listed class directly, or on one of
+            # its abstract ancestors (envelope items typed at the
+            # polymorphic root).
+            if slot.range == listed_class:
+                target_slot_name = slot.name
+                if not slot.inlined:
+                    raise ValueError(
+                        f"openapi.list_envelope on {listed_class!r} points "
+                        f"at {envelope_class!r}, whose slot {slot.name!r} "
+                        f"(range {listed_class!r}, multivalued) is NOT "
+                        f"`inlined: true`. The envelope would ship URI "
+                        f"references on the wire and consumers would lose "
+                        f"the polymorphic ``oneOf`` dispatch. Mark "
+                        f"{envelope_class}.{slot.name} as `inlined: true` "
+                        f"(or `inlined: true, inlined_as_list: true` for "
+                        f"a JSON array) so each subtype's full object "
+                        f"reaches the client."
+                    )
+                return
+        if target_slot_name is None:
+            # Envelope doesn't carry a slot ranging on the listed
+            # class at all — fine, the author owns the envelope's
+            # shape (might wrap a different aggregate).
+            return
 
     def _pagination_params(self, cls: ClassDefinition) -> list[Parameter]:
         """Build query Parameters for the dialect declared by
