@@ -24,7 +24,7 @@ dependencies = [
     # 2.41.x (rather than 2.46.x which corporate licence-scanners flag
     # as unrecognised). The generator only uses model construction and
     # YAML/JSON serialisation — no 2.13-specific features.
-    "pydantic>=2.0,<2.13",
+    "pydantic>=2.0,<2.14",
     "pyyaml>=6.0",
     "click>=8.0",
     "jinja2>=3.1",
