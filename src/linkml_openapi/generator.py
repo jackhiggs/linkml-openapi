@@ -256,6 +256,12 @@ class OpenAPIGenerator(Generator):
         # Reset the x-rdf-* maps; _build_openapi populates them as it walks the schema.
         self._x_rdf_class: dict[str, str] = {}
         self._x_rdf_property: dict[tuple[str, str], str] = {}
+        # ``x-discriminator-aliases`` lifts the per-subclass legacy
+        # field (e.g. ``#type: <java-fqn>``) into a mapping parallel
+        # to the primary OpenAPI discriminator. Populated during
+        # ``_apply_discriminators`` and injected onto each parent
+        # schema after serialisation (#124).
+        self._x_discriminator_aliases: dict[str, list[dict]] = {}
         # Per-build cache so the schema-walk helpers (descendants,
         # induced slots, etc.) don't re-traverse the class graph for
         # every reference site. Reset here to pick up any schema-view
@@ -347,6 +353,7 @@ class OpenAPIGenerator(Generator):
         self._strip_invalid_parameter_fields(raw)
         self._coerce_numeric_constraints(raw)
         self._inject_rdf_extensions(raw)
+        self._inject_discriminator_aliases(raw)
         if self.emit_namespaces:
             self._inject_namespaces(raw)
         if self.post_processors:
@@ -1350,6 +1357,22 @@ class OpenAPIGenerator(Generator):
                 ranges[str(slot.name)] = [str(d) for d in descendants]
         return ranges
 
+    def _inject_discriminator_aliases(self, raw: dict) -> None:
+        """Inject ``x-discriminator-aliases`` onto each parent
+        component schema that declared an ``openapi.legacy_type_field``
+        (#124). Populated by ``_apply_discriminators``; flattened
+        from ``self._x_discriminator_aliases`` directly onto the
+        schema's raw dict so the wire shape matches what OpenAPI
+        consumers expect for extensions (``x-*`` at the schema's
+        top level, not under an ``extensions`` wrapper)."""
+        if not self._x_discriminator_aliases:
+            return
+        schemas = (raw.get("components") or {}).get("schemas") or {}
+        for class_name, aliases in self._x_discriminator_aliases.items():
+            schema = schemas.get(class_name)
+            if isinstance(schema, dict):
+                schema["x-discriminator-aliases"] = aliases
+
     def _inject_namespaces(self, raw: dict) -> None:
         """Emit the LinkML schema's prefix map as a top-level
         ``x-namespaces`` extension (#98).
@@ -2257,8 +2280,58 @@ class OpenAPIGenerator(Generator):
                 legacy_field = legacy_field.strip()
                 codegen_name = self._class_annotation(cls, "openapi.legacy_type_codegen_name")
                 codegen_name = codegen_name.strip() if codegen_name else None
+                # When the legacy field is declared on the root, every
+                # concrete subclass must pin BOTH the semantic
+                # ``openapi.type_value`` AND ``openapi.legacy_type_value``
+                # explicitly. Falling back to ``cls.name`` for the
+                # semantic value is unsafe in the dual-discriminator
+                # case — the semantic value and the legacy FQN live on
+                # the wire together and consumers route on both; a
+                # silent ``cls.name`` default invites misaligned
+                # payloads (#124).
+                for sub_name in seen.values():
+                    sub_cls = sv.get_class(sub_name)
+                    if sub_cls is None:
+                        continue
+                    semantic = self._class_annotation(sub_cls, "openapi.type_value")
+                    if semantic is None:
+                        raise ValueError(
+                            f"Class {sub_name!r} is on a polymorphic chain "
+                            f"that declares both `openapi.discriminator` "
+                            f"({field!r}) and `openapi.legacy_type_field` "
+                            f"({legacy_field!r}). Every concrete subclass "
+                            f"must set `openapi.type_value` explicitly so "
+                            f"the semantic discriminator value and the "
+                            f"legacy field's value are both intentional. "
+                            f"Add `openapi.type_value: <value>` to "
+                            f"{sub_name!r} or drop the legacy field."
+                        )
                 for sub_name in seen.values():
                     self._inject_legacy_type_value(schemas, sub_name, legacy_field, codegen_name)
+                # Collect the legacy field's per-subclass values into
+                # an ``x-discriminator-aliases`` mapping that gets
+                # injected onto the parent's component schema after
+                # serialisation (openapi-pydantic's ``Schema.extensions``
+                # round-trips under a wrapper, so we attach the
+                # extension at the raw-dict level to match the wire
+                # shape OpenAPI consumers expect). Lets consumers
+                # route on either the semantic or the legacy field
+                # without re-walking the schema (#124).
+                legacy_mapping: dict[str, str] = {}
+                for sub_name in seen.values():
+                    sub_cls = sv.get_class(sub_name)
+                    if sub_cls is None:
+                        continue
+                    lv = self._class_annotation(sub_cls, "openapi.legacy_type_value")
+                    if lv:
+                        legacy_mapping[lv.strip()] = f"#/components/schemas/{sub_name}"
+                if legacy_mapping:
+                    self._x_discriminator_aliases[class_name] = [
+                        {
+                            "propertyName": legacy_field,
+                            "mapping": dict(legacy_mapping),
+                        }
+                    ]
 
     @staticmethod
     def _writable_local_schema(schema: Schema) -> Schema:

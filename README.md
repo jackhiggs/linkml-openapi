@@ -712,6 +712,68 @@ Polymorphic endpoints fall out automatically: an abstract parent with
 response schemas `$ref` the parent — and the discriminator block on
 the parent does the polymorphic dispatch at codegen / runtime.
 
+##### Dual discriminator (semantic + legacy back-compat field)
+
+Some schemas need TWO discriminator fields on the wire simultaneously
+— a clean **semantic** discriminator (e.g. `resourceType: API`) and a
+**legacy** discriminator carrying an opaque type marker (e.g.
+`#type: com.example.acme.dcat.DataService` — a Java FQN consumed by
+existing JVM clients). Declare both:
+
+```yaml
+classes:
+  Resource:
+    abstract: true
+    annotations:
+      openapi.discriminator: resourceType        # primary, semantic
+      openapi.legacy_type_field: "#type"          # secondary, opaque back-compat
+    attributes:
+      id: { identifier: true, range: string, required: true }
+      resourceType: { range: string }
+  DataService:
+    is_a: Resource
+    annotations:
+      openapi.type_value: API                                          # required
+      openapi.legacy_type_value: "com.example.acme.dcat.DataService"   # required
+    attributes:
+      endpoint: { range: string }
+  Database:
+    is_a: Resource
+    annotations:
+      openapi.type_value: DATABASE
+      openapi.legacy_type_value: "com.example.acme.dcat.Database"
+    attributes:
+      jdbcUrl: { range: string }
+```
+
+**Both annotations are required on every concrete subclass** when the
+legacy field is declared on the parent (the silent `cls.name` fallback
+for `openapi.type_value` is disabled to prevent misaligned wire
+payloads). Each subclass emits both fields as single-value `enum` on
+the wire so consumers can route on either.
+
+The generated parent schema carries:
+
+- The OpenAPI `discriminator` block (semantic field + mapping) — used
+  by Swagger UI and `oneOf`-based codegen dispatch.
+- An `x-discriminator-aliases` extension — a parallel mapping for the
+  legacy field, so back-compat consumers can route on `#type` without
+  having to walk the schema:
+
+```yaml
+Resource:
+  discriminator:
+    propertyName: resourceType
+    mapping:
+      API:      '#/components/schemas/DataService'
+      DATABASE: '#/components/schemas/Database'
+  x-discriminator-aliases:
+    - propertyName: '#type'
+      mapping:
+        com.example.acme.dcat.DataService: '#/components/schemas/DataService'
+        com.example.acme.dcat.Database:    '#/components/schemas/Database'
+```
+
 #### `openapi.media_types`
 
 Comma-separated list of media types each operation generated for the class

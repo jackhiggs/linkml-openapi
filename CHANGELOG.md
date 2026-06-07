@@ -10,6 +10,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Dual-discriminator surface for legacy back-compat** (#124).
+  When both `openapi.discriminator` (semantic) and
+  `openapi.legacy_type_field` (back-compat) are declared on a
+  polymorphic chain, the generator now emits an
+  `x-discriminator-aliases` extension on the parent component
+  schema — a parallel mapping that lifts the legacy field's
+  per-subclass values up next to the primary discriminator. Lets
+  consumers route on either field without re-walking the schema.
+  Every concrete subclass must now set `openapi.type_value` AND
+  `openapi.legacy_type_value` explicitly (the silent `cls.name`
+  fallback for the semantic value is disabled in this case so
+  the wire payload's two discriminator fields can't drift). The
+  primary `discriminator` block is unchanged; schemas using only
+  one of the two fields are byte-identical.
+
 - **Parent component schemas now carry the OpenAPI `discriminator`
   block** (propertyName + mapping) in regular mode, not just under
   `--codegen-friendly`. Swagger UI and generic OpenAPI codegens read
