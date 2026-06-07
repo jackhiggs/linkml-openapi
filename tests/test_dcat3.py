@@ -87,10 +87,23 @@ class TestDiscriminatorPlacement:
     is unambiguous.
     """
 
-    def test_resource_has_no_schema_level_discriminator(self, schemas):
-        assert "discriminator" not in schemas["Resource"]
+    def test_resource_carries_discriminator_block(self, schemas):
+        """The polymorphic root component schema carries the OpenAPI
+        ``discriminator`` block (propertyName + mapping) so Swagger UI
+        and codegens can dispatch from the root schema. Behaviour
+        change in 0.16.x — prior to the polymorphic-codegen gaps fix,
+        the root had no block in regular mode."""
+        disc = schemas["Resource"].get("discriminator")
+        assert disc is not None
+        assert disc["propertyName"] == "resourceType"
+        mapping = disc.get("mapping") or {}
+        # Every concrete leaf is represented in the mapping.
+        for leaf in ("Dataset", "Catalog", "DatasetSeries", "DataService"):
+            assert leaf in mapping, f"{leaf} missing from discriminator.mapping"
 
     def test_resource_has_no_schema_level_oneof(self, schemas):
+        # The discriminator block lives on the root; the instance-level
+        # ``oneOf`` still only appears at use sites.
         assert "oneOf" not in schemas["Resource"]
 
     def test_resource_does_not_carry_discriminator_field_itself(self, schemas):

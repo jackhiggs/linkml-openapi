@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 (while pre-1.0, minor bumps may carry visible behaviour changes).
 
+## [Unreleased]
+
+### Added
+
+- **Parent component schemas now carry the OpenAPI `discriminator`
+  block** (propertyName + mapping) in regular mode, not just under
+  `--codegen-friendly`. Swagger UI and generic OpenAPI codegens read
+  the dispatch mapping from the parent component schema; without it,
+  polymorphic responses render as the bare parent shape with subtype
+  fields hidden. Use-site `oneOf` blocks are unchanged. The
+  codegen-friendly guard (narrowing detection + `openapi.codegen_inheritance: "false"`
+  opt-out) still applies when relevant.
+
+### Fixed
+
+- **LinkML-native `slot_usage.<discriminator>.equals_string` is now
+  read as the discriminator value.** Previously schemas using pure
+  LinkML conventions (`designates_type: true` on the discriminator
+  slot + `equals_string: CAR` on each subclass) silently fell back to
+  `cls.name`, emitting the wrong wire value (`Car` instead of `CAR`).
+  Resolution order: `openapi.type_value` > `equals_string` > `cls.name`.
+- **`openapi.list_envelope` now validates the envelope's array slot
+  is `inlined: true`** when the listed class is polymorphic. Without
+  inlining, the envelope's `items` ends up as URI strings on the
+  wire — silently losing the polymorphic `oneOf` dispatch. The
+  generator now raises with a clear remediation (name the slot, name
+  the fix) instead of shipping a misleading spec.
+
+### Notes for `--codegen-friendly` users
+
+The reporter's other observations (abstract base in `oneOf`, GET
+response uses bare `$ref`, subtype `enum` stripped) only surface
+under `--codegen-friendly`. These are intentional trade-offs for
+openapi-generator's Java template (#64, #95, #108). The parent
+discriminator block change above lifts that one item out of
+`--codegen-friendly` so both modes get it.
+
 ## [0.16.1] — 2026-05-31
 
 ### Added
