@@ -262,6 +262,11 @@ class OpenAPIGenerator(Generator):
         # ``_apply_discriminators`` and injected onto each parent
         # schema after serialisation (#124).
         self._x_discriminator_aliases: dict[str, list[dict]] = {}
+        # subclass_name -> list of inherited slot names suppressed
+        # via ``openapi.body: "false"`` on that subclass's ``slot_usage``.
+        # Surfaced through ``x-subtype-property-suppression`` on the
+        # polymorphic root (#125). Reset per build.
+        self._suppressed_inherited_slots: dict[str, list[str]] = {}
         # Per-build cache so the schema-walk helpers (descendants,
         # induced slots, etc.) don't re-traverse the class graph for
         # every reference site. Reset here to pick up any schema-view
@@ -354,6 +359,7 @@ class OpenAPIGenerator(Generator):
         self._coerce_numeric_constraints(raw)
         self._inject_rdf_extensions(raw)
         self._inject_discriminator_aliases(raw)
+        self._inject_subtype_property_suppression(raw)
         if self.emit_namespaces:
             self._inject_namespaces(raw)
         if self.post_processors:
@@ -717,6 +723,14 @@ class OpenAPIGenerator(Generator):
                     continue
                 self._record_rdf_slot_uri(cls.name, slot)
                 if self._is_slot_body_excluded(cls, slot):
+                    # Track suppression so the polymorphic-root pass
+                    # can surface it via ``x-subtype-property-suppression``
+                    # (#125). We only record when the slot is INHERITED
+                    # from a parent — a slot declared locally on the
+                    # class and then immediately body-excluded would
+                    # be redundant to flag.
+                    if slot.name in parent_slots_by_name:
+                        self._suppressed_inherited_slots.setdefault(cls.name, []).append(slot.name)
                     continue
                 # Emit locally when:
                 # * the slot is new on this class (not inherited), OR
@@ -1372,6 +1386,50 @@ class OpenAPIGenerator(Generator):
             schema = schemas.get(class_name)
             if isinstance(schema, dict):
                 schema["x-discriminator-aliases"] = aliases
+
+    def _inject_subtype_property_suppression(self, raw: dict) -> None:
+        """Inject ``x-subtype-property-suppression`` on the polymorphic
+        root's component schema, listing which inherited slots each
+        descendant subclass drops from its body via
+        ``openapi.body: "false"`` on ``slot_usage`` (#125).
+
+        Lets consumers reading just the OpenAPI spec see the
+        asymmetric subtype shape without diffing every subclass's
+        ``allOf`` block — e.g. ``DatasetSeries is_a Dataset`` but
+        ``DatasetSeries`` suppresses ``distribution`` (series have
+        no distributions of their own; members link in).
+
+        Attached on the polymorphic root (the class declaring
+        ``openapi.discriminator``). Each descendant subclass shows
+        up as a key whose value lists the suppressed slot names.
+        Subclasses with no suppressions are omitted.
+        """
+        if not self._suppressed_inherited_slots:
+            return
+        schemas = (raw.get("components") or {}).get("schemas") or {}
+        sv = self.schemaview
+        # Walk every discriminator-declaring class; for each, collect
+        # suppression entries from its concrete descendants. Attaching
+        # at the root (vs at intermediates) gives consumers a single
+        # lookup table per polymorphic family.
+        for class_name in sv.all_classes():
+            cls = sv.get_class(class_name)
+            if cls is None:
+                continue
+            if not self._is_discriminator_root(cls, self._discriminator_field(cls) or ""):
+                continue
+            suppressions: dict[str, list[str]] = {}
+            for descendant in self._concrete_descendants_excluding_self(class_name):
+                # Cast LinkML metamodel name types to plain strings so
+                # the resulting dict is YAML-serialisable.
+                descendant_name = str(descendant)
+                suppressed = self._suppressed_inherited_slots.get(descendant_name)
+                if suppressed:
+                    suppressions[descendant_name] = sorted({str(s) for s in suppressed})
+            if suppressions:
+                root_schema = schemas.get(class_name)
+                if isinstance(root_schema, dict):
+                    root_schema["x-subtype-property-suppression"] = suppressions
 
     def _inject_namespaces(self, raw: dict) -> None:
         """Emit the LinkML schema's prefix map as a top-level

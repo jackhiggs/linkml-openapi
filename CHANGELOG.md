@@ -24,6 +24,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the wire payload's two discriminator fields can't drift). The
   primary `discriminator` block is unchanged; schemas using only
   one of the two fields are byte-identical.
+- **`x-subtype-property-suppression` surfaces asymmetric subtypes**
+  (#125). When a subclass uses `slot_usage` + `openapi.body: "false"`
+  to drop an inherited slot from its body (e.g. `DatasetSeries is_a
+  Dataset` but doesn't carry `distribution`), the wire shape is
+  already correct — the subclass's `allOf[1]` properties omit the
+  slot. The new `x-subtype-property-suppression` extension on the
+  polymorphic root lifts this asymmetry up so consumers reading the
+  spec can see which subtypes diverge without diffing every
+  subclass's `allOf`:
+  ```yaml
+  Dataset:
+    discriminator: { propertyName: resourceType, mapping: {...} }
+    x-subtype-property-suppression:
+      DatasetSeries: [distribution]
+  ```
+  Subclasses with no suppressions are omitted; schemas without
+  asymmetric subtypes don't emit the extension at all (byte-identical
+  wire shape preserved).
 
 - **Parent component schemas now carry the OpenAPI `discriminator`
   block** (propertyName + mapping) in regular mode, not just under

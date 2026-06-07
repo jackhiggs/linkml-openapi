@@ -1190,6 +1190,46 @@ receiving it embedded in the parent payload.
 * Both emitters honour it. Spring drops the field from the DTO; the
   controller's nested endpoint is still emitted.
 
+##### Asymmetric subtypes (DatasetSeries-style)
+
+`openapi.body: "false"` on a **subclass**'s `slot_usage` drops the
+inherited slot from that subclass only — useful for polymorphic
+chains where some subtypes don't carry every inherited slot:
+
+```yaml
+classes:
+  Dataset:
+    abstract: true
+    annotations: { openapi.discriminator: resourceType }
+    attributes:
+      distribution: { range: Distribution, multivalued: true, inlined: true }
+  DatasetSeries:
+    is_a: Dataset
+    annotations: { openapi.type_value: DatasetSeries }
+    slot_usage:
+      distribution:
+        annotations:
+          openapi.body: "false"     # series have no distributions
+```
+
+The `DatasetSeries` component schema's `allOf[1].properties` omits
+`distribution`. The polymorphic root (`Dataset`) gets an
+`x-subtype-property-suppression` extension listing each subtype's
+suppressed slots, so consumers reading just the spec can see the
+asymmetry without diffing every subclass's `allOf`:
+
+```yaml
+Dataset:
+  discriminator:
+    propertyName: resourceType
+    mapping: { Dataset: ..., DatasetSeries: ... }
+  x-subtype-property-suppression:
+    DatasetSeries: [distribution]
+```
+
+Subclasses with no suppressions don't appear in the extension;
+schemas without asymmetric subtypes don't emit the extension at all.
+
 #### `openapi.format`
 
 Override the OpenAPI `format` string for a slot's emitted schema. Useful
