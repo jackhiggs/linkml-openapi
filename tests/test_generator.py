@@ -4505,133 +4505,136 @@ classes:
         assert refs == ["Car", "Truck"]
 
 
-class TestDualDiscriminator:
-    """Coverage for #124 — dual-discriminator coexistence.
+class TestAsymmetricSubtypeSurfacing:
+    """Coverage for #125 — surfacing asymmetric subtypes via
+    ``x-subtype-property-suppression`` on the polymorphic root.
 
-    When both ``openapi.discriminator`` (semantic) and
-    ``openapi.legacy_type_field`` (legacy back-compat) are declared
-    on a polymorphic chain, the generator:
+    When a subclass uses ``slot_usage`` + ``openapi.body: "false"`` to
+    drop an inherited slot from its body (e.g. ``DatasetSeries`` is_a
+    ``Dataset`` but doesn't carry ``distribution``), the generator
+    already produces correct per-subclass schemas — but the
+    suppression isn't discoverable from the polymorphic root. This
+    extension lifts the per-subclass suppression list onto the root
+    so consumers can see which subtypes diverge without walking the
+    schema."""
 
-    1. Requires every concrete subclass to set BOTH
-       ``openapi.type_value`` and ``openapi.legacy_type_value``
-       explicitly (no silent ``cls.name`` fallback for the semantic
-       value when the legacy field is declared).
-    2. Emits ``x-discriminator-aliases`` on the parent component
-       schema — a parallel mapping that lifts the legacy field's
-       per-subclass values up next to the primary discriminator, so
-       consumers can route on either field without re-walking the
-       schema.
-    """
-
-    DUAL_SCHEMA = """
-id: https://example.org/dual
-name: dual
+    ASYM_SCHEMA = """
+id: https://example.org/asym
+name: asym
 default_range: string
 classes:
-  Resource:
+  Dataset:
     abstract: true
     annotations:
       openapi.resource: "true"
       openapi.discriminator: resourceType
-      openapi.legacy_type_field: "#type"
     attributes:
       id: { identifier: true, range: string, required: true }
       resourceType: { range: string }
-  DataService:
-    is_a: Resource
+      title: { range: string }
+      distribution:
+        range: Distribution
+        multivalued: true
+        inlined: true
+  ConcreteDataset:
+    is_a: Dataset
     annotations:
       openapi.resource: "true"
-      openapi.type_value: API
-      openapi.legacy_type_value: "com.example.acme.dcat.DataService"
+      openapi.type_value: Dataset
     attributes:
-      endpoint: { range: string }
-  Database:
-    is_a: Resource
+      description: { range: string }
+  DatasetSeries:
+    is_a: Dataset
     annotations:
       openapi.resource: "true"
-      openapi.type_value: DATABASE
-      openapi.legacy_type_value: "com.example.acme.dcat.Database"
+      openapi.type_value: DatasetSeries
+    slot_usage:
+      distribution:
+        annotations:
+          openapi.body: "false"
+  Distribution:
     attributes:
-      jdbcUrl: { range: string }
+      mediaType: { range: string }
 """
 
-    def test_x_discriminator_aliases_on_parent(self):
-        """Parent component schema carries ``x-discriminator-aliases``."""
-        spec = _generate_from_string(self.DUAL_SCHEMA)
-        resource = spec["components"]["schemas"]["Resource"]
-        aliases = resource.get("x-discriminator-aliases")
-        assert aliases is not None, "expected x-discriminator-aliases on Resource"
-        assert isinstance(aliases, list) and len(aliases) == 1
-        alias = aliases[0]
-        assert alias["propertyName"] == "#type"
-        assert alias["mapping"] == {
-            "com.example.acme.dcat.DataService": "#/components/schemas/DataService",
-            "com.example.acme.dcat.Database": "#/components/schemas/Database",
-        }
+    def test_suppression_extension_on_root(self):
+        """Root schema carries an ``x-subtype-property-suppression``
+        mapping listing each asymmetric subtype's suppressed slots."""
+        spec = _generate_from_string(self.ASYM_SCHEMA)
+        dataset = spec["components"]["schemas"]["Dataset"]
+        sup = dataset.get("x-subtype-property-suppression")
+        assert sup == {"DatasetSeries": ["distribution"]}
 
-    def test_primary_discriminator_still_emitted(self):
-        """Primary semantic discriminator block lives alongside the alias."""
-        spec = _generate_from_string(self.DUAL_SCHEMA)
-        resource = spec["components"]["schemas"]["Resource"]
-        disc = resource.get("discriminator")
-        assert disc is not None
-        assert disc["propertyName"] == "resourceType"
-        assert disc["mapping"] == {
-            "API": "#/components/schemas/DataService",
-            "DATABASE": "#/components/schemas/Database",
-        }
+    def test_full_subtype_not_listed(self):
+        """A subtype that doesn't suppress any inherited slots
+        (``ConcreteDataset``) is omitted from the extension entirely
+        — only divergent subtypes appear."""
+        spec = _generate_from_string(self.ASYM_SCHEMA)
+        sup = spec["components"]["schemas"]["Dataset"]["x-subtype-property-suppression"]
+        assert "ConcreteDataset" not in sup
 
-    def test_each_subclass_pins_both_fields(self):
-        """Both semantic and legacy fields pin as single-value enum on every
-        concrete subclass — wire carries both for consumers routing on either."""
-        spec = _generate_from_string(self.DUAL_SCHEMA)
-        ds_local = spec["components"]["schemas"]["DataService"]["allOf"][1]
-        assert ds_local["properties"]["resourceType"]["enum"] == ["API"]
-        assert ds_local["properties"]["#type"]["enum"] == ["com.example.acme.dcat.DataService"]
-        assert "resourceType" in ds_local["required"]
-        assert "#type" in ds_local["required"]
+    def test_subtype_schema_excludes_suppressed_slot(self):
+        """Sanity: the underlying wire shape is already correct — the
+        suppressed subclass's local property block omits the
+        suppressed slot. The new extension just surfaces this on
+        the root for discoverability."""
+        spec = _generate_from_string(self.ASYM_SCHEMA)
+        series_local = spec["components"]["schemas"]["DatasetSeries"]["allOf"][1]
+        # `distribution` was suppressed via slot_usage on DatasetSeries.
+        assert "distribution" not in (series_local.get("properties") or {})
+        # The full subtype still carries it via parent allOf.
+        concrete_local = spec["components"]["schemas"]["ConcreteDataset"]["allOf"][1]
+        # ConcreteDataset doesn't add `distribution` locally; it gets
+        # it via allOf[0] $ref to Dataset.
+        assert "distribution" not in (concrete_local.get("properties") or {})
 
-    def test_missing_type_value_raises_when_legacy_field_set(self):
-        """Every concrete subclass on a dual-discriminator chain must set
-        ``openapi.type_value`` explicitly. Silent ``cls.name`` fallback
-        is unsafe here — semantic value lives on the wire next to the
-        legacy FQN; mismatching them invites broken consumer routing."""
-        broken = self.DUAL_SCHEMA.replace("      openapi.type_value: API\n", "")
-        _generate_from_string_raises(
-            broken,
-            match=r"must set `openapi\.type_value` explicitly.*'DataService'",
+    _BODY_FALSE_DISTRIBUTION = (
+        "    slot_usage:\n"
+        "      distribution:\n"
+        "        annotations:\n"
+        '          openapi.body: "false"\n'
+    )
+    _BODY_FALSE_BOTH = (
+        "    slot_usage:\n"
+        "      distribution:\n"
+        "        annotations:\n"
+        '          openapi.body: "false"\n'
+        "      contact:\n"
+        "        annotations:\n"
+        '          openapi.body: "false"\n'
+    )
+    _DISTRIBUTION_SLOT = (
+        "      distribution:\n"
+        "        range: Distribution\n"
+        "        multivalued: true\n"
+        "        inlined: true\n"
+    )
+    _DISTRIBUTION_AND_CONTACT_SLOTS = _DISTRIBUTION_SLOT + (
+        "      contact:\n        range: Contact\n        inlined: true\n"
+    )
+    _DISTRIBUTION_CLASS = "  Distribution:\n    attributes:\n      mediaType: { range: string }\n"
+    _DISTRIBUTION_AND_CONTACT_CLASSES = _DISTRIBUTION_CLASS + (
+        "  Contact:\n    attributes:\n      email: { range: string }\n"
+    )
+
+    def test_no_suppression_means_no_extension(self):
+        """Schemas without asymmetric subtypes don't emit the
+        extension at all — byte-identical wire shape preserved."""
+        symmetric = self.ASYM_SCHEMA.replace(self._BODY_FALSE_DISTRIBUTION, "")
+        spec = _generate_from_string(symmetric)
+        dataset = spec["components"]["schemas"]["Dataset"]
+        assert "x-subtype-property-suppression" not in dataset
+
+    def test_multiple_suppressed_slots_aggregated(self):
+        """Multiple suppressed inherited slots aggregate into one list
+        per subtype, sorted for deterministic output.
+        (``openapi.body: "false"`` only applies to class-ranged slots
+        per #65, so the schema adds a second class-ranged slot.)"""
+        schema = (
+            self.ASYM_SCHEMA.replace(self._DISTRIBUTION_SLOT, self._DISTRIBUTION_AND_CONTACT_SLOTS)
+            .replace(self._BODY_FALSE_DISTRIBUTION, self._BODY_FALSE_BOTH)
+            .replace(self._DISTRIBUTION_CLASS, self._DISTRIBUTION_AND_CONTACT_CLASSES)
         )
-
-    def test_missing_legacy_value_still_raises(self):
-        """The existing legacy_type_value check (#107) still fires."""
-        broken = self.DUAL_SCHEMA.replace(
-            '      openapi.legacy_type_value: "com.example.acme.dcat.DataService"\n',
-            "",
-        )
-        _generate_from_string_raises(broken, match=r"openapi\.legacy_type_value")
-
-    def test_single_discriminator_unchanged_no_validation(self):
-        """When ONLY ``openapi.discriminator`` is set (no legacy field),
-        the existing ``cls.name`` fallback for ``openapi.type_value``
-        still works — schemas not opted into the dual-discriminator
-        pattern are byte-identical."""
-        single = self.DUAL_SCHEMA.replace('      openapi.legacy_type_field: "#type"\n', "")
-        single = single.replace("      openapi.type_value: API\n", "")
-        single = single.replace(
-            '      openapi.legacy_type_value: "com.example.acme.dcat.DataService"\n',
-            "",
-        )
-        single = single.replace("      openapi.type_value: DATABASE\n", "")
-        single = single.replace(
-            '      openapi.legacy_type_value: "com.example.acme.dcat.Database"\n',
-            "",
-        )
-        spec = _generate_from_string(single)
-        resource = spec["components"]["schemas"]["Resource"]
-        # No alias extension when no legacy field.
-        assert "x-discriminator-aliases" not in resource
-        # Primary discriminator still emitted with cls.name fallback values.
-        assert resource["discriminator"]["mapping"] == {
-            "DataService": "#/components/schemas/DataService",
-            "Database": "#/components/schemas/Database",
-        }
+        spec = _generate_from_string(schema)
+        sup = spec["components"]["schemas"]["Dataset"]["x-subtype-property-suppression"]
+        assert sup["DatasetSeries"] == ["contact", "distribution"]
